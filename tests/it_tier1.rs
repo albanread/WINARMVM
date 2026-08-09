@@ -7982,6 +7982,7 @@ Smalltalk quit: 0.
 "#;
 
 #[test]
+#[cfg_attr(windows, ignore = "P2: child dies on a compiled brk; no VEH (MIGRATION.md §3.2)")]
 fn b4_nlr_send_block_splices() {
     osr_phase_b_differential("b4_first", B4_FIRST, &[], false, &[]);
     // The splice observable: at least one NLR block spliced at compile time.
@@ -7989,6 +7990,7 @@ fn b4_nlr_send_block_splices() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "P2: child dies on a compiled brk; no VEH (MIGRATION.md §3.2)")]
 fn b4_nlr_splice_observable() {
     // Direct stat needle: the caller compiles at t=200 and the do: block-arg
     // splice runs the NlrTos arm.
@@ -7996,11 +7998,13 @@ fn b4_nlr_splice_observable() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "P2: child dies on a compiled brk; no VEH (MIGRATION.md §3.2)")]
 fn b4_deopt_inside_spliced_nlr_block() {
     osr_phase_b_differential("b4_deopt", B4_DEOPT, &[], false, &[]);
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "P2: child dies on a compiled brk; no VEH (MIGRATION.md §3.2)")]
 fn b4_deopt_inside_spliced_nlr_block_stress() {
     osr_phase_b_differential(
         "b4_deopt_ds",
@@ -8019,6 +8023,7 @@ fn b4_deopt_inside_spliced_nlr_block_stress() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "P2: child dies on a compiled brk; no VEH (MIGRATION.md §3.2)")]
 fn b5_conditional_nlr_blockarg_splices() {
     osr_phase_b_differential(
         "b5_cond",
@@ -8030,6 +8035,7 @@ fn b5_conditional_nlr_blockarg_splices() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "P2: child dies on a compiled brk; no VEH (MIGRATION.md §3.2)")]
 fn b5_conditional_nlr_blockarg_stress() {
     osr_phase_b_differential(
         "b5_cond_ds",
@@ -8067,6 +8073,7 @@ Smalltalk quit: 0.
 "#;
 
 #[test]
+#[cfg_attr(windows, ignore = "P2: child dies on a compiled brk; no VEH (MIGRATION.md §3.2)")]
 fn b5_zero_iteration_spliced_extent_fall_through() {
     osr_phase_b_differential("b5_zero", B5_ZERO_ITER, &[], false, &[]);
 }

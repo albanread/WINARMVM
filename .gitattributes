@@ -2,3 +2,12 @@
 # section 4 -- the WINVM lesson: a CRLF slip corrupts golden transcripts and
 # .mst world sources that both repos share verbatim).
 * text=auto eol=lf
+
+# The one deliberate exception: Strongtalk's original reference pages carry
+# CRLF in the blobs themselves, inherited from MACVM and from the 2002 release
+# before it. They are a historical archive — served as static assets, never
+# parsed by the VM, and `gui/` is not even in the Windows workspace.
+# Normalizing them would be a ~9,300-line diff that diverges 64 files from
+# MACVM upstream and buys nothing. Marked here so the state is intentional
+# rather than an anomaly the next sweep "corrects".
+gui/reference/** -text
