@@ -3143,6 +3143,79 @@ mod tests {
         assert_eq!(out.result, 0, "continue outcome carries no result");
     }
 
+    /// WINARM (P3 D1, `tests_p03.md` `stub_frames_measured`): every
+    /// hand-written stub's frame, decoded out of its PUBLISHED machine words
+    /// (`nmethod::measure_frame_bytes`) rather than restated from the
+    /// constants the builders passed, and asserted under the Windows
+    /// stack-probe limit. The `eprintln!` is the audit table the sprint's
+    /// status entry quotes — `cargo test -- --nocapture stub_frames_measured`
+    /// reprints it at any later commit.
+    ///
+    /// Covers the deopt trampolines and the FFI trampolines too, since all
+    /// three installers publish into one cache and this is the single place
+    /// the whole hand-written inventory is enumerable.
+    #[test]
+    fn stub_frames_measured() {
+        use crate::codecache::nmethod::{measure_frame_bytes, MAX_UNPROBED_FRAME_BYTES};
+
+        let mut cache = test_cache();
+        let s = install(&mut cache);
+        let deopt = crate::codecache::deopt_trap::install(&mut cache);
+
+        let handles: Vec<(&str, CodeHandle)> = vec![
+            ("call_stub", s.call_stub),
+            ("stub_poll", s.stub_poll),
+            ("resolve", s.resolve),
+            ("c2i_shared", s.c2i_shared),
+            ("mega_shared", s.mega_shared),
+            ("dnu", s.dnu),
+            ("must_be_boolean", s.must_be_boolean),
+            ("alloc_slow", s.alloc_slow),
+            ("call_primitive", s.call_primitive),
+            ("nlr_originate", s.nlr_originate),
+            ("not_entrant", s.not_entrant),
+            ("deopt_return", s.deopt_return),
+            ("box_double", s.box_double),
+            ("box_float64x2", s.box_float64x2),
+            ("box_float32x4", s.box_float32x4),
+            ("box_int32x4", s.box_int32x4),
+            ("value_dispatch[0]", s.value_dispatch[0]),
+            ("value_dispatch[1]", s.value_dispatch[1]),
+            ("value_dispatch[2]", s.value_dispatch[2]),
+            ("value_dispatch[3]", s.value_dispatch[3]),
+            ("deopt_uncommon", deopt.uncommon),
+            ("deopt_assert", deopt.assert),
+        ];
+
+        let mut worst = 0u32;
+        let mut worst_name = "";
+        for (name, h) in &handles {
+            let bytes = measure_frame_bytes(h.as_bytes());
+            eprintln!(
+                "[P3 D1] stub {name:<20} frame={bytes:>5} bytes  code={} bytes",
+                h.len
+            );
+            assert!(
+                bytes < MAX_UNPROBED_FRAME_BYTES,
+                "stub {name}'s frame is {bytes} bytes, at or over the Windows \
+                 unprobed limit of {MAX_UNPROBED_FRAME_BYTES} — it would need an \
+                 explicit probe loop (MIGRATION.md §3.4)"
+            );
+            if bytes > worst {
+                worst = bytes;
+                worst_name = name;
+            }
+        }
+        eprintln!("[P3 D1] worst stub frame: {worst_name} = {worst} bytes (limit {MAX_UNPROBED_FRAME_BYTES})");
+        // Sanity that the decoder saw anything at all — a decoder that
+        // silently matched nothing would "pass" this whole test vacuously,
+        // which is exactly the failure mode the audit exists to avoid.
+        assert!(
+            worst >= 16,
+            "no stub frame was decoded at all — measure_frame_bytes matched nothing"
+        );
+    }
+
     #[test]
     fn stubs_install_and_publish() {
         let mut cache = test_cache();

@@ -16,7 +16,9 @@
 
 use macvm::codecache::guard::JitWriteGuard;
 use macvm::codecache::CodeCache;
-use macvm::compiler::assembler::{imm, mem_post, mem_pre, sp, x, xr, Assembler, Cond, RelocKind};
+use macvm::compiler::assembler::{
+    imm, mem, mem_post, mem_pre, sp, x, xr, Assembler, Cond, RelocKind,
+};
 use macvm::compiler::jasm_assembler::JasmAssembler;
 use macvm::vendor::wfasm::relocpatch::{abs_veneer, VENEER_LEN};
 
@@ -160,6 +162,210 @@ fn patch_and_rerun_branch26() {
 
     cc.patch_branch26(site, ret_2 as u64);
     assert_eq!(unsafe { call1(caller, 0) }, 2);
+}
+
+/// WINARM (P3 D3): a 16-byte, all-integer, `#[repr(C)]` struct returned by
+/// value from a real Rust `extern "C"` function — the exact shape of
+/// `codecache::stubs::PollOutcome`, which `stub_poll` reads out of `x0:x1`
+/// with no hidden-pointer handling anywhere.
+///
+/// Field values are chosen so a swap, a truncation, or a stale register all
+/// show up distinctly rather than aliasing each other.
+#[repr(C)]
+struct Pair16 {
+    lo: u64,
+    hi: u64,
+}
+
+extern "C" fn make_pair16(seed: u64) -> Pair16 {
+    Pair16 {
+        lo: seed ^ 0x0123_4567_89AB_CDEF,
+        hi: seed.wrapping_mul(0x1000_0001) | 0x8000_0000_0000_0000,
+    }
+}
+
+/// WINARM (P3 D3, `tests_p03.md` `struct16_return_in_x0_x1`): the hazard
+/// that ISN'T here, turned into a test.
+///
+/// On Windows **x64** a struct larger than 8 bytes is returned through a
+/// caller-allocated buffer whose address the caller passes in a *hidden
+/// first argument* (`rcx`), shifting every real argument one register right
+/// — the exact rule that bit WINVM at `rt_poll`, whose `PollOutcome` the
+/// hand-written `stub_poll` reads straight out of the return registers.
+/// AArch64 has no such rule at this size: AAPCS64 §6.9 returns any
+/// composite of 16 bytes or less in `x0`(`:x1`), and Microsoft's ARM64 ABI
+/// documentation adopts AAPCS64 unchanged here — so Apple and Windows agree
+/// and `stub_poll` is correct on both (MIGRATION.md §3.4, row "Struct
+/// returns ≤16 B").
+///
+/// This asserts it against the *emitted* code path rather than against Rust
+/// calling Rust: published A64 calls the Rust `extern "C"` through
+/// `call_far`, then stores BOTH return registers to a caller-supplied
+/// buffer. `x0` alone passing would not prove anything — a hidden-pointer
+/// ABI would also leave something plausible in `x0` — so the test's whole
+/// weight is on `x1` carrying field 1.
+#[test]
+fn struct16_return_in_x0_x1() {
+    let mut a = JasmAssembler::new();
+    // Frame: 32 bytes — [x29]=fp, [x29+8]=lr, [x29+16] = the out pointer,
+    // which must survive the call (x0 is about to become the argument and
+    // then the low half of the result).
+    a.emit("stp", &[x(29), x(30), mem_pre(31, -32)]);
+    a.emit("mov", &[x(29), sp()]);
+    a.emit("str", &[x(0), mem(29, 16)]); // save out ptr
+    a.emit("mov", &[x(0), imm(0x5A5A)]); // the seed argument
+    let lit = a.literal_u64(
+        make_pair16 as *const () as u64,
+        Some(RelocKind::RuntimeAddr),
+    );
+    a.call_far(lit); // clobbers x16; x0:x1 = the returned struct
+    a.emit("ldr", &[x(2), mem(29, 16)]); // reload out ptr (x2 is caller-saved scratch)
+    a.emit("str", &[x(0), mem(2, 0)]); // out[0] = field 0 (x0)
+    a.emit("str", &[x(1), mem(2, 8)]); // out[1] = field 1 (x1)
+    a.emit("ldp", &[x(29), x(30), mem_post(31, 32)]);
+    a.emit("ret", &[]);
+    let blob = a.finish();
+
+    let mut cc = CodeCache::new(1 << 16).unwrap();
+    let h = cc.alloc(blob.code.len()).unwrap();
+    let entry = cc.publish(h, &blob);
+
+    let mut out = [0u64; 2];
+    let observed = unsafe { call1(entry, out.as_mut_ptr() as u64) };
+
+    let expected = make_pair16(0x5A5A);
+    assert_eq!(
+        out[0], expected.lo,
+        "field 0 must arrive in x0 (got {:#x}, want {:#x})",
+        out[0], expected.lo
+    );
+    assert_eq!(
+        out[1], expected.hi,
+        "field 1 must arrive in x1 — a hidden-pointer (sret) ABI would leave \
+         this register untouched or holding the buffer address (got {:#x}, want {:#x})",
+        out[1], expected.hi
+    );
+    assert_eq!(
+        observed, expected.lo,
+        "the emitted function's own return value is still x0 after the stores"
+    );
+    // Independent of the emitted path: the type really is the 16-byte,
+    // two-8-byte-field shape the ABI rule is about, so the assertion above
+    // is about register allocation and not about a struct that happened to
+    // fit in one register.
+    assert_eq!(std::mem::size_of::<Pair16>(), 16);
+    assert_eq!(std::mem::offset_of!(Pair16, lo), 0);
+    assert_eq!(std::mem::offset_of!(Pair16, hi), 8);
+}
+
+/// WINARM (P3 D3, `tests_p03.md` `rt_set_nonscalar_grep_pinned`): WINVM's
+/// exhaustiveness check, re-run here because the `rt_*` set has grown since.
+/// Greps every `extern "C" fn rt_*` in `src/` and classifies its return
+/// type. Everything must be a register-sized scalar, `()`, or `!` — with
+/// exactly ONE non-scalar exception, `rt_poll`'s `PollOutcome`, pinned by
+/// `struct16_return_in_x0_x1` above.
+///
+/// A Rust test rather than a shell script on purpose: `just`'s recipes are
+/// POSIX-shell on this host only by way of a `windows-shell` setting, and a
+/// gate item that silently stops running is worse than no gate item.
+#[test]
+fn rt_set_nonscalar_grep_pinned() {
+    use std::path::Path;
+
+    /// The one known non-scalar return, and the type it returns.
+    const KNOWN_NONSCALAR: &[(&str, &str)] = &[("rt_poll", "PollOutcome")];
+
+    fn walk(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+        for e in std::fs::read_dir(dir).expect("read_dir") {
+            let p = e.expect("dir entry").path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                out.push(p);
+            }
+        }
+    }
+
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    walk(&src, &mut files);
+    assert!(
+        files.len() > 50,
+        "src/ walk found only {} files",
+        files.len()
+    );
+
+    // (name, return type as written) for every rt_* extern in the tree.
+    let mut found: Vec<(String, String)> = Vec::new();
+    for f in &files {
+        let text = std::fs::read_to_string(f).expect("read src file");
+        let bytes: Vec<&str> = text.lines().collect();
+        for (i, line) in bytes.iter().enumerate() {
+            let Some(pos) = line.find("extern \"C\" fn rt_") else {
+                continue;
+            };
+            let after = &line[pos + "extern \"C\" fn ".len()..];
+            let name: String = after
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            // The signature may wrap; join forward until the `{` that opens
+            // the body, which is the first `{` at or after the closing `)`.
+            let mut sig = String::new();
+            for l in bytes.iter().skip(i) {
+                sig.push_str(l.trim());
+                sig.push(' ');
+                if l.trim_end().ends_with('{') {
+                    break;
+                }
+            }
+            let ret = match sig.rfind("-> ") {
+                // `-> T {` — take what sits between the arrow and the brace.
+                Some(k) => sig[k + 3..]
+                    .trim_end()
+                    .trim_end_matches('{')
+                    .trim()
+                    .to_string(),
+                None => "()".to_string(),
+            };
+            found.push((name, ret));
+        }
+    }
+
+    assert!(
+        found.len() >= 20,
+        "expected the whole rt_* set (>= 20 fns), found {}: {found:?}",
+        found.len()
+    );
+
+    // A "scalar" return is one that AAPCS64 and the MS ARM64 ABI both put
+    // in a single register with no hidden pointer and no register shift:
+    // integers, pointers, `()` (nothing), and `!` (never returns).
+    let scalar = |t: &str| {
+        matches!(
+            t,
+            "u64" | "i64" | "u32" | "i32" | "usize" | "isize" | "()" | "!" | "bool"
+        ) || t.starts_with("*const ")
+            || t.starts_with("*mut ")
+    };
+
+    let nonscalar: Vec<&(String, String)> = found.iter().filter(|(_, t)| !scalar(t)).collect();
+    let mut names: Vec<(&str, &str)> = nonscalar
+        .iter()
+        .map(|(n, t)| (n.as_str(), t.as_str()))
+        .collect();
+    names.sort_unstable();
+    let mut want: Vec<(&str, &str)> = KNOWN_NONSCALAR.to_vec();
+    want.sort_unstable();
+
+    assert_eq!(
+        names, want,
+        "the non-scalar `rt_*` return set changed. Every entry here is an ABI \
+         risk on a port: on ARM64 a composite <= 16 bytes returns in x0:x1 (fine, \
+         and pinned by struct16_return_in_x0_x1), but anything LARGER returns \
+         through a hidden pointer in x8 and the hand-written stub that reads it \
+         must be updated. Full rt_* census: {found:?}"
+    );
 }
 
 /// WINARM P1 (`docs/sprints/tests_p01.md` gate item 2): the same retarget,

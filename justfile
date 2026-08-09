@@ -78,6 +78,122 @@ gate-p02: gate-p01
     MACVM_JIT=off cargo run --release -- run scripts/p2-deopt-roundtrip.mst --world world
     MACVM_JIT=threshold=2 cargo run --release -- run scripts/p2-deopt-roundtrip.mst --world world
 
+# P3 (docs/sprints/tests_p03.md) — the JIT-vs-interpreter DIFFERENTIAL, gate
+# item 4. Every corpus the project keeps, run in three JIT modes, stdout and
+# exit status compared byte-for-byte: the world's whole in-language suite,
+# the golden `.mst` transcripts, and the tracked JIT-bug repro corpus. The
+# expectation is ZERO differences — unlike WINVM's x64 port, which lived with
+# seven, this backend has no closure/NLR/OSR gaps, so a difference here is a
+# port regression and blocks (tests_p03.md gate item 4).
+#
+# Three modes, not two: `off` is the oracle, `threshold=20` compiles nearly
+# everything with warm ICs, `threshold=1000` compiles only the genuinely hot
+# methods and therefore exercises a DIFFERENT set of compiled/interpreted
+# boundaries (a bug that only shows at one tier mix would otherwise hide).
+# Note what `threshold=20` is: `MACVM_JIT=threshold=1` is REFUSED by
+# `VmOptions::parse_jit` and silently becomes `JIT_THRESHOLD_FLOOR` = 20, so
+# the aggressive setting every gate in this file has ever run is 20. Spelling
+# it here rather than repeating the `=1` that does not mean what it says.
+diff-p03:
+    #!/usr/bin/env bash
+    # NOT `set -e`: several corpus files exit NONZERO by design (the
+    # `closure_dead_home_cannot_return` repro exits 1 — that IS its expected
+    # behaviour, and the test is that all three JIT modes agree on it), so
+    # errexit would abort the sweep on a correct result. Failure is tracked
+    # explicitly in `fail` and reported at the end.
+    set -uo pipefail
+    grep -v '^#' world/tests/tests.list | grep -v '^$' | sed 's|^|world/tests/|' | xargs cat > /tmp/macvm_world_tests.mst
+    BIN=./target/release/macvm
+    [ -x "$BIN" ] || { echo "diff-p03: build first (cargo build --release)" >&2; exit 2; }
+    fail=0
+    for f in /tmp/macvm_world_tests.mst tests/golden/*.mst tests/repros/*.mst; do
+        MACVM_JIT=off           "$BIN" run "$f" --world world >/tmp/p3d_off.txt  2>/dev/null; a=$?
+        MACVM_JIT=threshold=20  "$BIN" run "$f" --world world >/tmp/p3d_t20.txt  2>/dev/null; b=$?
+        MACVM_JIT=threshold=1000 "$BIN" run "$f" --world world >/tmp/p3d_t1k.txt 2>/dev/null; c=$?
+        if diff -q /tmp/p3d_off.txt /tmp/p3d_t20.txt >/dev/null \
+           && diff -q /tmp/p3d_off.txt /tmp/p3d_t1k.txt >/dev/null \
+           && [ "$a" = "$b" ] && [ "$a" = "$c" ]; then
+            printf '  same  %-52s exit=%s\n' "$(basename "$f")" "$a"
+        else
+            printf '  DIFF  %-52s exits=%s/%s/%s\n' "$(basename "$f")" "$a" "$b" "$c"
+            diff /tmp/p3d_off.txt /tmp/p3d_t20.txt | head -20 || true
+            fail=1
+        fi
+    done
+    [ "$fail" = 0 ] || { echo "FAIL: JIT-vs-interpreter differences (tests_p03.md gate item 4)" >&2; exit 1; }
+
+# P3 (docs/sprints/tests_p03.md) — tier-1 alive under every stress mode the
+# project has. Gate items 1-4 and 7.
+#
+# `--skip mandelvm` on every suite run, and it is NOT a weakening: the skipped
+# test renders 140 Mandelbrot frames and costs ~45 MINUTES in a debug build
+# (18 s in release — MIGRATION.md §8 records the whole disproof of the
+# "exception storm" it looks like). Running it four times over would make this
+# gate a three-hour job that nobody runs. It is covered by `just test-release`
+# and by `gate-p00`'s own `cargo test`.
+#
+# The compile-count tripwire (tests_p03.md's "a green suite that never
+# compiled anything is a false green") is not a shell grep here: it lives in
+# `it_world::compile_count_nonzero_at_threshold1`, which asserts
+# `vm.stats.compilations > 0` after loading the whole world + test corpus, so
+# it runs in EVERY line below rather than only in the one that remembered to
+# check.
+#
+# WHY THE GC-STRESS LINES ARE `--release` AND THE OTHERS ARE NOT. Measured,
+# not assumed (P3): `verify::verify_enabled()` is
+# `cfg!(debug_assertions) || MACVM_GC_VERIFY=1`, so a DEBUG build runs the
+# full cross-check heap verifier at every GC phase boundary — and
+# `MACVM_GC_STRESS=1` means a scavenge before EVERY allocation, so the pair
+# is a whole-heap walk per allocation. Numbers from this host: booting the
+# world and computing fib(15) takes 0.09 s (debug, no stress), 0.95 s (debug,
+# threshold=20, no stress), 0.30 s (release, stress AND JIT) — and does NOT
+# COMPLETE IN FOUR MINUTES in debug with `MACVM_GC_STRESS=1`, with the JIT
+# off, i.e. the JIT is not the factor and neither is the platform
+# (`memory/verify.rs` and `memory/scavenge.rs` are byte-identical to MACVM).
+# `gate-s08`'s own comment already recorded the shape of this ("30+ seconds
+# ... 0.6s under --release") and `soak-s08` already runs release for it.
+# Running the stressed suites in release is therefore this project's existing
+# discipline, not a weakening invented here — and the assertions that release
+# does drop (`debug_assert!`, the heap verifier) are all exercised by the
+# unstressed debug line above and by `gate-p00`'s own `cargo test`.
+# `MACVM_GC_VERIFY=1` opts a release run back into the verifier if you ever
+# want the pair; budget hours, not minutes.
+gate-p03: gate-p02
+    # item 7: no P1/P2 gating marks left anywhere (comment-blind literal grep;
+    # the P5 marks and the two VM-defect marks are named exclusions).
+    ! grep -rn 'ignore = "P1\|ignore = "P2' src/ tests/
+    # item 1: everything eligible compiles. DEBUG — this is the line that
+    # carries `debug_assert!`, including P3 D1's frame-size invariant.
+    MACVM_JIT=threshold=1 cargo test --no-fail-fast -- --skip mandelvm
+    # item 3a: deopt stress alone. Debug too — it costs nothing extra.
+    MACVM_DEOPT_STRESS=1 cargo test --no-fail-fast -- --skip mandelvm
+    # item 2: the S12 flagship — moving GC under compiled frames.
+    MACVM_JIT=threshold=1 MACVM_GC_STRESS=1 cargo test --release --no-fail-fast -- --skip mandelvm
+    # item 3b: all three modes at once (the S14 bar).
+    MACVM_JIT=threshold=1 MACVM_GC_STRESS=1 MACVM_DEOPT_STRESS=1 cargo test --release --no-fail-fast -- --skip mandelvm
+    # item 2 again, from the other side: the combined-stress world run must
+    # show real collections with live compiled frames on the native stack.
+    just bridge-stats-s11
+    # item 4: zero JIT-vs-interpreter differences over every corpus.
+    cargo build --release
+    just diff-p03
+
+# P3 (tests_p03.md "Stress/negative tests") — the FLAKY-CATCHER. The
+# combined three-mode run, three consecutive times, because WINVM's
+# card-boundary bug was found by run-to-run variance and not by any single
+# run: give variance a chance to speak. Release for the reason gate-p03's
+# own header explains. Separate from the gate so the gate stays a
+# single-pass claim and this stays the thing you run before signing a
+# sprint off.
+soak-p03:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for i in 1 2 3; do
+        echo "=== combined-stress pass $i/3 ==="
+        MACVM_JIT=threshold=1 MACVM_GC_STRESS=1 MACVM_DEOPT_STRESS=1 \
+            cargo test --release --no-fail-fast -- --skip mandelvm
+    done
+
 # Sprint acceptance gates. Later sprints append stress runs to their gate
 # (e.g. `MACVM_GC_STRESS=1 just test` from S7 on).
 gate-s00: ci

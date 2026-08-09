@@ -1498,6 +1498,16 @@ fn compile_method_full(
             }
         }),
     };
+    // WINARM (P3 D1): the stack-probe invariant, checked at the one point
+    // where a compiled frame's size becomes final. See
+    // `codecache::nmethod`'s own D1 block for why Windows needs this and
+    // macOS does not; the call is unconditional (no `#[cfg]`) because the
+    // bound it checks is the tighter of the two platforms' and holds on
+    // both, so mac behaviour stays byte-identical while the invariant
+    // becomes checkable everywhere it is compiled.
+    crate::codecache::nmethod::note_nmethod_frame_bytes(
+        crate::codecache::nmethod::nmethod_frame_bytes(nm.frame_slots),
+    );
     // S12 D1 enforcement point 2: "debug + stress" — reuses the existing
     // heap-verifier's own gate (`MACVM_GC_VERIFY=1` opts a release build
     // in too) rather than a second, parallel env var for the same concept.

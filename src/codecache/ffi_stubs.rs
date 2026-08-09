@@ -250,6 +250,34 @@ mod tests {
         CodeCache::new(1 << 16).unwrap()
     }
 
+    /// WINARM (P3 D1, `tests_p03.md` `stub_frames_measured`, FFI side): the
+    /// three FFI trampolines' frames, decoded from their published words.
+    /// They live here rather than in `stubs.rs`'s twin because `FfiStubs`'
+    /// handles are private to this module. Each is `16` (the fp/lr record)
+    /// + `64` (the AAPCS64 stack-argument area for integer args 9..16 that
+    /// `emit_ffi_prologue` carves unconditionally) = 80 bytes — the same on
+    /// both platforms, since the marshaling shape is arch-derived, not
+    /// OS-derived.
+    #[test]
+    fn ffi_trampoline_frames_measured() {
+        use crate::codecache::nmethod::{measure_frame_bytes, MAX_UNPROBED_FRAME_BYTES};
+
+        let mut cache = test_cache();
+        let s = install(&mut cache);
+        for (name, h) in [("ret_g", s.ret_g), ("ret_f", s.ret_f), ("ret_v", s.ret_v)] {
+            let bytes = measure_frame_bytes(h.as_bytes());
+            eprintln!(
+                "[P3 D1] ffi stub {name:<6} frame={bytes:>5} bytes  code={} bytes",
+                h.len
+            );
+            assert_eq!(
+                bytes, 80,
+                "ffi {name}: 16-byte frame record + 64-byte stack-arg area"
+            );
+            assert!(bytes < MAX_UNPROBED_FRAME_BYTES);
+        }
+    }
+
     /// Simplest possible round-trip: a real, no-arg libc call through the
     /// `ret_g` trampoline. Proves the mechanism end-to-end against a REAL
     /// native function (not a test double) before any argument marshaling

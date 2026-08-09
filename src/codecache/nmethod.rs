@@ -156,6 +156,138 @@ pub struct IcSite {
     pub super_klass: Option<KlassOop>,
 }
 
+// ── WINARM (P3 D1): the Windows stack-probe invariant, made permanent ──────
+//
+// Microsoft's ABI (learn.microsoft.com, "Overview of ARM64 ABI conventions"
+// → *Stack*, and the identical x64 rule) requires that a thread's stack be
+// grown by TOUCHING its guard page, in order, one page at a time. The guard
+// page is a single PTE with PAGE_GUARD set; touching it raises
+// STATUS_GUARD_PAGE_VIOLATION, which the kernel handles by committing that
+// page and moving the guard one page further down. A prologue that drops SP
+// by more than one page and then writes below the page it skipped never
+// touches the guard at all — the write lands on reserved-but-uncommitted
+// memory and raises a plain STATUS_ACCESS_VIOLATION with the guard still
+// sitting above it, i.e. a fault the kernel cannot turn into stack growth.
+// That is why MSVC/clang-cl emit a `__chkstk` probe loop for any frame
+// larger than a page. macOS has no equivalent rule (Darwin grows the stack
+// in its own fault handler with no ordering requirement), which is why
+// nothing upstream in MACVM checks this. MIGRATION.md §3.4, row "Stack
+// probes".
+//
+// P3's audit answer is that no MACVM-emitted frame comes close: the JIT
+// spills a handful of slots, the interpreter's big frames live on the OS
+// thread stack and grow through ordinary C prologues, and the hand-written
+// stubs are fixed-size. Rather than leave that as an assumption that could
+// silently stop being true, the finalize path now CHECKS it, in the two
+// places a frame size is decided: [`note_nmethod_frame_bytes`] for compiled
+// methods, and — measured from the emitted bytes rather than restated —
+// [`measure_frame_bytes`] for the hand-written stubs, which their own tests
+// call. If this assert ever fires, the fix named by §3.4 is an explicit
+// probe loop in the prologue (one `ldr wzr, [sp, #-4096]` per page walked),
+// NOT a larger limit.
+
+/// The Windows-on-ARM64 page size — 4 KiB, `GetSystemInfo`'s `dwPageSize`
+/// on this host (P0 D4 audited it; `memory::reservation::page_size()` is
+/// the runtime query). Apple's 16 KiB would be a *looser* bound, so using
+/// the Windows number here is the conservative choice on both platforms and
+/// keeps this constant free of a `#[cfg]`.
+pub const STACK_PAGE_BYTES: u32 = 4096;
+
+/// sprint_p03_detail.md D1's "SLOP ≈ 512": headroom for what the frame
+/// itself does not account for — the callee's own pushes below our SP, the
+/// 16-byte SP alignment, and any leaf helper reached without a further
+/// probe. Subtracted from a page so the assert fires before the real
+/// hardware limit does.
+pub const PROBE_SLOP_BYTES: u32 = 512;
+
+/// The largest frame that provably needs no probe loop.
+pub const MAX_UNPROBED_FRAME_BYTES: u32 = STACK_PAGE_BYTES - PROBE_SLOP_BYTES;
+
+/// The fixed `stp x29, x30, [sp, #-16]!` frame record every non-frameless
+/// compiled unit opens with (`compiler::emit`'s prologue) — the part of the
+/// frame that is not spill slots.
+pub const FRAME_RECORD_BYTES: u32 = 16;
+
+/// The exact byte size of a compiled method's frame, mirroring
+/// `compiler::emit`'s own prologue arithmetic (`frame_bytes = round16(8 *
+/// frame_slots)`) plus the frame record the same prologue pushed first.
+/// A frameless unit (F1) has no prologue at all and is 0 by construction —
+/// `frame_slots == 0` there, so this returns just the record's 16 bytes,
+/// which is a strict over-estimate and therefore safe for an upper bound.
+pub fn nmethod_frame_bytes(frame_slots: u16) -> u32 {
+    FRAME_RECORD_BYTES + (((8 * frame_slots as u32) + 15) & !15)
+}
+
+/// The largest compiled frame this process has finalized, in bytes — the
+/// audit number `tests_p03.md`'s `frame_size_under_probe_limit` reads back
+/// after compiling a real corpus. `AtomicU32` because compilation happens
+/// on whichever thread a VM runs on (multi-VM workers), and this is a
+/// high-water mark, never a decision input.
+pub static MAX_NMETHOD_FRAME_BYTES_SEEN: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
+
+/// Called once per finalized nmethod (`compiler::driver::compile_method`).
+/// The `debug_assert!` is the permanent invariant; the high-water mark is
+/// the audit instrument.
+pub fn note_nmethod_frame_bytes(frame_bytes: u32) {
+    debug_assert!(
+        frame_bytes < MAX_UNPROBED_FRAME_BYTES,
+        "WINARM P3 D1: compiled frame of {frame_bytes} bytes exceeds the \
+         unprobed limit of {MAX_UNPROBED_FRAME_BYTES} ({STACK_PAGE_BYTES}-byte page \
+         minus {PROBE_SLOP_BYTES} slop). On Windows this prologue can skip the \
+         stack guard page and fault unrecoverably (MIGRATION.md §3.4). The fix \
+         is a probe loop in the prologue, not a bigger limit."
+    );
+    MAX_NMETHOD_FRAME_BYTES_SEEN.fetch_max(frame_bytes, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Reads the high-water mark back (test/audit accessor).
+pub fn max_nmethod_frame_bytes_seen() -> u32 {
+    MAX_NMETHOD_FRAME_BYTES_SEEN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Decodes the total stack a blob's prologue claims, straight out of the
+/// EMITTED machine words — deliberately not by restating the constants the
+/// builders passed, so a builder that changes its frame is measured, not
+/// re-asserted. Two forms allocate stack in this codebase, and only two
+/// (checked by grep over `src/codecache/` and `src/compiler/emit.rs`):
+///
+/// * `stp <Xt1>, <Xt2>, [sp, #-N]!` — pre-indexed store pair, `Rn == 31`,
+///   negative scaled `imm7`. Encoding (`vendor/wfasm/a64/encode.rs`
+///   `ldst_pair`): bits[31:22] = `1010100110`, imm7 at [21:15] scaled by 8.
+/// * `sub sp, sp, #N` — ADD/SUB immediate with `Rd == Rn == 31` (in this
+///   instruction class register 31 IS the SP, not xzr). Encoding
+///   (`add_sub_imm`): bits[31:23] = `110100010`, `sh` at [22], imm12 at
+///   [21:10].
+///
+/// Post-indexed `ldp ..., [sp], #N` (the teardown) is deliberately NOT
+/// counted — it releases stack, and a builder with two epilogue arms (the
+/// poll stub) would otherwise double-count. Returns the sum, i.e. the
+/// deepest SP excursion a straight-line prologue makes.
+pub fn measure_frame_bytes(code: &[u8]) -> u32 {
+    let mut total: u32 = 0;
+    for w in code.chunks_exact(4) {
+        let word = u32::from_le_bytes([w[0], w[1], w[2], w[3]]);
+        // stp <X>,<X>,[sp,#-N]!  (pre-index, store, 64-bit GPR pair)
+        if (word >> 22) == 0b1010_1001_10 && ((word >> 5) & 0x1F) == 31 {
+            let imm7 = ((word >> 15) & 0x7F) as i32;
+            // sign-extend 7 bits, then scale by 8 (X-class pair)
+            let off = if imm7 & 0x40 != 0 { imm7 - 128 } else { imm7 } * 8;
+            if off < 0 {
+                total += (-off) as u32;
+            }
+            continue;
+        }
+        // sub sp, sp, #imm12 (optionally <<12)
+        if (word >> 23) == 0b1_1010_0010 && ((word >> 5) & 0x1F) == 31 && (word & 0x1F) == 31 {
+            let sh = (word >> 22) & 1;
+            let imm12 = (word >> 10) & 0xFFF;
+            total += if sh == 1 { imm12 << 12 } else { imm12 };
+        }
+    }
+    total
+}
+
 pub struct Nmethod {
     pub id: NmethodId,
     /// Customization key — the receiver klass this nmethod was compiled
@@ -988,6 +1120,64 @@ mod tests {
             eden_kb: None,
             jit: crate::runtime::JitMode::Off,
         })
+    }
+
+    /// WINARM (P3 D1): the frame decoder, pinned against instructions this
+    /// very assembler emits — without this, a decoder whose bit patterns
+    /// were subtly wrong would make every frame read as 0 and turn the whole
+    /// stack-probe audit into a vacuous pass.
+    #[test]
+    fn measure_frame_bytes_decodes_known_prologues() {
+        use crate::compiler::assembler::{imm, mem_post, mem_pre, sp, x, Assembler};
+        use crate::compiler::jasm_assembler::JasmAssembler;
+
+        // The `call_stub` shape: one big pre-indexed frame record.
+        let mut a = JasmAssembler::new();
+        a.emit("stp", &[x(29), x(30), mem_pre(31, -160)]);
+        a.emit("ldp", &[x(29), x(30), mem_post(31, 160)]);
+        a.emit("ret", &[]);
+        assert_eq!(
+            measure_frame_bytes(&a.finish().code),
+            160,
+            "pre-indexed stp allocates; post-indexed ldp releases and must NOT count"
+        );
+
+        // The `emit_stub_prologue` shape: 16-byte record + an explicit
+        // `sub sp, sp, #N`, plus a matching `add` that must not subtract.
+        let mut a = JasmAssembler::new();
+        a.emit("stp", &[x(29), x(30), mem_pre(31, -16)]);
+        a.emit("mov", &[x(29), sp()]);
+        a.emit("sub", &[sp(), sp(), imm(64)]);
+        a.emit("add", &[sp(), sp(), imm(64)]);
+        a.emit("ldp", &[x(29), x(30), mem_post(31, 16)]);
+        assert_eq!(measure_frame_bytes(&a.finish().code), 80);
+
+        // A non-SP `sub` (ordinary arithmetic) must be ignored entirely —
+        // `stub_resolve` really does `sub x2, x29, #ROOTSPILL_BYTES`.
+        let mut a = JasmAssembler::new();
+        a.emit("sub", &[x(2), x(29), imm(64)]);
+        assert_eq!(measure_frame_bytes(&a.finish().code), 0);
+    }
+
+    /// WINARM (P3 D1): the arithmetic mirrors `compiler::emit`'s prologue.
+    /// `FRAME_BUDGET_SLOTS` (60) is the compiler's own pre-compile
+    /// eligibility bound on `ntemps + max_stack`; even at a frame_slots
+    /// count far beyond anything regalloc produces, the frame stays an
+    /// order of magnitude under a page.
+    #[test]
+    fn nmethod_frame_bytes_stays_far_under_a_page() {
+        assert_eq!(nmethod_frame_bytes(0), 16, "frame record only");
+        assert_eq!(nmethod_frame_bytes(1), 32, "8 bytes rounded to 16, plus 16");
+        assert_eq!(nmethod_frame_bytes(2), 32);
+        assert_eq!(nmethod_frame_bytes(3), 48);
+        // The compiler's own frame budget, and then some.
+        assert_eq!(nmethod_frame_bytes(60), 496);
+        assert!(nmethod_frame_bytes(60) < MAX_UNPROBED_FRAME_BYTES);
+        // The first frame_slots count that WOULD trip the limit, recorded so
+        // the headroom is a number and not an adjective: 445 slots, i.e.
+        // 7.4x the compiler's own 60-slot eligibility budget.
+        assert!(nmethod_frame_bytes(444) < MAX_UNPROBED_FRAME_BYTES);
+        assert!(nmethod_frame_bytes(445) >= MAX_UNPROBED_FRAME_BYTES);
     }
 
     /// A syntactically valid but never-allocated `KlassOop`/`SymbolOop`,

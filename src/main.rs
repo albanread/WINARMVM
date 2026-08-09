@@ -24,6 +24,11 @@ use macvm::oops::Oop;
 use macvm::runtime::{VmOptions, VmState};
 
 fn main() {
+    // WINARM (P0 D5, landed in P3): the emulation tripwire, before anything
+    // else runs — `sprint_p03_detail.md` Pitfalls require it to pass in the
+    // very process that produces a PERF.md number, and this is that process.
+    // Compile-time constants both sides, so it costs nothing per run.
+    macvm::assert_native_host();
     if std::env::args().any(|a| a == "--selftest-alloc-loop") {
         selftest_alloc_loop();
     }
@@ -208,6 +213,15 @@ fn print_vm_stats(vm: &VmState) {
     if !vm.options.trace.is_enabled("stats") {
         return;
     }
+    // WINARM (P3): the build's own arch/os, on the stats channel, so a
+    // recorded benchmark can be attributed to a NATIVE run from its own
+    // output rather than from a claim in a document. stderr, like every
+    // other line here — golden stdout transcripts stay byte-identical.
+    eprintln!(
+        "[stats] host arch={} os={}",
+        macvm::host_arch(),
+        macvm::host_os()
+    );
     eprintln!("{}", macvm::runtime::vm_state::format_vm_stats(vm));
 }
 

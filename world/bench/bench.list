@@ -2,3 +2,9 @@
 # Harness-format benches only (each embeds Bench and prints `name inner ms`).
 richards.mst
 deltablue.mst
+# WINARM (P3 D4): sprint_p03_detail.md asks PERF.md's Windows-ARM64 table for
+# Mandelbrot alongside these two. The existing Mandelbrot workloads all render
+# into a GUI Pixmap and time themselves per frame; this one drives the same
+# `Mandelbrot>>escapeAtRe:im:` over a fixed grid, checksum-verified, so it fits
+# the harness protocol and is comparable across builds and machines.
+mandelbrot.mst

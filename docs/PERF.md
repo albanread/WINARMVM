@@ -573,3 +573,365 @@ benchmarks to within rounding — the S24/OSR work since then hasn't regressed
 it, and sieve holds at its post-fix 97.1% (the pre-fix figure was 4.5%; see
 the OSR cold-send section above). Range: **98.6–99.8%** — the README's own
 figure, now reproducible from this file alone.
+
+# WINARM P3 — Windows on ARM64, the first native numbers (2026-08-09)
+
+Sprint P3 (`docs/sprints/sprint_p03_detail.md` D4). Everything below was
+measured on Windows, natively, by the same binary and the same harnesses the
+macOS numbers above come from. Standing rule 3 applies: **recorded, not
+gating** — with the two exceptions this file has always carried, the
+S10/S11 `bench-s10`/`bench-s11` tripwires (fail < 2x interpreter).
+
+## Environment
+
+- Host: Snapdragon X (X1E-78-100-class, `Qualcomm Oryon`), 8 cores / 8
+  threads, 3.4 GHz nominal (`Win32_Processor.MaxClockSpeed` reports 2956),
+  32 GiB RAM
+- OS: Windows 11 Home, build 10.0.26200, ARM64
+- Build: `cargo build --release`, rustc 1.97.1, host
+  `aarch64-pc-windows-msvc` (pinned in `rust-toolchain.toml`)
+- Tree: commit `04f9c6e` **plus P3's uncommitted working tree** (the D1
+  assert, the D1/D3 tests, `world/bench/mandelbrot.mst`, the arch tripwire)
+- Date: 2026-08-09
+
+**Proved native, not emulated, by the measuring process itself.** P0's
+status entry claimed a startup banner reported the architecture; there was
+no such banner in the tree (see MIGRATION.md §8's P3 entry). P3 added the
+check `tests_p00.md` had specified all along: `macvm::assert_native_host()`
+runs at the top of `main`, so every `macvm run` that produced a number below
+has passed it, and `MACVM_TRACE=stats` prints the build's own verdict:
+
+```
+[stats] host arch=aarch64 os=windows
+```
+
+This is a build fact, not a runtime probe, and that is deliberate: Windows'
+x64 translation layer would answer a runtime query, but it cannot change
+what `cfg!(target_arch)` compiled to.
+
+## D1 — stack-probe audit (the numbers, not the adjective)
+
+Windows requires a frame larger than one page (4 KiB here) to touch the
+stack guard page on the way down; one that skips past it faults
+unrecoverably. macOS has no such rule, so nothing upstream checked. The
+audit's answer is that MACVM is nowhere near it, and it is now
+`debug_assert!`ed at nmethod finalize
+(`codecache::nmethod::note_nmethod_frame_bytes`) instead of assumed.
+
+Limit used: `4096 - 512` slop = **3584 bytes**.
+
+Compiled frames — `16` (the `stp x29, x30, [sp, #-16]!` record) + `round16(8
+* frame_slots)`:
+
+| what | frame_slots | frame bytes | headroom |
+|---|---|---|---|
+| largest over the WHOLE world + test corpus, threshold 20 (1176 nmethods) | 74 | **608** | 5.9x |
+| the compiler's own eligibility budget (`FRAME_BUDGET_SLOTS` = 60) | 60 | 496 | 7.2x |
+| first size that would trip the limit | 445 | 3584 | — |
+
+Note `74 > 60`: `FRAME_BUDGET_SLOTS` bounds `ntemps + max_stack` of the
+OUTER method before compiling, and inline splicing adds vregs on top of it,
+so the real spill count legitimately exceeds the budget number. That is
+exactly why the audit measures instead of reasoning from the constant.
+
+Hand-written stubs, **decoded from the published machine words**
+(`nmethod::measure_frame_bytes` recognises `stp <X>,<X>,[sp,#-N]!` and `sub
+sp, sp, #N`), not restated from the builders' constants:
+
+| stub | frame bytes |
+|---|---|
+| `call_stub` (x19–x28 + d8–d15 + fp/lr) | **160** |
+| `stub_poll` (x0–x15 + fp/lr) | 144 |
+| `resolve`, `c2i_shared`, `mega_shared`, `dnu`, `must_be_boolean`, `alloc_slow`, `call_primitive`, `nlr_originate`, `not_entrant`, `box_double`, `box_float64x2`, `box_float32x4`, `box_int32x4`, `value_dispatch[0..3]` | 80 |
+| `deopt_return`, `deopt_uncommon`, `deopt_assert` | 16 |
+| FFI trampolines `ret_g` / `ret_f` / `ret_v` | 80 |
+
+Worst hand-written frame is `call_stub` at 160 bytes — **22x** headroom.
+No probe loop is needed and none was written (§3.4's own instruction: build
+it only when a real frame needs it).
+
+One incidental discovery worth recording: a frame over 4095 bytes could not
+even be *assembled* today. `sub sp, sp, #imm` goes through the vendored
+encoder's `add_sub_imm`, which refuses an immediate outside `0..=4095`, and
+`JasmAssembler::emit` turns that refusal into a panic. So the failure mode
+for an over-large frame is a loud assembler panic at compile time, not a
+silent stack fault at run time — a second, accidental guard that was already
+there.
+
+## D2 — W^X guard + icache census under real JIT load
+
+`MACVM_GUARD_COUNT=1` over the full in-language suite
+(`world/tests/tests.list` concatenated, 6626 assertions), release:
+
+| mode | compilations | write windows | icache bytes | bytes / window |
+|---|---|---|---|---|
+| `MACVM_JIT=off` | 0 | 55 | 3,392 | 62 |
+| `MACVM_JIT=threshold=20` | 1176 | 5,469 | 1,642,592 | 300 |
+| `MACVM_JIT=threshold=1000` | 372 | 1,201 | 216,772 | 180 |
+
+Sanity, not a gate. The shape is what a correct flush granularity looks
+like: ~4.7 windows per compiled method (publish, plus the IC-site and PIC
+patches that follow it), ~1.4 KiB of icache invalidation per nmethod —
+i.e. the nmethod's own body, not a region-wide flush. An order-of-magnitude
+excess (whole-cache flushes, or a flush per instruction) would show here as
+tens of megabytes; it does not. The JIT-off row is the floor: 55 windows is
+the one-time genesis stub publication, and it does not grow with the
+workload.
+
+**Δ against `sprint_p03_detail.md` D2**: it says "run the suite with
+`MACVM_GUARD_COUNT=1`", meaning `cargo test`. That reports nothing —
+`MACVM_GUARD_COUNT` is read in `src/main.rs` at process exit, and test
+binaries never execute `main`. The numbers above come from the in-language
+suite through the real CLI, which is the "under real JIT load" the
+deliverable actually wants.
+
+## D4 — the differential: JIT vs interpreter, every corpus, zero differences
+
+`just diff-p03` (new). Every corpus the project keeps, run under
+`MACVM_JIT=off`, `threshold=20` and `threshold=1000`, stdout and exit status
+compared byte-for-byte:
+
+| corpus | files | result |
+|---|---|---|
+| the in-language suite (`world/tests/tests.list`, 6626 assertions, 563 lines of transcript) | 1 concatenation | **identical** in all three modes |
+| golden transcripts (`tests/golden/*.mst`) | 3 | **identical** |
+| tracked JIT-bug repro corpus (`tests/repros/*.mst`) | 12 | **identical**, exit codes included |
+
+Zero differences, which is the bar `tests_p03.md` set: WINVM's x64 port
+lived with seven closure/NLR/OSR differences, and those were backend gaps
+this backend does not have. Nothing here needed a caveat.
+
+Three modes rather than two on purpose: `threshold=1000` compiles only the
+genuinely hot methods, so it exercises a *different* mix of
+compiled/interpreted boundaries than `threshold=20`, and a bug that only
+appears at one tier mix would otherwise hide.
+
+## D5 — the Cog axis: what this platform makes checkable, and what it does not
+
+**No Cog comparison was run, and the reason is recorded rather than
+implied**: there is no Pharo, Squeak or OpenSmalltalk VM installed on this
+machine, and `scripts/cog-bench.sh` additionally needs `python3` (its
+`mst2st.py` translation step and its reducer), which resolves here only to
+the Microsoft Store alias stub. So P3 produced no Cog number at all.
+
+What P3 *did* land is the axis `sprint_p03_detail.md` §D5 asks for, so the
+first Cog run on this platform cannot be recorded unlabelled:
+
+- `scripts/pe-machine.sh` (new, no dependencies — reads `e_lfanew`, checks
+  the `PE\0\0` signature, decodes `IMAGE_FILE_HEADER.Machine`) answers
+  `arm64` / `x64` / `x86` / `arm32` for any PE binary, without running it.
+  Verified against known binaries on this host: `target/release/macvm.exe`
+  and `C:\Windows\System32\cmd.exe` -> `arm64`;
+  `C:\Windows\SysWOW64\cmd.exe` -> `x86`.
+- `scripts/cog-bench.sh` now derives `cog=native-arm64` /
+  `cog=emulated-<arch>` from the Cog *binary* (PE on Windows, `file` on
+  macOS), prints it in the header AND in the table footer, **refuses to run
+  at all** if it cannot determine the architecture, and prints an explicit
+  "INDICATIVE, NOT A HEAD-TO-HEAD" block whenever the two sides differ.
+
+**A correction to the sprint's own premise.** §D5 supposes "a Windows-ARM64
+Cog build may not exist at all". That is true of Pharo's supported channel
+and false of upstream OpenSmalltalk:
+
+- **Pharo**: `pharo.org/download` and the Pharo Launcher offer Windows
+  64-bit and 32-bit x86 only. Installing Pharo the normal way on this
+  machine therefore yields an **x86-64 VM under Windows' x64 translation
+  layer**. A native ARM64 PharoVM does exist off to the side
+  (`files.pharo.org/vm/pharo-spur64/Windows-ARM64/`, newest
+  `PharoVM-10.0.9-...-Windows-ARM64`, 2025-03-27) but is not advertised and
+  is roughly 16 months behind the x86-64 line.
+- **OpenSmalltalk / Squeak**: ships native `win64ARMv8` Cog *and* Stack VMs
+  in current releases (release `202606270913`, 2026-06-27), built by a
+  workflow that `runs-on: windows-11-arm` — i.e. genuinely native, not
+  cross-labelled.
+
+So a like-for-like head-to-head on this platform IS reachable; it just
+cannot use the Pharo download the existing harness assumes. Until someone
+runs it, the honest primary claim stays the one with no emulation term in
+it: MACVM-on-Windows-ARM64 against MACVM-on-macOS-ARM64, same commit, same
+world, same benchmarks, same ISA — the cross-build differential below.
+
+## D4 step 6 — the cross-build differential: STILL OUTSTANDING, and it is the headline
+
+**There is no Mac on the machine this sprint ran on.** The comparison that
+carries P3's actual claim — MACVM on Windows ARM64 against MACVM on macOS
+ARM64, same checkout, same world, same benchmarks, same ISA, no emulation
+term and no translation term anywhere in it — has therefore NOT been made.
+Everything else in this section is one half of a two-sided measurement.
+
+To complete it, build **this checkout** (not `C:\projects\MACVM` — it is a
+different tree) on the Mac and run, from the repository root:
+
+```sh
+cargo build --release
+
+# 1. suite counts — must match Windows' 1065 passed / 0 failed / 15 ignored
+#    (that count has `mandelvm` filtered out on both sides).
+cargo test --no-fail-fast -- --skip mandelvm
+
+# 2. golden transcripts + the JIT-vs-interpreter differential over every
+#    corpus. Must print `same` on every line, as it does on Windows.
+just diff-p03
+
+# 3. the benchmark table below, same three modes, same harness.
+./scripts/perf.sh
+
+# 4. the W^X / icache census, for the D2 comparison (expect the same ORDER
+#    of magnitude; a >2x gap in icache bytes per compilation is a
+#    flush-granularity difference worth chasing).
+grep -v '^#' world/tests/tests.list | grep -v '^$' \
+  | sed 's|^|world/tests/|' | xargs cat > /tmp/macvm_world_tests.mst
+MACVM_GUARD_COUNT=1 MACVM_JIT=threshold=20 MACVM_TRACE=stats \
+  ./target/release/macvm run /tmp/macvm_world_tests.mst --world world
+
+# 5. the D1 audit's mac-side numbers (the same asserts compile there):
+cargo test --lib -- --nocapture stub_frames_measured
+cargo test --test it_world -- --nocapture compile_count_nonzero_at_threshold1
+```
+
+What "identical" must mean, per `tests_p03.md` gate item 5: identical suite
+counts, identical golden transcripts, identical benchmark RESULTS (the
+checksums — Richards `2324609297`, DeltaBlue `224874`, Mandelbrot
+`850452`). Benchmark TIMES are recorded side by side and are NOT expected to
+match: different silicon.
+
+**One thing to expect on the Mac side, and it is not a Windows problem.**
+The repro committed as `it_world::
+world_suite_at_threshold_2_hits_root_block_deopt_defect` (`#[ignore]`d on
+both platforms; see MIGRATION.md §8's P3 entry): the whole corpus compiled at
+`MACVM_JIT=threshold=2|3|5` dies in `runtime/deopt.rs`'s root-block arm on
+Windows. Every file on that path is byte-identical to MACVM's, so the Mac
+should reproduce it — and if it does NOT, that is a far more interesting
+result than if it does, so please run it either way:
+
+```sh
+grep -v '^#' world/tests/tests.list | grep -v '^$' \
+  | sed 's|^|world/tests/|' | xargs cat > /tmp/macvm_world_tests.mst
+MACVM_JIT=threshold=5 ./target/release/macvm run /tmp/macvm_world_tests.mst --world world
+```
+
+## D4 — the stress runs, and what each one actually proves
+
+`--skip mandelvm` throughout (that one test renders 140 Mandelbrot frames
+and costs ~45 minutes in a debug build; MIGRATION.md §8 records the whole
+disproof of the exception-storm it looks like). Counts are the sum over all
+21 test binaries.
+
+| # | mode | build | result | wall |
+|---|---|---|---|---|
+| 1 | `MACVM_JIT=threshold=1` (= 20, see below) | debug | **1065 passed, 0 failed, 15 ignored** | 2m26s |
+| 3 | `MACVM_DEOPT_STRESS=1` | debug | **1065 passed, 0 failed, 15 ignored** | 3m13s |
+| 2 | `MACVM_JIT=threshold=1` + `MACVM_GC_STRESS=1` (the S12 flagship) | release | 1050 passed, **1 failed**, 15 ignored — the flake below | 2m54s |
+| 4 | all three at once (the S14 bar), x3 consecutive | release | **1051 passed, 0 failed, 15 ignored** on every pass | 2m29s / 2m32s / 4m08s |
+
+Release runs fewer tests than debug (798 vs 809 in the lib target) because
+`#[cfg(debug_assertions)]` tests — the ones whose subject IS a
+`debug_assert!` — genuinely do not exist there.
+
+**Compile counts are asserted, not hoped for.**
+`it_world::compile_count_nonzero_at_threshold1` loads the whole world plus
+the whole test corpus and fails if `vm.stats.compilations == 0`, so every
+line above carries the false-green tripwire rather than only the one that
+remembered to check. Observed there: **1176 compilations, 36 recompiles, 165
+deopts** over the corpus.
+
+**Δ — `MACVM_JIT=threshold=1` has never meant threshold 1.**
+`VmOptions::parse_jit` refuses `threshold=1` from the environment (it warns
+that it is a compiler-correctness tool, not a measurement config) and
+substitutes `JIT_THRESHOLD_FLOOR` = 20. That floor is upstream MACVM, so
+every gate in the justfile that says `threshold=1` — and `tests_p03.md` gate
+item 1 — has always run at 20, on macOS too.
+
+**The one failure, characterised.**
+`embed::tests::live_stats_lets_a_monitor_observe_compiled_execution_off_thread`
+requires a busy-spin sampler thread to observe `compiled_depth > 0` during
+one compiled `exec`, with no retry and no synchronisation — the assertion is
+that the scheduler ran the sampler inside that window. It fails **1 pass in
+6** in release under full-suite parallelism, passes **3/3 in isolation** in
+0.08 s, and passes in every debug run. `exec` resets `compiled_depth` to 0
+on return, so the window is exactly the compiled run: seconds in debug, tens
+of milliseconds in release. It was deliberately not weakened — the fix is a
+bounded wait inside a SHARED test, which is not P3's to make.
+
+## D4 step 7 — the benchmark table (Windows ARM64, native)
+
+`scripts/perf.sh` over `world/bench/bench.list`, release, on a quiet machine
+(no test suite running). The harness is `Bench.mst`'s: 3 discarded warmups,
+then the median of 10 timed rounds, `millisecondClock`, excluding genesis
+and world load. Every row is checksum-verified on every iteration — a body
+that diverged would abort the run rather than time the wrong thing.
+
+Recorded, not gating (standing rule 3).
+
+| benchmark | result (checksum) | interp (ms) | jit t=1 (=20) | jit t=1000 | best/interp |
+|---|---|---|---|---|---|
+| richards | 2324609297 | 157 | **2** | 2 | **78.5x** |
+| deltablue (inner 10) | 224874 | 163 | **3** | 4 | **54.3x** |
+| mandelbrot | 850452 | 705 | **14** | 14 | **50.4x** |
+
+The results are identical in all three modes, which is the half of this
+table that is an oracle rather than a measurement: the same three checksums
+must come out of the Mac build of the same checkout.
+
+### S10/S11 tripwires — the only perf gates that still apply
+
+Same rule `bench-s10`/`bench-s11` encode: **FAIL below 2x** interpreter,
+warn below 5x. Computed with `awk` rather than by running those recipes,
+because `bc` — which they shell out to — is not present in Git Bash on this
+host (the recipes are otherwise unchanged and still correct on macOS).
+
+| bench | interp (ms) | jit t=1 (=20) | ratio | verdict |
+|---|---|---|---|---|
+| `arith.mst` `sumTo: 5_000_000` | 1094 | 8 | **136.8x** | ok |
+| `dispatch.mst` `runLoop: 5_000_000` | 1609 | 10 | **160.9x** | ok |
+
+Both clear the tripwire by roughly two orders of magnitude. The dispatch row
+is worth a note against this file's own history: the S11-era macOS entry was
+3.88x, because that measurement predates the whole S24/PIC/OSR arc — it is
+not a Windows-vs-macOS difference, and nothing here should be read as one
+until the Mac side of §"D4 step 6" is run.
+
+The same tripwire also runs as a standing test in every suite pass:
+`it_bench_smoke::arith_compiled_beats_interpreter_2x`, which is why P3 did
+not need to re-arm it manually.
+
+**Why runs 2 and 4 are `--release` and runs 1 and 3 are not — measured, not
+assumed.** `verify::verify_enabled()` is `cfg!(debug_assertions) ||
+MACVM_GC_VERIFY=1`, so a debug build runs the full cross-check heap verifier
+at every GC phase boundary; with `MACVM_GC_STRESS=1` (a scavenge before
+every allocation) that is a whole-heap walk per allocation. Booting the
+world and computing fib(15) on this host:
+
+| configuration | build | time |
+|---|---|---|
+| no stress, JIT off | debug | 0.09 s |
+| no stress, threshold 20 | debug | 0.95 s |
+| `MACVM_GC_STRESS=1` **and** threshold 20 | release | 0.30 s |
+| `MACVM_GC_STRESS=1`, **JIT off** | debug | **did not finish in 4 minutes** |
+
+So it is neither the JIT nor the platform — `memory/verify.rs` and
+`memory/scavenge.rs` are byte-identical to MACVM's, and `gate-s08`'s own
+comment already recorded the shape of it ("30+ seconds ... 0.6s under
+--release"). `gate-p03` runs the unstressed and deopt-stress passes in debug
+(where `debug_assert!` lives, including D1's frame-size invariant) and the
+GC-stress passes in release, with this measurement written into the recipe.
+`MACVM_GC_VERIFY=1` opts a release run back into the verifier for anyone who
+wants the pair; budget hours.
+
+**The S12 flagship's own census**, from the combined-stress world run
+(release, `MACVM_TRACE=gc,stats`):
+
+```
+gc: scavenges=158124 total_ms=45579 max_ms=33.8  fulls=4 total_ms=11 max_ms=3.2
+gc: gc_under_compiled=139830
+[stats] compilations=1176
+[stats] deopt_count=165 by_reason=[trap 165, return 0, poll 0]
+6626 run, 0 failed
+```
+
+139,830 collections ran with live compiled frames on the native stack — the
+exact seam (fresh code + icache flush + moving GC) this port was most likely
+to break, exercised 140 thousand times on Windows without a single
+difference in the guest's output. `just bridge-stats-s11` asserts that
+counter is nonzero; `it_gc_jit::mid_loop_forced_scavenge`, the single most
+OS-layer-sensitive test in the suite, passes in every mode above.

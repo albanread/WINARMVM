@@ -46,7 +46,47 @@ fi
 # makes the deltas look inexplicable (the 63.3ms->19.6ms richards "mystery"
 # of 2026-07-22 was exactly this: 20b37b0 landed between two same-day runs).
 GITDESC="$(git rev-parse --short HEAD 2>/dev/null || echo '?')$(git diff --quiet 2>/dev/null || echo '+dirty')"
-echo "load=$LOAD1  rounds=$ROUNDS  macvm-threshold=$THRESH  commit=$GITDESC  (microsecond clock, no hard pinning — Apple Silicon)"
+
+# WINARM (P3 D5): the EMULATION AXIS. On a Windows-on-ARM64 host, Pharo's
+# official download channel ships an x86-64 VM, which Windows then runs under
+# its x64 translation layer. An emulated Cog loses a large factor to
+# translation alone, so "MACVM beat Cog" measured against one demonstrates far
+# less than the number suggests — the same class of measurement error this
+# whole harness exists to remove (see the header). So: ask the BINARY what it
+# is, and label every figure. `scripts/pe-machine.sh` reads the PE/COFF
+# machine field; on macOS there is no PE header and `file`/`lipo` answer
+# instead. A comparison whose two sides disagree on this is reported as
+# INDICATIVE, never head-to-head (sprint_p03_detail.md §D5.2).
+HOST_ARCH=$(uname -m)
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+        COG_BIN="$PHARO"
+        [ -f "$COG_BIN" ] || COG_BIN="$PHARO.exe"
+        COG_MACHINE=$(sh scripts/pe-machine.sh "$COG_BIN" 2>/dev/null || echo unknown)
+        ;;
+    *)
+        # Mach-O: `file` names the architecture directly. Unchanged behaviour
+        # for the macOS runs this harness was written for — the label is new,
+        # what it measures is not.
+        COG_MACHINE=$(file -b "$PHARO" 2>/dev/null | grep -o 'arm64\|x86_64' | head -1)
+        [ -n "$COG_MACHINE" ] || COG_MACHINE=unknown
+        [ "$COG_MACHINE" = x86_64 ] && COG_MACHINE=x64
+        ;;
+esac
+case "$HOST_ARCH:$COG_MACHINE" in
+    aarch64:arm64|arm64:arm64) COG_LABEL="cog=native-arm64" ;;
+    aarch64:x64|arm64:x64|aarch64:x86|arm64:x86)
+        COG_LABEL="cog=emulated-$COG_MACHINE" ;;
+    *:unknown) COG_LABEL="cog=UNKNOWN-ARCH" ;;
+    *) COG_LABEL="cog=native-$COG_MACHINE" ;;
+esac
+echo "load=$LOAD1  rounds=$ROUNDS  macvm-threshold=$THRESH  commit=$GITDESC  $COG_LABEL  host=$HOST_ARCH  (microsecond clock, no hard pinning — Apple Silicon)"
+if [ "$COG_LABEL" = "cog=UNKNOWN-ARCH" ]; then
+    echo "REFUSING: could not determine the Cog binary's architecture, and an" >&2
+    echo "unlabelled figure is exactly what D5 forbids. Set COG_DIR to a real" >&2
+    echo "VM directory, or fix scripts/pe-machine.sh for this binary format." >&2
+    exit 4
+fi
 
 # Richards + DeltaBlue are translated from world/41a on the fly so the .mst
 # stays the single source of truth; the emitted fileIn carries the same
@@ -69,10 +109,15 @@ done
 # Reduce: best (min) warm_us per (vm,bench) across rounds, ms with one
 # decimal, ratio and verdict. Best-of is the right summary — it strips the
 # rounds that lost the core to something else.
-python3 - "$RAW" <<'PY'
-import sys, re, collections
+COG_LABEL="$COG_LABEL" HOST_ARCH="$HOST_ARCH" python3 - "$RAW" <<'PY'
+import sys, re, os, collections
 best = collections.defaultdict(lambda: float('inf'))
 order = []
+# WINARM (P3 D5): the label travels into the table, not just the header, so a
+# pasted scoreboard can never lose it.
+COG_LABEL = os.environ.get('COG_LABEL', 'cog=UNKNOWN-ARCH')
+HOST_ARCH = os.environ.get('HOST_ARCH', '?')
+INDICATIVE = 'emulated' in COG_LABEL
 for line in open(sys.argv[1]):
     m = re.match(r'(\w+)\s+(\S+)\s+.*warm_us=(\d+)', line)
     if not m: continue
@@ -91,4 +136,12 @@ for b in order:
     print(f"{b:10} {mv/1000:>9.3f} {cg/1000:>8.3f} {r:>7.2f}  {verdict}")
 print("\n(best-of-rounds, warm = median of 41 single-rep samples after 30 warm-up")
 print(" reps, microsecond clock)")
+print(f"({COG_LABEL}, host={HOST_ARCH})")
+if INDICATIVE:
+    print("\n*** INDICATIVE, NOT A HEAD-TO-HEAD (sprint_p03_detail.md D5.2). ***")
+    print("The two sides do not share an execution mode: MACVM is native ARM64,")
+    print("Cog is x86-64 under Windows' translation layer, which costs it a large")
+    print("factor before any VM design difference is measured. Quote these numbers")
+    print("only WITH this label. The claim that needs no caveat is the same-commit,")
+    print("same-ISA MACVM-on-Windows-ARM64 vs MACVM-on-macOS-ARM64 differential.")
 PY

@@ -296,9 +296,9 @@ issues; lr is saved/restored raw.
 |---|---|---|
 | **x18** is the TEB pointer, never touch | none — Apple reserves x18 too; `regalloc.rs:863` excludes it and `emit.rs` has a standing test asserting x18 never appears in emitted code | already satisfied; reword the "Darwin platform register" comment, keep the assert |
 | **Variadic calls**: MS passes variadics in x0–x7 (floats in GPRs!); Apple passes them on the stack | FFI trampolines only — compiled Smalltalk never makes a variadic call. The only variadic-aware code today is the objc bridge (mac-gated) | P5 audit item for `winkb`-driven trampolines; rare in Win32 (wsprintf-class) |
-| **Struct returns ≤16 B in x0:x1 on BOTH** | the x64 `rt_poll` hidden-pointer hazard class **does not exist** | keep WINVM's pinning-test pattern anyway (cheap, proves the assumption) |
+| **Struct returns ≤16 B in x0:x1 on BOTH** | the x64 `rt_poll` hidden-pointer hazard class **does not exist** | **P3 D3 done, and it is now a test, not a claim**: `it_codecache::struct16_return_in_x0_x1` calls a real Rust `extern "C"` returning a 16-byte `#[repr(C)]` struct FROM emitted A64 and asserts both halves — the weight is on `x1`, which an sret ABI would leave untouched. `rt_set_nonscalar_grep_pinned` re-runs WINVM's exhaustiveness check over the whole (now 21-strong) `rt_*` set: 17 return `u64`, 2 return `!`, 1 returns `()`, and `rt_poll` is still the ONLY non-scalar |
 | **No red zone** on Windows | none — grep confirms the emitter never relied on one (Apple's 128-byte zone unused) | verified 2026-08-09 |
-| **Stack probes** required when a frame exceeds a page (4 KiB) | JIT frames are small (spill slots + RootSpill); the call stub and FFI frames are fixed-size | P3 audit: `debug_assert!(frame_bytes < 4096)` at emit time; emit an explicit probe loop only if ever exceeded |
+| **Stack probes** required when a frame exceeds a page (4 KiB) | JIT frames are small (spill slots + RootSpill); the call stub and FFI frames are fixed-size | **P3 D1 done, no probe loop needed, and now checked rather than assumed.** `nmethod::note_nmethod_frame_bytes` carries a `debug_assert!(frame_bytes < 3584)` (4 KiB − 512 slop) at nmethod finalize, plus a high-water mark. Measured: largest compiled frame over the WHOLE world + test corpus at threshold 20 is **608 bytes** (74 spill slots) — 5.9× headroom; worst hand-written stub is `call_stub` at **160 bytes** — 22× headroom; the FFI trampolines are 80. First `frame_slots` value that would trip the limit is **445**, versus a compiler eligibility budget of 60. Stub frames are decoded from the PUBLISHED words (`nmethod::measure_frame_bytes`), not restated from constants |
 | **Pages 4 KiB** (vs Apple 16 KiB), granularity 64 KiB | reservation + loader + any commit assertions | WINVM's reservation.rs already queries `GetSystemInfo`; P0 audits `0x4000` |
 | Callee-saved set, frame layout, FP chains | identical (x19–x28, d8–d15, x29 chain) | none — stack walking, oop maps, deopt all carry |
 
@@ -540,3 +540,233 @@ against a cousin, WINARM diffs against its own twin.
     a real gap, recorded rather than papered over), plus
     `scripts/p2-deopt-roundtrip.mst` as its JIT-off/JIT-on integration
     fixture.
+- **2026-08-09 — P3 done. The full adaptive VM is alive on Windows ARM64:
+  tier-1 compilation, PICs, deopt, OSR and moving GC under compiled frames
+  all run natively, every corpus is byte-identical between JIT and
+  interpreter, and the three ABI audits came back with numbers rather than
+  adjectives.** The sprint wrote almost no VM code, exactly as planned — but
+  it did not come back empty-handed, and three of the things it found are
+  corrections to this document.
+  - **Suite: 1065 passed / 0 failed / 15 ignored** (`--skip mandelvm`;
+    1066/0/15 with it), from P2's 1058/0/14. Eight new tests: D1's four
+    (`stub_frames_measured`, `ffi_trampoline_frames_measured`,
+    `measure_frame_bytes_decodes_known_prologues`,
+    `nmethod_frame_bytes_stays_far_under_a_page`), D3's two
+    (`struct16_return_in_x0_x1`, `rt_set_nonscalar_grep_pinned`), the
+    false-green tripwire (`compile_count_nonzero_at_threshold1`) and the
+    emulation tripwire P0 promised but never wrote
+    (`arch_assert_native_arm64`). The 15 ignores are the 12 P5 marks, the
+    one pre-existing `deopt_trap` SIGTRAP-handler mark, and TWO VM-defect
+    marks — P2's depth-3 deopt defect plus the new one below. `gate-p03`'s
+    grep for `ignore = "P1`/`"P2` finds nothing, which is gate item 7.
+  - **D1 — stack probes: no probe loop needed, and it is now checked, not
+    assumed.** `codecache::nmethod::note_nmethod_frame_bytes` runs at
+    nmethod finalize with `debug_assert!(frame_bytes < 3584)` (a 4 KiB page
+    minus §3.4's 512-byte slop) plus a high-water mark the test reads back.
+    Largest compiled frame over the WHOLE world + test corpus at threshold
+    20 (1176 nmethods): **608 bytes**, 74 spill slots — 5.9x headroom. Worst
+    hand-written stub: `call_stub` at **160 bytes** — 22x. Everything else is
+    80 or 16; the FFI trampolines are 80. Full table in `docs/PERF.md`.
+    Stub frames are DECODED from the published machine words
+    (`measure_frame_bytes`), not restated from the builders' constants, so a
+    builder that changes its frame is measured rather than re-asserted.
+    - Two things worth keeping. First, `frame_slots` of 74 EXCEEDS
+      `driver.rs`'s `FRAME_BUDGET_SLOTS` of 60 — legitimately: that budget
+      bounds `ntemps + max_stack` of the outer method BEFORE compiling, and
+      inline splicing adds vregs on top. Reasoning from the constant would
+      have given the wrong number; measuring gave the right one. Second, a
+      frame over 4095 bytes cannot even be ASSEMBLED today: `sub sp, sp,
+      #imm` goes through the vendored `add_sub_imm`, which refuses an
+      immediate outside `0..=4095`, and `JasmAssembler::emit` turns that into
+      a panic. The failure mode for an over-large frame was already a loud
+      compile-time panic, not a silent stack fault.
+  - **D2 — W^X guard + icache census under real JIT load.** Over the full
+    in-language suite: JIT off = 55 write windows / 3,392 icache bytes;
+    threshold 20 = 5,469 / 1,642,592 (1176 compilations); threshold 1000 =
+    1,201 / 216,772 (372 compilations). ~4.7 windows and ~1.4 KiB of
+    invalidation per compiled method — the nmethod's own body plus its IC
+    patches, which is what correct granularity looks like. An
+    order-of-magnitude excess would have shown as tens of megabytes.
+    - **Δ against this document's D2 as written**: it says to run "the suite"
+      with `MACVM_GUARD_COUNT=1`, meaning `cargo test`. That reports nothing
+      — the census is printed by `src/main.rs` at process exit and a test
+      binary never executes `main`. The numbers above come from the
+      in-language suite through the real CLI instead, which is what "under
+      real JIT load" actually wants.
+  - **D3 — the struct-return hazard really is absent, and it is a test now.**
+    `it_codecache::struct16_return_in_x0_x1`: published A64 calls a real Rust
+    `extern "C"` returning a 16-byte `#[repr(C)]` struct and stores BOTH
+    return registers; the assertion's weight is on `x1`, which the Windows
+    x64 hidden-pointer convention would leave untouched. Passes.
+    `rt_set_nonscalar_grep_pinned` re-runs WINVM's exhaustiveness grep over
+    the whole `rt_*` set, which has grown to **21**: 17 return `u64`, 2
+    return `!`, 1 returns `()`, and `rt_poll`'s `PollOutcome` is still the
+    only non-scalar. The test pins that list, so a future non-scalar return
+    fails loudly instead of silently depending on an unaudited ABI rule.
+  - **D4 — the differential: zero differences, every corpus, three JIT
+    modes.** `just diff-p03` (new) runs the in-language suite (6626
+    assertions, 563 transcript lines), the three golden `.mst` transcripts
+    and all 12 tracked JIT-bug repros under `MACVM_JIT=off`, `threshold=20`
+    and `threshold=1000`, comparing stdout AND exit status byte-for-byte.
+    All identical. WINVM's x64 port lived with seven closure/NLR/OSR
+    differences; this backend has none, which is the port thesis holding at
+    its strongest point.
+  - **The S12 flagship, explicitly**: combined stress over the in-language
+    suite reports `gc_under_compiled=139830` across 158,124 scavenges and 4
+    full GCs, with 1176 compilations and 165 deopts — real moving
+    collections with live compiled frames on the native stack, on Windows,
+    at the exact seam (fresh code + icache flush + moving GC) this port was
+    most likely to break. `it_gc_jit::mid_loop_forced_scavenge` — the single
+    most OS-layer-sensitive test in the suite — passes in every mode.
+  - **The runs** (`--skip mandelvm` throughout — that one test costs ~45
+    minutes in debug; totals are over all 21 test binaries):
+
+    | # | mode | build | result |
+    |---|---|---|---|
+    | 1 | `MACVM_JIT=threshold=1` | debug | **1065 / 0 / 15**, 2m26s |
+    | 3 | `MACVM_DEOPT_STRESS=1` | debug | **1065 / 0 / 15**, 3m13s |
+    | 2 | `threshold=1` + `MACVM_GC_STRESS=1` (S12 flagship) | release | 1050 / **1** / 15 — the flake below, 2m54s |
+    | 4 | all three (S14 bar), x3 consecutive | release | **1051 / 0 / 15** on all three passes, zero failures of any kind |
+
+    Release runs fewer tests than debug (798 vs 809 in the lib target)
+    because `#[cfg(debug_assertions)]` tests — the ones whose subject IS a
+    `debug_assert!` — do not exist there.
+  - **One intermittent failure, characterised rather than dismissed — and it
+    is a test-design flake, not a VM fault.**
+    `embed::tests::live_stats_lets_a_monitor_observe_compiled_execution_off_thread`
+    spawns a busy-spin sampler thread and requires it to observe
+    `compiled_depth > 0` at some point during one compiled `exec`. There is
+    no retry, no bounded wait, and no synchronisation: the assertion is that
+    the scheduler ran the sampler inside that window.
+    - Measured: **1 failure in 6 release lib passes** under
+      `threshold=1 + GC_STRESS=1` with the whole suite running in parallel on
+      a fully saturated 8-core box; **3/3 pass in isolation**, in 0.08 s; and
+      it passes in every DEBUG pass (runs 1, 1b and 3, plus the baseline).
+    - The mechanism is the ratio between the two: `VmHandle::exec` resets
+      `live_stats.compiled_depth` to 0 when it returns, so the observable
+      window is exactly the compiled run. In debug that window is seconds; in
+      release the 40 M-iteration smi loop is tens of milliseconds, and with
+      every core already busy a spinning thread can miss it entirely.
+      `MACVM_GC_STRESS` is not the trigger (the loop allocates nothing) —
+      release plus load is.
+    - **Deliberately NOT weakened.** No sleep, no retry, no `#[ignore]` was
+      added: the honest fix is a bounded wait or a synchronisation point
+      inside the test, which is a change to a SHARED test that macOS also
+      runs, and P3 does not rewrite shared tests to make its own gate green.
+      Recorded here, and worth an upstream fix.
+  - **The new VM defect this sprint found — mainline, not a port gap, and
+    committed as a runnable repro.** The whole in-language corpus compiled at
+    `MACVM_JIT=threshold=2`, `3` or `5` dies deterministically in
+    `runtime/deopt.rs:665`, the STANDALONE-compiled-block deopt arm:
+    `root-block scope's receiver ValueLoc must hold the closure (driver
+    records block_closure_vreg there)` — the block's receiver-arg slot held
+    something other than its closure. Same family as P2's depth-3 spliced-
+    block defect: a recorded `ValueLoc` pointing at the wrong slot around a
+    spilled closure.
+    - Deterministic: 3/3 runs fail at threshold 5, 3/3 pass at 20. Fails at
+      2, 3, 5; passes at 10, 15, 20, 1000 and JIT-off.
+    - **Mainline, on the same evidence P2 used**: `src/runtime/deopt.rs`,
+      `src/compiler/scopes.rs` and `src/compiler/regalloc.rs` are
+      byte-identical to `C:\projects\MACVM`; `src/compiler/` has no
+      `cfg(target_os)` at all; the failing corpus file
+      (`world/tests/49_supervisor_tests.mst`) is byte-identical too.
+    - Not minimizable inside P3's budget: running that file ALONE at
+      threshold 5 PASSES, so the site depends on cumulative profile state
+      from the earlier corpus.
+    - Committed as `it_world::
+      world_suite_at_threshold_2_hits_root_block_deopt_defect`, `#[ignore]`d
+      on BOTH platforms — the failure is an `.expect()` inside
+      `rt_uncommon_trap`, an `extern "C"` fn, so it is a non-unwinding abort
+      that would take the whole `it_world` binary and every other test's
+      result with it (P2 recorded the identical reasoning for the depth-3
+      defect). `docs/PERF.md` carries the one-line shell repro for the Mac.
+  - **Δ — `MACVM_JIT=threshold=1` has never meant threshold 1, on either
+    platform.** `VmOptions::parse_jit` REFUSES `threshold=1` from the
+    environment (it is a compiler-correctness tool, not a measurement
+    config), warns, and substitutes `JIT_THRESHOLD_FLOOR` = 20. That floor is
+    upstream MACVM, not a port change — so every gate in the justfile that
+    says `MACVM_JIT=threshold=1`, and both `sprint_p03_detail.md` D4 step 1
+    and `tests_p03.md` gate item 1, have always run at 20. P3's gate spells
+    20 where it means 20. Threshold 1 remains reachable in-process
+    (`JitMode::Threshold(1)` in Rust), which is how the tier-1 unit tests get
+    it — and at 1 the whole corpus hits the defect above, exactly as it does
+    at the env-reachable 2, 3 and 5. That is how the defect was found: the
+    false-green tripwire's first draft forced `Threshold(1)` over the whole
+    world, which no gate had ever done.
+  - **Δ — P0's runtime arch assertion never existed.** This log's P0 entry
+    says the startup banner reports the architecture, and `tests_p00.md`
+    lists an `arch_assert_native_arm64` test. Neither was in the tree; the
+    PE-machine-type check P0 describes was done by hand, once, outside the
+    program. `sprint_p03_detail.md`'s Pitfalls make that assert a CONDITION
+    of the benchmark table ("required passing in the same process that
+    produces PERF.md numbers"), so P3 wrote it: `macvm::assert_native_host()`
+    at the top of `main` (a build fact — `cfg!(target_arch)` cannot be
+    answered by the x64 translation layer, unlike any runtime query), the
+    missing unit test, and `[stats] host arch=aarch64 os=windows` on the
+    stats channel so a recorded number can be attributed from its own output.
+  - **Δ — the stressed suites cannot run in a debug build, on any platform.**
+    `verify::verify_enabled()` is `cfg!(debug_assertions) || MACVM_GC_VERIFY=1`,
+    so debug runs the full cross-check heap verifier at every GC phase
+    boundary; with `MACVM_GC_STRESS=1` (a scavenge before every allocation)
+    that is a whole-heap walk per allocation. Measured on this host, booting
+    the world and computing fib(15): 0.09 s debug unstressed, 0.95 s debug at
+    threshold 20, 0.30 s release with stress AND the JIT on — and **not
+    finished after four minutes** in debug with `MACVM_GC_STRESS=1` and the
+    JIT OFF. So it is neither the JIT nor the platform (`memory/verify.rs`
+    and `memory/scavenge.rs` are byte-identical to MACVM), and `gate-s07`'s
+    literal `MACVM_GC_STRESS=1 cargo test` is impractical upstream too —
+    `gate-s08`'s own comment and `soak-s08`'s `--release` already half-record
+    this. `gate-p03` therefore runs the unstressed and deopt-stress passes in
+    debug (where `debug_assert!` lives, including D1's) and the GC-stress
+    passes in release, with the measurement written into the recipe.
+    **This diagnosis cost the sprint one killed 25-minute run** — the same
+    trap P2 recorded — and the way out was instrumentation, not inference:
+    isolating the three factors took 8 minutes and gave a number.
+  - **Δ — `docs/sprints/sprint_p03_detail.md` §D5 supposes a Windows-ARM64
+    Cog "may not exist at all". It does — just not Pharo's.** Pharo's
+    download page and Launcher offer Windows x86-64 and x86 only, so a normal
+    Pharo install here runs under the x64 translation layer; a native ARM64
+    PharoVM exists unadvertised at `files.pharo.org/vm/pharo-spur64/
+    Windows-ARM64/` (newest 10.0.9, 2025-03-27, ~16 months behind the x86-64
+    line). Upstream **OpenSmalltalk ships native `win64ARMv8` Cog and Stack
+    VMs in current releases** (`202606270913`, 2026-06-27), built by a
+    workflow that `runs-on: windows-11-arm`. A like-for-like head-to-head is
+    therefore reachable on this platform; it just cannot use the Pharo
+    download `scripts/cog-bench.sh` assumes.
+  - **D5 landed as the axis, not as a number.** No Cog is installed on this
+    machine and `cog-bench.sh` also needs `python3` (only the Store alias
+    stub is present here), so P3 produced no Cog figure at all. What it left
+    behind: `scripts/pe-machine.sh` (dependency-free PE `IMAGE_FILE_HEADER.
+    Machine` decoder — verified `arm64` for `macvm.exe` and
+    `System32\cmd.exe`, `x86` for `SysWOW64\cmd.exe`), and a `cog-bench.sh`
+    that derives `cog=native-arm64`/`cog=emulated-<arch>` from the BINARY,
+    prints it in both the header and the table footer, **refuses to run** if
+    it cannot tell, and prints an explicit "INDICATIVE, NOT A HEAD-TO-HEAD"
+    block when the two sides differ.
+  - **Also missing from this host, recorded rather than worked around**:
+    `just` is not installed (so `gate-p00`..`gate-p03` have never been
+    executed as recipes here — P2's "`just gate-p02` added" means the recipe
+    exists, not that it ran), `python3` resolves only to the Microsoft Store
+    alias stub, and `bc` is absent from Git Bash, which is what
+    `bench-s10`/`bench-s11` compute their ratios with. The S10/S11 tripwire
+    itself is not lost: `it_bench_smoke::arith_compiled_beats_interpreter_2x`
+    is the same rule as a standing test, and it passed in every run above.
+  - **New in `world/bench/`**: `mandelbrot.mst`, because
+    `sprint_p03_detail.md` asks PERF.md for Mandelbrot and every existing
+    Mandelbrot workload renders into a GUI Pixmap and times itself per frame.
+    It drives the EXISTING `Mandelbrot>>escapeAtRe:im:` over a fixed
+    160x120 grid at maxIter 200, checksum `850452` — verified identical
+    interpreted, at threshold 20 and at threshold 1000, and now a cross-build
+    oracle for the float path.
+  - **Benchmarks (release, quiet machine, recorded not gating):** richards
+    157 ms interpreted -> **2 ms** compiled (78.5x), deltablue 163 -> **3**
+    (54.3x), mandelbrot 705 -> **14** (50.4x); results identical in all three
+    JIT modes. The S10/S11 tripwires clear by two orders of magnitude:
+    `arith` 1094 -> 8 ms (136.8x), `dispatch` 1609 -> 10 ms (160.9x).
+    Full table, method and caveats in `docs/PERF.md`.
+  - **What P3 could NOT do here, stated rather than approximated: D4 step 6,
+    the cross-build differential against the Mac build of the same checkout.
+    There is no Mac on this machine.** That comparison is P3's headline claim
+    — same commit, same world, same benchmarks, same ISA, no emulation term —
+    and `docs/PERF.md` carries the exact commands to finish it, including the
+    arbitration run for the new root-block defect above.

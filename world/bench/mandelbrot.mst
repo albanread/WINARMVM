@@ -1,0 +1,117 @@
+"mandelbrot.mst — the float-arithmetic benchmark, in Bench harness format.
+
+ WINARM (P3 D4): `docs/sprints/sprint_p03_detail.md` asks PERF.md's new
+ Windows-ARM64 section for DeltaBlue, Richards AND Mandelbrot, but
+ `world/bench/` only had the first two in harness format — the Mandelbrot
+ workloads that existed (world/35_mandelbrot.mst, 45_mandelzoom.mst,
+ 46_mandelvm.mst) all render through a Pixmap into a GUI and time
+ themselves per FRAME, which is not comparable across machines and cannot
+ be checksum-verified. This file adds nothing new to the VM: it drives the
+ EXISTING `Mandelbrot>>escapeAtRe:im:` (world/35_mandelbrot.mst — the
+ Strongtalk `fast floats` tour method) over a fixed grid and sums the
+ escape counts, which makes the body checksum-verifiable the way
+ `docs/cog_bench.md`'s protocol requires.
+
+ Why this workload earns its place next to Richards and DeltaBlue: it is
+ the only one in the suite that is pure allocation-free Double arithmetic
+ in a tight loop — the JIT's float fast path (VUnbox/FArith/FBox, the
+ `<primitive: 100..>` ops of world/08_double.mst) rather than sends and
+ allocation. A port that got float boxing or the d8-d15 callee-saved
+ convention wrong would show up here and nowhere else.
+
+ Grid: 160 x 120 points over re in [-2.0, 1.2), im in [-1.2, 1.2), maxIter
+ 200 — 19 200 points, most of them cheap, a band of them at the cap. Fixed
+ integer-derived coordinates (not accumulated) so the grid is bit-identical
+ on every machine and the checksum is a real cross-build oracle."
+
+"The Bench class below is a VERBATIM inline copy of world/bench/Bench.mst,
+ for the reason richards.mst records: `macvm run` loads exactly one file
+ plus world.list, and Bench.mst is deliberately NOT in world.list — so a
+ standalone `macvm run world/bench/mandelbrot.mst --world world` can only
+ resolve the driver line's `Bench` if this file binds it itself.
+ Re-definition is a clean reopen, so a bench.list concatenation that loads
+ Bench.mst first stays correct. If Bench.mst's harness ever changes,
+ refresh this copy."
+
+Object subclass: Bench [
+    <classVars: Times>
+
+    Bench class >> vmStats [
+        <primitive: 111>
+        ^nil
+    ]
+
+    Bench class >> run: benchClass named: name inner: inner outer: outer [
+        | t0 t1 r ms |
+        Times := OrderedCollection new.
+        "Warmup (discarded): counters trigger, code compiles, heap settles."
+        3 timesRepeat: [
+            benchClass setUp.
+            r := benchClass runOne.
+            (benchClass checkResult: r)
+                ifFalse: [ self error: 'benchmark warmup produced a wrong result' ] ].
+        outer timesRepeat: [
+            benchClass setUp.
+            t0 := Smalltalk millisecondClock.
+            inner timesRepeat: [
+                r := benchClass runOne.
+                (benchClass checkResult: r)
+                    ifFalse: [ self error: 'benchmark produced a wrong result' ] ].
+            t1 := Smalltalk millisecondClock.
+            Times add: t1 - t0 ].
+        ms := self median: Times.
+        Transcript show: name; show: ' '; show: inner printString;
+            show: ' '; show: ms printString; cr.
+        ^ms
+    ]
+
+    "Median of a small OrderedCollection of smis (selection into an Array —
+     n is tiny, O(n^2) is fine and keeps this free of sort dependencies)."
+    Bench class >> median: aCollection [
+        | n arr v least ix |
+        n := aCollection size.
+        arr := Array new: n.
+        ix := 1.
+        aCollection do: [:each | arr at: ix put: each. ix := ix + 1 ].
+        1 to: (n + 1) // 2 do: [:round |
+            least := round.
+            round to: n do: [:j |
+                (arr at: j) < (arr at: least) ifTrue: [ least := j ] ].
+            v := arr at: least.
+            arr at: least put: (arr at: round).
+            arr at: round put: v ].
+        ^arr at: (n + 1) // 2
+    ]
+]
+
+Object subclass: MandelbrotBenchmark [
+    <classVars: M>
+
+    MandelbrotBenchmark class >> setUp [
+        M := Mandelbrot new maxIter: 200.
+        ^self
+    ]
+
+    MandelbrotBenchmark class >> runOne [
+        | sum step re im |
+        sum := 0.
+        step := 0.02.
+        0 to: 119 do: [ :py |
+            im := -1.2 + (py asDouble * step).
+            0 to: 159 do: [ :px |
+                re := -2.0 + (px asDouble * step).
+                sum := sum + (M escapeAtRe: re im: im) ] ].
+        ^sum
+    ]
+
+    "Canonical escape-count total for the grid above at maxIter 200. A
+     benchmark that stops validating measures nothing (Bench.mst's own
+     warning), and this number is ALSO the cross-build oracle: it must be
+     byte-identical on macOS ARM64 and Windows ARM64, interpreted and
+     compiled, or the float path differs between the two."
+    MandelbrotBenchmark class >> checkResult: r [
+        ^r = 850452
+    ]
+]
+
+Bench run: MandelbrotBenchmark named: 'Mandelbrot' inner: 1 outer: 10.

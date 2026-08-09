@@ -112,6 +112,154 @@ fn suite_green() {
     );
 }
 
+/// WINARM (P3, `tests_p03.md` rows `compile_count_nonzero_at_threshold1`
+/// and `frame_size_under_probe_limit`) — the FALSE-GREEN tripwire plus the
+/// D1 audit's live half, in one world load.
+///
+/// Two independent things a stress gate cannot tell you on its own:
+///
+/// 1. **Something actually compiled.** A suite that is green because the
+///    JIT never fired proves nothing about the JIT, and the P3 gate's whole
+///    claim is "tier-1 is alive here". The threshold is set in Rust rather
+///    than read from the ambient `MACVM_JIT` so the tripwire is a real
+///    assertion in every run, not one that quietly evaporates when the gate
+///    script forgets a variable.
+/// 2. **No compiled frame needs a Windows stack probe.** The high-water
+///    mark `codecache::nmethod::note_nmethod_frame_bytes` keeps is read back
+///    after the whole world + test corpus has been compiled — the largest
+///    real frame this VM produces, not a synthetic one.
+///
+/// **Why 20 and not 1** (`tests_p03.md` names this row "at_threshold1", and
+/// this is the Δ): `VmOptions::parse_jit` REFUSES `threshold=1` from the
+/// environment and substitutes `JIT_THRESHOLD_FLOOR` = 20, so the literal
+/// gate command `MACVM_JIT=threshold=1 cargo test` has always run at 20 —
+/// on macOS too, since that floor is upstream MACVM, not a port change. 20
+/// is therefore the aggressive setting the gate actually means. Thresholds
+/// 2..5 over this corpus hit a real VM defect that is NOT a port gap; see
+/// [`world_suite_at_threshold_2_hits_root_block_deopt_defect`].
+#[test]
+fn compile_count_nonzero_at_threshold1() {
+    use macvm::codecache::nmethod::{max_nmethod_frame_bytes_seen, MAX_UNPROBED_FRAME_BYTES};
+
+    let before = max_nmethod_frame_bytes_seen();
+    let mut vm = macvm::runtime::VmState::with_options(macvm::runtime::VmOptions {
+        heap_mib: 64,
+        eden_kb: None,
+        jit: macvm::runtime::JitMode::Threshold(20),
+        ..macvm::runtime::VmOptions::from_env()
+    });
+    let buf = OutputBuffer::new();
+    vm.out = Box::new(buf.clone());
+    world::load_world(&mut vm, &world_dir()).expect("load_world");
+    load_tests_list(&mut vm);
+
+    assert_eq!(vm.exit_code, Some(0), "stdout so far:\n{}", buf.as_string());
+    let report_line = buf
+        .as_string()
+        .lines()
+        .find(|l| l.ends_with("failed"))
+        .map(str::to_string)
+        .unwrap_or_else(|| panic!("no '... failed' report line"));
+    assert!(
+        report_line.ends_with(", 0 failed"),
+        "the world suite must be green at threshold=1 too: {report_line}"
+    );
+
+    assert!(
+        vm.stats.compilations > 0,
+        "threshold=1 over the whole world + test corpus compiled NOTHING — a \
+         green suite that never entered the JIT is a false green (tests_p03.md \
+         Pitfalls)"
+    );
+    eprintln!(
+        "[P3 D4] world suite at threshold=20: compilations={} recompiles={} deopt_count={}",
+        vm.stats.compilations, vm.stats.recompiles, vm.stats.deopt_count
+    );
+
+    let mark = max_nmethod_frame_bytes_seen();
+    assert!(
+        mark > before || before > 0,
+        "no compiled frame size was recorded despite {} compilations",
+        vm.stats.compilations
+    );
+    eprintln!(
+        "[P3 D1] largest compiled frame over the whole corpus: {mark} bytes \
+         (limit {MAX_UNPROBED_FRAME_BYTES}, headroom {}x)",
+        MAX_UNPROBED_FRAME_BYTES / mark.max(1)
+    );
+    assert!(
+        mark < MAX_UNPROBED_FRAME_BYTES,
+        "largest compiled frame {mark} >= the Windows unprobed limit \
+         {MAX_UNPROBED_FRAME_BYTES}: this build would need a prologue probe loop"
+    );
+}
+
+/// WINARM (P3 D4) — a **VM defect found by this sprint, not a port gap**,
+/// committed as a runnable repro rather than described in prose.
+///
+/// The whole world + test corpus compiled at `threshold` 2, 3 or 5 dies
+/// deterministically in `runtime::deopt.rs`'s root-block arm:
+///
+/// ```text
+/// root-block scope's receiver ValueLoc must hold the closure
+/// (driver records block_closure_vreg there)
+/// ```
+///
+/// i.e. a STANDALONE-compiled block's deopt found something other than its
+/// closure in the receiver-arg slot. That is the same family as the depth-3
+/// spliced-block defect P2 filed (`it_tier1::depth3_deopt_in_block_in_
+/// callee_rebuilds_all_frames`): a recorded `ValueLoc` pointing at the wrong
+/// frame slot around a spilled closure.
+///
+/// **Why it is mainline, not the port.** `src/runtime/deopt.rs`,
+/// `src/compiler/scopes.rs` and `src/compiler/regalloc.rs` are byte-identical
+/// to `C:\projects\MACVM` (diffed ignoring line endings); `src/compiler/`
+/// contains no `cfg(target_os)`/`cfg(windows)` at all; the failing corpus
+/// file (`world/tests/49_supervisor_tests.mst`) is byte-identical too. Same
+/// metadata, same nmethods, same recorded `ValueLoc`s on both hosts.
+///
+/// **Repro (either platform), no Rust needed:**
+/// ```text
+/// grep -v '^#' world/tests/tests.list | grep -v '^$' \
+///   | sed 's|^|world/tests/|' | xargs cat > /tmp/macvm_world_tests.mst
+/// MACVM_JIT=threshold=5 cargo run --release -- \
+///   run /tmp/macvm_world_tests.mst --world world
+/// ```
+/// Windows ARM64 at commit 1323e1f: fails at 2, 3, 5; passes at 10, 15, 20,
+/// 1000 and with the JIT off (three consecutive runs each way). Running the
+/// suspect file (`49_supervisor_tests.mst`) ALONE at threshold 5 passes —
+/// the site depends on cumulative profile state from the earlier corpus, so
+/// a smaller repro was not reachable inside P3's budget.
+///
+/// `#[ignore]` on BOTH platforms, deliberately: the failure is a
+/// `.expect()` inside `rt_uncommon_trap`, an `extern "C"` fn, so it is a
+/// non-unwinding abort that takes the entire `it_world` binary — and every
+/// other test's result — down with it. Same reasoning P2 recorded for the
+/// depth-3 defect. Run it explicitly:
+/// `cargo test --test it_world -- --ignored threshold_2`.
+#[test]
+#[ignore = "VM DEFECT (not a port gap): root-block deopt at threshold 2..5 over \
+            the whole corpus; aborts the test binary, so opt in explicitly"]
+fn world_suite_at_threshold_2_hits_root_block_deopt_defect() {
+    let mut vm = macvm::runtime::VmState::with_options(macvm::runtime::VmOptions {
+        heap_mib: 64,
+        eden_kb: None,
+        jit: macvm::runtime::JitMode::Threshold(2),
+        ..macvm::runtime::VmOptions::from_env()
+    });
+    let buf = OutputBuffer::new();
+    vm.out = Box::new(buf.clone());
+    world::load_world(&mut vm, &world_dir()).expect("load_world");
+    load_tests_list(&mut vm);
+    let report_line = buf
+        .as_string()
+        .lines()
+        .find(|l| l.ends_with("failed"))
+        .map(str::to_string)
+        .unwrap_or_else(|| panic!("no '... failed' report line"));
+    assert!(report_line.ends_with(", 0 failed"), "{report_line}");
+}
+
 /// Load-order torture: swapping files 12 (Dictionary, needs OrderedCollection
 /// from 15... actually here we swap 12_string.mst and 19_printing.mst, which
 /// both genuinely depend on earlier files) must fail fast with an
