@@ -107,6 +107,31 @@ Whatever the settlement, the file's gate entry in the world runner says
 WHICH and points here — no silently-skipped tests (the WINVM "5891 run
 minus four files" bookkeeping pattern).
 
+> **Δ (2026-08-09, measured during P0/P2).** The 12 tests still carrying
+> `ignore = "P5"` were surveyed, and **the POSIX group is not uniform** —
+> planning P5 as "one resolver reclaims them all" would be wrong:
+>
+> | symbol | Windows story | reclaimed by |
+> |---|---|---|
+> | `getaddrinfo`, `freeaddrinfo`, `inet_ntop` (`world/75_dns.mst`) | all three exist in **ws2_32** with the same C signatures | the resolver alone (D2) |
+> | `getpid`, `llabs`, `fabs`, and the CRT set | present in the UCRT (some spelled `_getpid` — P0 already renamed one such binding rather than gating it away) | the resolver alone |
+> | **`kqueue`** (`IoWorker`) | **no Windows twin exists at all** | **not the resolver** |
+>
+> `kqueue`/`kevent` have no equivalent primitive on Windows. `IoWorker`
+> needs a genuinely different readiness backend — **IOCP** (the idiomatic
+> Windows answer, completion-based rather than readiness-based, so the
+> calling code inverts) or **`WSAPoll`** (readiness-based and a much smaller
+> change, but sockets only, and it inherits `select`'s scaling behaviour).
+>
+> That is design work with a semantic choice in it, not a table entry, and
+> it should be **scoped as its own slice** rather than discovered midway
+> through wiring the resolver. Seven of the twelve gated tests hang off it.
+> Sequencing suggestion: land the resolver + D2's classifier first, which
+> reclaims DNS and the CRT bindings and proves the FFI path end to end, and
+> only then take the `IoWorker` backend as a separate piece with its own
+> gate — the same posture that kept the P2 trap layer from being tangled
+> into P1's loader.
+
 ## Implementation order
 
 1. winkb.rs + rusqlite dep; resolver-selection seam compiles both OSes;
