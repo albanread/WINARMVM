@@ -396,6 +396,33 @@ interleaves with it; every wave lands with in-language tests.
   (`world/44`) and `MandelZoom` (`world/45`) demos, reachable from the GUI's
   native **Demos** menu. Same non-disruptive side-track posture as S20/S23.
 
+## Phase P — Windows-ARM64 port track
+
+Port the VM to **Windows 11 ARM64** (`aarch64-pc-windows-msvc`), combining
+this repo's A64 compiler (unchanged — the ISA carries over) with the Windows
+OS layer the x64 sibling already proved. Design of record:
+[`../MIGRATION.md`](../MIGRATION.md) (the five seams, component disposition,
+source-of-truth rules); WINVM's own `MIGRATION.md` is the sibling playbook it
+leans on. Per-sprint detail + gates: `sprints/sprint_p0N_detail.md` +
+`sprints/tests_p0N.md`. The behavioral oracle is the **Mac build of the same
+checkout** — same world, same bytecode, same suite; outputs must match.
+
+| Sprint | Size | Needs | Gate (restated in tests_p0N.md) |
+|---|---|---|---|
+| P0 toolchain + seed + interpreter-only | `M` | nothing | `cargo build` + `cargo test` green on Windows ARM64 with JIT off; world boots; full interpreted suite matches the Mac run; arch asserted `aarch64` at runtime |
+| P1 JIT substrate (loader, W^X, icache) | `M` | P0 | S9-style smoke on target: emit/execute/patch-and-rerun through `JitWriteGuard` with real `FlushInstructionCache`+`isb`; vendored corpus green on target |
+| P2 trap layer (VEH `brk`, setjmp, recovery) | `L` | P1 | `brk 0xDE00` → VEH → trampoline → resume round-trip; 50-frame longjmp with zero `Drop`s; foreign AV recovered; embedded-VmHandle DNU recovery; PROBE dossier on ARM64 |
+| P3 tier-1 alive (the differential gate) | `M` | P2 | full suite green at `MACVM_JIT=threshold=1` **and** `MACVM_GC_STRESS=1` **and** `MACVM_DEOPT_STRESS=1`; benchmarks recorded in PERF.md vs the Mac's same-checkout numbers |
+| P4 GUI shell (Win32 + WebView2) | `M` | P2 (+P3 for JIT-on) | class browser + workspace usable in the running app; transcript round-trip; DNU in Workspace recovers; native-ARM64 process asserted |
+| P5 FFI + world gaps (winkb, ARM64 ABI) | `L` | P1, P2 | FFI smoke against real Win32 imports; ARM64 classifier unit-pinned (HFA/16-byte/by-ref); `Time now` wall-clock works; gated world FFI files resolved (enabled or explicitly re-scoped) |
+
+Sequencing: P0→P1→P2→P3 is the spine, strictly ordered. P4 branches after P2
+(a GUI without guest-fatal recovery dies on the first Workspace typo — WINVM
+shipped that bug and documents it), and only its metrics/JIT panes want P3.
+P5 branches after P2 and is independent of P3/P4. Mac-only tracks (CG, S20's
+Cocoa tier, gamepane, abc_player) are **gated out, not ported** — each gets a
+clean-fail Windows stub, WINVM's pattern.
+
 ---
 
 ## Standing rules

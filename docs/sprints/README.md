@@ -32,6 +32,20 @@ this order for any sprint SNN:**
 | S14 | [detail](sprint_s14_detail.md) | [tests](tests_s14.md) | Type feedback, inlining, customization, Context elision |
 | S15 | [detail](sprint_s15_detail.md) | [tests](tests_s15.md) | OSR, Richards/DeltaBlue, PERF.md |
 
+**Phase P — Windows-ARM64 port** (design of record:
+[`../../MIGRATION.md`](../../MIGRATION.md); read it before any P sprint the
+way SPEC.md is read before any S sprint — for Phase P, MIGRATION.md wins
+over sprint docs the way SPEC.md wins for S sprints):
+
+| Sprint | Detail | Tests | Scope |
+|---|---|---|---|
+| P0 | [detail](sprint_p00_detail.md) | [tests](tests_p00.md) | Toolchain, seed, OS-seam gating, interpreter-only green |
+| P1 | [detail](sprint_p01_detail.md) | [tests](tests_p01.md) | JIT loader, W^X guard, REAL icache flush, A64 relocs |
+| P2 | [detail](sprint_p02_detail.md) | [tests](tests_p02.md) | VEH for `brk`, AArch64 setjmp/longjmp, guest-fatal recovery, PROBE |
+| P3 | [detail](sprint_p03_detail.md) | [tests](tests_p03.md) | Tier-1 on-target: all stress gates, audits, PERF.md vs Mac |
+| P4 | [detail](sprint_p04_detail.md) | [tests](tests_p04.md) | GUI shell seam, Win32 + WebView2 |
+| P5 | [detail](sprint_p05_detail.md) | [tests](tests_p05.md) | winkb FFI, ARM64 ABI classifier, wall-clock, world FFI files |
+
 Provenance: drafted 2026-07 by parallel review agents against SPEC.md +
 `../reference-vm-analysis.md` (Self, Strongtalk, JASM, MacNCL-GC); every
 `SPEC-QUESTION` raised was adjudicated in SPEC.md §15. The S7/S8 docs embed

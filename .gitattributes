@@ -1,0 +1,4 @@
+# Scripted edits stay byte-clean across the mac/windows pair (MIGRATION.md
+# section 4 -- the WINVM lesson: a CRLF slip corrupts golden transcripts and
+# .mst world sources that both repos share verbatim).
+* text=auto eol=lf
