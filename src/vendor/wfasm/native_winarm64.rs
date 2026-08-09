@@ -163,15 +163,22 @@ fn round_up(n: usize, to: usize) -> usize {
 /// `writable` has no analogue at all: there is no per-thread W^X state on
 /// this platform to track.
 ///
-// WINARM (P1): the real loader lands here — see sprint_p01_detail.md D1.
-// It adds, on top of this region: `load_module` + `finalize` (relocation
-// resolution via the **unchanged** vendored `relocpatch.rs` — `Branch26`
-// patched in place, far/absolute targets through the existing
-// `movz/movk x16; br x16` veneer emitter), `define_extern`/`lookup`, the
-// `backend::Loader` impl for the builder path, and `dlsym_resolve`'s Windows
-// twin (`GetModuleHandleA`/`LoadLibraryA` + `GetProcAddress`), which is also
-// P5's FFI substrate. None of it is reachable in P0: nothing calls the
-// loader, because nothing compiles.
+// WINARM: the rest of `MacJit`'s surface is DELIBERATELY ABSENT, not pending.
+// Measured after P0 (sprint_p01_detail.md's Δ): `load_module`, `finalize`,
+// `define_extern` and `build_and_load` have **zero call sites** outside
+// `src/vendor/` on either platform. They exist on the macOS side only because
+// that file is vendored from JASM and they are JASM's own API; MACVM
+// deliberately bypasses the whole build/load/finalize protocol, which is
+// exactly why S9 added the standalone `region_raw` + W^X functions in the
+// first place. `CodeCache` owns allocation, publication, relocation and
+// patching; it holds this type only to own the region's lifetime. Writing
+// that protocol for Windows would produce code nothing on either host calls.
+//
+// The one genuinely missing piece is `dlsym_resolve`'s Windows twin
+// (`GetModuleHandleA`/`LoadLibraryA` + `GetProcAddress`). It belongs to
+// **P5**, where its three consumers live — all of them FFI (`runtime/ffi.rs`,
+// `runtime/objc_bridge.rs`, `runtime/objc_delegate.rs`), none of them the
+// JIT.
 pub struct WinA64Jit {
     region: *mut u8,
     cap: usize,

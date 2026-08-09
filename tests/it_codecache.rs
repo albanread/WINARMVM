@@ -162,6 +162,69 @@ fn patch_and_rerun_branch26() {
     assert_eq!(unsafe { call1(caller, 0) }, 2);
 }
 
+/// WINARM P1 (`docs/sprints/tests_p01.md` gate item 2): the same retarget,
+/// but a thousand times, alternating targets and executing after every
+/// single patch.
+///
+/// This is the one test that actually exercises the decision at the centre
+/// of the Windows-ARM64 port. On macOS the W^X cycle is a per-thread
+/// `pthread_jit_write_protect_np` toggle plus `sys_icache_invalidate`; here
+/// the toggle is a no-op and `icache_invalidate` is
+/// `FlushInstructionCache` **plus a local `isb sy`**
+/// (`vendor/wfasm/native_winarm64.rs`, MIGRATION.md §3.1). AArch64 has split
+/// I/D caches, so dropping either half leaves this thread able to execute a
+/// stale instruction it has already prefetched.
+///
+/// Alternating targets (rather than patching to the same address) means a
+/// stale fetch necessarily returns the *previous* answer, so the assertion
+/// names which iteration diverged and in which direction.
+///
+/// **This test does NOT prove the icache maintenance is correct, and must
+/// not be cited as if it did.** That was its intent; the intent failed, and
+/// the measurement is worth more than the intent. Both halves of
+/// `icache_invalidate` were commented out and the whole file re-run: this
+/// test, `patch_and_rerun_branch26` and `literal_pool_patch_rerun` **all
+/// still passed** (WINARM P1, 2026-08-09, this host). So on this machine a
+/// completely absent flush is not observable through the patch path at all,
+/// and no amount of looping here changes that.
+///
+/// Keep both halves anyway. The requirement is architectural, not empirical:
+/// AArch64 has split I/D caches and the ARM ARM requires the clean +
+/// invalidate + context-synchronization sequence before executing modified
+/// instructions. Whether one core, one chip, one OS build happens to tolerate
+/// its absence today is not the question — the next core, the next silicon,
+/// or a preempted thread resuming elsewhere is. A green run of this test is
+/// evidence that the patch path *works*; it is not evidence that the flush is
+/// unnecessary, and it is not evidence that the flush is present.
+///
+/// What this test does earn its place doing: exercising publish-patch-execute
+/// a thousand times over, which catches free-list, guard-nesting and
+/// patch-site regressions that the two-shot tests above would miss.
+#[test]
+fn patch_flip_churn_stays_coherent() {
+    let mut cc = CodeCache::new(1 << 16).unwrap();
+    let ret_1 = build_leaf(&mut cc, 1);
+    let ret_2 = build_leaf(&mut cc, 2);
+    let (caller, site_off) = build_caller(&mut cc);
+    let site = unsafe { caller.add(site_off as usize) };
+
+    for i in 0..1000u32 {
+        let (target, want) = if i % 2 == 0 { (ret_1, 1) } else { (ret_2, 2) };
+        cc.patch_branch26(site, target as u64);
+        let got = unsafe { call1(caller, 0) };
+        assert_eq!(
+            got, want,
+            "iteration {i}: patched the call site to the leaf returning {want} \
+             and immediately executed it, but got {got} — the previous \
+             target's answer. That is a stale instruction fetch: the write \
+             landed in D-cache but this thread executed what it had already \
+             prefetched, i.e. the icache maintenance in \
+             `native_winarm64::icache_invalidate` is incomplete \
+             (FlushInstructionCache without the local `isb sy`, or neither)."
+        );
+    }
+}
+
 /// A synthetic target 512 MiB away (never executed — nothing lives out
 /// there) forces the veneer path: the `bl` field must end up pointing at a
 /// freshly bump-allocated in-cache veneer whose `movz/movk` words

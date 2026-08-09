@@ -130,6 +130,56 @@ Keep the WINVM aliasing idea (call sites never change) but let the actual
 re-export shape follow what `guard.rs` and `codecache/mod.rs` import today —
 minimal-diff beats symmetric-looking.
 
+> **Δ (2026-08-09, measured after P0). Most of D1 is dead code; do not
+> build it.** This sprint was scoped at "~250 LoC" on the assumption that
+> the Windows loader owes the same surface `MacJit` exposes. It does not.
+> Counting real call sites outside `src/vendor/`:
+>
+> | method | call sites outside `vendor/` |
+> |---|---|
+> | `load_module`, `finalize`, `define_extern`, `build_and_load` | **0** |
+> | `region_raw` | 1 (`codecache/mod.rs`) |
+> | `with_capacity` | 43 |
+> | `dlsym_resolve` | 3 — all of them FFI (P5's work, not this sprint's) |
+>
+> `MacJit` carries the build/load/finalize protocol because it is a *vendored
+> JASM file* and that is JASM's own API. MACVM deliberately bypasses it —
+> S9's own vendoring note says the standalone `region_raw` + W^X functions
+> were added "so `CodeCache` can manage the region and W^X state directly
+> instead of going through `MacJit`'s own build/load/finalize protocol". So
+> `CodeCache` owns allocation, publication and patching; it holds
+> `NativeJit` only to own the region's lifetime. Implementing that protocol
+> for Windows would produce code with no caller on either platform.
+>
+> **P1's real content, therefore:** the region + W^X pair (landed in P0), the
+> S9 acceptance gate re-proven on this target, and nothing else.
+> `dlsym_resolve` moves to **P5**, where its three consumers live. The
+> `// WINARM (P1)` marker in `native_winarm64.rs` should be rewritten to say
+> "deliberately absent, see this Δ" rather than "lands here".
+>
+> **Gate status, measured on target:** items 1, 3 and 4 already pass —
+> `smoke_arith` / `smoke_internal_branch` / `smoke_call_rust_extern`,
+> `patch_and_rerun_branch26`, `literal_pool_patch_rerun`,
+> `veneer_fallback_forced`, `publish_is_position_independent`,
+> `freelist_reuse_executes`, `two_blobs_one_guard`, and
+> `corpus_replay_aarch64_matches_golden`. Item 2's churn loop was added
+> (`patch_flip_churn_stays_coherent`).
+>
+> **And a negative result that matters more than the test does.** The churn
+> loop was written to prove the mandatory icache maintenance. It cannot.
+> Commenting out **both** `FlushInstructionCache` and `isb sy` leaves it —
+> and both other patch tests — still passing on this host. A missing flush is
+> simply not observable through this path on this machine, so **no test here
+> can be cited as evidence the flush works**, and the D2 pitfall's "no test
+> failure ≠ correct" warning is now a measurement rather than a caution.
+> Keep both halves regardless: the requirement is architectural (split I/D
+> caches; the ARM ARM mandates clean + invalidate + context synchronization
+> before executing modified instructions), and tolerance on one core today
+> says nothing about another core, later silicon, or a thread resuming
+> elsewhere after preemption. `tests_p01.md`'s prescribed
+> "deliberate stale-icache reproducer" should be struck for the same reason:
+> it cannot be built reliably here.
+
 ## Implementation order
 
 1. `native_winarm64.rs` skeleton: region alloc/free + the W^X pair + unit
