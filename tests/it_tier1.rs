@@ -1,29 +1,33 @@
 //! Sprint S10 integration tests (`tests_s10.md`). This file is allowed
 //! `unsafe` (it lives in `tests/`, a separate crate from `macvm` itself).
 //!
-//! WINARM (P0 D3): the 19 `#[cfg_attr(windows, ignore = "P2: …")]` marks below
-//! are all one mechanism. A deopt/uncommon-trap site is an inline
-//! `brk #0xDE00` (`emit::emit_uncommon_trap`), and `deopt_trap::install` arms
-//! NO handler on Windows until P2 — so reaching one ends the PROCESS and takes
-//! the other 100+ tests in this binary with it. That is why they are `ignore`d
-//! rather than left to fail: an aborted binary reports nothing at all. They
-//! stay COMPILED (D3's rule: `#[ignore]`, never `#[cfg]`) so drift against the
-//! real emitters surfaces immediately, and `cfg_attr(windows, …)` keeps the Mac
-//! build of the same commit running every one of them.
+//! WINARM (P0 D3 → **P2, un-gated**): the 26 `#[cfg_attr(windows, ignore =
+//! "P2: …")]` marks that used to head the tests below were all one mechanism.
+//! A deopt/uncommon-trap site is an inline `brk #0xDE00`
+//! (`emit::emit_uncommon_trap`), and until P2 `deopt_trap::install` armed NO
+//! handler on Windows — so reaching one ended the PROCESS and took the other
+//! 100+ tests in this binary with it. That is why they were `ignore`d rather
+//! than left to fail: an aborted binary reports nothing at all. They stayed
+//! COMPILED throughout (D3's rule: `#[ignore]`, never `#[cfg]`), so no drift
+//! against the real emitters could hide behind the gate.
 //!
-//! Measured on this host while gating them (worth carrying into P2): Windows on
-//! ARM64 reports a `brk` whose immediate is outside Microsoft's own 0xF000
-//! namespace as **STATUS_ILLEGAL_INSTRUCTION (0xC000001D)**, *not*
-//! STATUS_BREAKPOINT — `brk #0xF000` is the only immediate that yields
-//! 0x80000003. MIGRATION.md §3.2's VEH must key on 0xC000001D accordingly, and
-//! must still decode the word at `Pc` through `decode_deopt_brk` to tell our
-//! traps from a genuinely undefined instruction (an all-zero word is `udf #0`
-//! and arrives with the same status).
+//! **P2 removed every one of those marks.** `codecache::deopt_trap` now arms a
+//! Vectored Exception Handler that decodes the `brk` and redirects into the
+//! same A64 trampolines macOS reaches through SIGTRAP, so these tests exercise
+//! the identical mechanism on both platforms — which is exactly what makes
+//! them the port's differential evidence rather than a Windows-shaped
+//! approximation of it. The `b4_*`/`b5_*` tests that spawn `macvm` as a CHILD
+//! (and were never ignored, because a failing assertion still lets the suite
+//! run) pass for the same reason: the child no longer dies on the trap.
 //!
-//! The `b4_*`/`b5_*` tests that FAIL rather than abort ("run must complete")
-//! are the same root cause one process removed: they spawn `macvm` as a CHILD,
-//! and it is the child that dies on the trap. They are deliberately NOT
-//! ignored — a failing assertion still lets the rest of the suite run.
+//! Measured on this host while gating them, and load-bearing for the handler
+//! that ungated them: Windows on ARM64 reports a `brk` whose immediate is
+//! outside Microsoft's own 0xF000 namespace as **STATUS_ILLEGAL_INSTRUCTION
+//! (0xC000001D)**, *not* STATUS_BREAKPOINT — `brk #0xF000` is the only
+//! immediate that yields 0x80000003. MIGRATION.md §3.2's VEH keys on
+//! 0xC000001D accordingly, and still decodes the word at `Pc` through
+//! `decode_deopt_brk` to tell our traps from a genuinely undefined instruction
+//! (an all-zero word is `udf #0` and arrives with the same status).
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -620,7 +624,6 @@ fn compiled_plus_arg_executes_correctly() {
 /// instead of `b` and fail, not merely "not crash". This is what pins the
 /// reexecute operand-stack correctness (`[a, b]` recorded at the send bci).
 #[test]
-#[cfg_attr(windows, ignore = "P2: deopt/uncommon-trap `brk #0xDE00` has no VEH yet (MIGRATION.md §3.2)")]
 fn compiled_smi_overflow_deopts_to_interpreter() {
     // JIT-armed VmState: `deopt_trap::install` arms the process-global SIGTRAP
     // handler and registers this VM's code-cache range, so a `brk` from the
@@ -753,7 +756,6 @@ fn compiled_smi_overflow_deopts_to_interpreter() {
 /// interpreter run. Same signal chain as the smi-overflow test, driven by the
 /// `BoolBr.not_bool` edge instead of a smi fail edge.
 #[test]
-#[cfg_attr(windows, ignore = "P2: deopt/uncommon-trap `brk #0xDE00` has no VEH yet (MIGRATION.md §3.2)")]
 fn compiled_not_boolean_deopts_to_interpreter() {
     let mut vm = VmState::with_options(VmOptions {
         heap_mib: 64,
@@ -885,7 +887,6 @@ fn compiled_not_boolean_deopts_to_interpreter() {
 /// receiver instead of the arg and fail — this pins the trap's recorded
 /// operand-stack correctness (receiver + args, captured before the send pops).
 #[test]
-#[cfg_attr(windows, ignore = "P2: deopt/uncommon-trap `brk #0xDE00` has no VEH yet (MIGRATION.md §3.2)")]
 fn compiled_untaken_send_traps_and_reexecutes() {
     let mut vm = VmState::with_options(VmOptions {
         heap_mib: 64,
@@ -4207,7 +4208,6 @@ fn compiled_inlined_accessor_matches_interpreter() {
 /// genuinely reachable (a `self`-receiver send would be caught by the redundant
 /// entry guard first — static-klass guard elision is a later step).
 #[test]
-#[cfg_attr(windows, ignore = "P2: deopt/uncommon-trap `brk #0xDE00` has no VEH yet (MIGRATION.md §3.2)")]
 fn compiled_inlined_accessor_guard_cold_path_deopts() {
     // A JIT-armed VM so the SIGTRAP handler is live (the guard's cold path is a
     // real `brk #0xDE00`).
@@ -4565,7 +4565,6 @@ fn compiled_inlined_nonleaf_matches_interpreter() {
 /// identical result to the pure interpreter, with `deopt_count` bumped. This is
 /// the first time the depth-N materializer runs at depth 2.
 #[test]
-#[cfg_attr(windows, ignore = "P2: deopt/uncommon-trap `brk #0xDE00` has no VEH yet (MIGRATION.md §3.2)")]
 fn deopt_through_inlined_nonleaf_body_rebuilds_both_frames() {
     // A JIT-armed VM so the SIGTRAP handler is live (the in-body trap and the
     // guard cold path are real `brk`s).
@@ -4883,7 +4882,6 @@ fn compiled_escaping_block_stays_interpreted() {
 /// generically → identical result to the pure interpreter, `deopt_count` bumped.
 /// This is the first time the materializer rebuilds a block frame.
 #[test]
-#[cfg_attr(windows, ignore = "P2: deopt/uncommon-trap `brk #0xDE00` has no VEH yet (MIGRATION.md §3.2)")]
 fn deopt_through_inlined_block_rebuilds_block_frame() {
     let mut vm = VmState::with_options(VmOptions {
         heap_mib: 64,
@@ -5147,7 +5145,6 @@ fn compiled_captured_temp_write_matches_interpreter() {
 /// and fill it from the promoted vreg, so the post-deopt `^x` (a ctx-temp read
 /// in the interpreter) sees the right value. == interp, deopt_count +1.
 #[test]
-#[cfg_attr(windows, ignore = "P2: deopt/uncommon-trap `brk #0xDE00` has no VEH yet (MIGRATION.md §3.2)")]
 fn compiled_captured_temp_deopt_materializes_context() {
     let mut vm = VmState::with_options(VmOptions {
         heap_mib: 64,
@@ -5228,7 +5225,6 @@ fn compiled_captured_temp_deopt_materializes_context() {
 /// from the promoted vreg); the post-deopt `sum := e bar` writes THAT Context, so
 /// M's `^sum` reads it back == interp. Exercises the block-frame context aliasing.
 #[test]
-#[cfg_attr(windows, ignore = "P2: deopt/uncommon-trap `brk #0xDE00` has no VEH yet (MIGRATION.md §3.2)")]
 fn deopt_through_capturing_block_aliases_home_context() {
     let mut vm = VmState::with_options(VmOptions {
         heap_mib: 64,
@@ -5673,7 +5669,6 @@ fn compiled_inlined_loop_callee_matches_interpreter() {
 /// resume at the `<` send) AND the CALLER frame → the interpreter runs the
 /// whole loop → 4, == interp, deopt_count +1.
 #[test]
-#[cfg_attr(windows, ignore = "P2: deopt/uncommon-trap `brk #0xDE00` has no VEH yet (MIGRATION.md §3.2)")]
 fn deopt_inside_inlined_loop_callee_rebuilds_frames() {
     let mut vm = VmState::with_options(VmOptions {
         heap_mib: 64,
@@ -5945,7 +5940,6 @@ fn compiled_blockarg_do_pattern_matches_interpreter() {
 /// interpreter re-executes `n upTo: realB` → K2's upTo: `value:`s the REAL
 /// closure → the block writes 99 through M's materialized Context → ^sum = 99.
 #[test]
-#[cfg_attr(windows, ignore = "P2: deopt/uncommon-trap `brk #0xDE00` has no VEH yet (MIGRATION.md §3.2)")]
 fn blockarg_guard_cold_materializes_closure() {
     let mut vm = VmState::with_options(VmOptions {
         heap_mib: 64,
@@ -6026,8 +6020,45 @@ fn blockarg_guard_cold_materializes_closure() {
 /// MATERIALIZED closure!), and the block (Context aliasing M's, the ROOT) —
 /// then the interpreter finishes the whole loop (using the real closure for
 /// the remaining iterations) → sumUp(5) = 15, deopt_count +1.
+// WINARM (P2) — **THIS IS A REAL, DIAGNOSED VM DEFECT, NOT A PLATFORM GAP.**
+// It is the ONE test P2 un-gated that did not convert to a pass, and it is
+// deliberately recorded here rather than left to abort, because a `debug_
+// assert!` inside `rt_uncommon_trap` (an `extern "C"` fn) is a NON-UNWINDING
+// panic: it aborts the whole `it_tier1` binary and takes the other 104 tests'
+// results with it, so leaving it live would destroy far more signal than it
+// carries. `ignore`, never `#[cfg]`, so it keeps compiling; `cfg_attr(windows,
+// …)` so the **Mac build of the same commit still RUNS it** — that run is the
+// arbitration this diagnosis explicitly asks for (MIGRATION.md §5: "the
+// behavioral oracle is the Mac build of the SAME checkout").
+//
+// What actually happens, measured (`MACVM_JIT` untouched; deterministic across
+// 8 runs, addresses aside):
+//   * The trap is delivered CORRECTLY. `rt_uncommon_trap` receives
+//     `word@pc == 0xd43bc000` (`brk #0xDE00`), a `site_off` that `DeoptState::
+//     at` resolves without panicking (so it IS a recorded site), and an `fp`
+//     whose neighbouring slots all read as sane oops. P2's VEH is not implicated
+//     — 104/105 tests in this file pass, including all six sibling
+//     `cold_splice_traps` deopt tests.
+//   * The DEPTH-3 site's recorded operand stack is wrong. The block parameter
+//     `e` is recorded as `ValueLoc::FrameSlot(-40)`, which holds the spilled
+//     CLOSURE oop; `i` is at `FrameSlot(-8)` (smi 1). So the materialized block
+//     frame computes `sum + <closure>` → the smi `+` primitive fails → the
+//     debug_assert above fires. In release the same corruption surfaces one
+//     step later as `DNU #+ (receiver class True)` at `SmallInteger>>upTo: @25`
+//     — the fused comparison's boolean where `i` should be.
+//   * `src/compiler/` contains **no** `cfg(target_os)`/`cfg(windows)`/
+//     `cfg(unix)` at all, and `src/runtime/deopt.rs`, `src/compiler/scopes.rs`
+//     and this test's own body are BYTE-IDENTICAL to the MACVM reference
+//     checkout (`C:\projects\MACVM`, diffed ignoring line endings). The same
+//     nmethod and the same recorded `ValueLoc`s are therefore produced on both
+//     hosts, which is why this is filed as mainline rather than as a port bug.
+#[cfg_attr(
+    windows,
+    ignore = "VM DEFECT (not a port gap): the depth-3 spliced-block deopt site records \
+              the block parameter at the CLOSURE's spill slot; aborts the binary via a \
+              non-unwinding debug_assert in rt_uncommon_trap. See the comment above."
+)]
 #[test]
-#[cfg_attr(windows, ignore = "P2: deopt/uncommon-trap `brk #0xDE00` has no VEH yet (MIGRATION.md §3.2)")]
 fn depth3_deopt_in_block_in_callee_rebuilds_all_frames() {
     let mut vm = VmState::with_options(VmOptions {
         heap_mib: 64,
@@ -6094,7 +6125,6 @@ fn depth3_deopt_in_block_in_callee_rebuilds_all_frames() {
 /// runs the real inlined/called send with NO deopt. This is the fix for the
 /// benchmark's 6x-slower cold-compiled dispatch.
 #[test]
-#[cfg_attr(windows, ignore = "P2: deopt/uncommon-trap `brk #0xDE00` has no VEH yet (MIGRATION.md §3.2)")]
 fn recompile_on_trap_closes_the_deopt_storm() {
     let mut vm = VmState::with_options(VmOptions {
         heap_mib: 64,
@@ -6211,7 +6241,6 @@ fn recompile_on_trap_closes_the_deopt_storm() {
 /// identical code. The check declines, bumps the stat, and the nmethod stays
 /// Alive at version 0 (no churn).
 #[test]
-#[cfg_attr(windows, ignore = "P2: deopt/uncommon-trap `brk #0xDE00` has no VEH yet (MIGRATION.md §3.2)")]
 fn recompile_declined_when_profile_unchanged() {
     let mut vm = VmState::with_options(VmOptions {
         heap_mib: 64,
@@ -6641,7 +6670,6 @@ fn super_send_into_devirt_target_goes_c2i() {
 /// shape was reachable pre-step-5 through warm-mono feedback, so this pins
 /// both doors shut (the splicers now self-validate their exact arm sets).
 #[test]
-#[cfg_attr(windows, ignore = "P2: deopt/uncommon-trap `brk #0xDE00` has no VEH yet (MIGRATION.md §3.2)")]
 fn self_send_to_closure_returning_target_compiles_without_abort() {
     // JIT-armed construction: the `value` send's cold IC compiles to a real
     // uncommon-trap `brk`, which needs the live SIGTRAP handler.
@@ -7014,7 +7042,6 @@ fn poly_same_target_cfg_splices_multiblock_predicate() {
 /// frame's own header (indistinguishable for the empty pending stacks every
 /// earlier depth-2 test froze), resuming with `lo` missing → `nil + ...` DNU.
 #[test]
-#[cfg_attr(windows, ignore = "P2: deopt/uncommon-trap `brk #0xDE00` has no VEH yet (MIGRATION.md §3.2)")]
 fn inlined_trap_deopt_restores_nonempty_pending_stack() {
     let mut vm = VmState::with_options(VmOptions {
         heap_mib: 64,
@@ -7982,7 +8009,6 @@ Smalltalk quit: 0.
 "#;
 
 #[test]
-#[cfg_attr(windows, ignore = "P2: child dies on a compiled brk; no VEH (MIGRATION.md §3.2)")]
 fn b4_nlr_send_block_splices() {
     osr_phase_b_differential("b4_first", B4_FIRST, &[], false, &[]);
     // The splice observable: at least one NLR block spliced at compile time.
@@ -7990,7 +8016,6 @@ fn b4_nlr_send_block_splices() {
 }
 
 #[test]
-#[cfg_attr(windows, ignore = "P2: child dies on a compiled brk; no VEH (MIGRATION.md §3.2)")]
 fn b4_nlr_splice_observable() {
     // Direct stat needle: the caller compiles at t=200 and the do: block-arg
     // splice runs the NlrTos arm.
@@ -7998,13 +8023,11 @@ fn b4_nlr_splice_observable() {
 }
 
 #[test]
-#[cfg_attr(windows, ignore = "P2: child dies on a compiled brk; no VEH (MIGRATION.md §3.2)")]
 fn b4_deopt_inside_spliced_nlr_block() {
     osr_phase_b_differential("b4_deopt", B4_DEOPT, &[], false, &[]);
 }
 
 #[test]
-#[cfg_attr(windows, ignore = "P2: child dies on a compiled brk; no VEH (MIGRATION.md §3.2)")]
 fn b4_deopt_inside_spliced_nlr_block_stress() {
     osr_phase_b_differential(
         "b4_deopt_ds",
@@ -8023,7 +8046,6 @@ fn b4_deopt_inside_spliced_nlr_block_stress() {
 }
 
 #[test]
-#[cfg_attr(windows, ignore = "P2: child dies on a compiled brk; no VEH (MIGRATION.md §3.2)")]
 fn b5_conditional_nlr_blockarg_splices() {
     osr_phase_b_differential(
         "b5_cond",
@@ -8035,7 +8057,6 @@ fn b5_conditional_nlr_blockarg_splices() {
 }
 
 #[test]
-#[cfg_attr(windows, ignore = "P2: child dies on a compiled brk; no VEH (MIGRATION.md §3.2)")]
 fn b5_conditional_nlr_blockarg_stress() {
     osr_phase_b_differential(
         "b5_cond_ds",
@@ -8073,7 +8094,6 @@ Smalltalk quit: 0.
 "#;
 
 #[test]
-#[cfg_attr(windows, ignore = "P2: child dies on a compiled brk; no VEH (MIGRATION.md §3.2)")]
 fn b5_zero_iteration_spliced_extent_fall_through() {
     osr_phase_b_differential("b5_zero", B5_ZERO_ITER, &[], false, &[]);
 }
@@ -8139,7 +8159,6 @@ fn b5_run(vm: &mut VmState, m: macvm::oops::wrappers::MethodOop, x: i64) -> i64 
 }
 
 #[test]
-#[cfg_attr(windows, ignore = "P2: deopt/uncommon-trap `brk #0xDE00` has no VEH yet (MIGRATION.md §3.2)")]
 fn b5_multibb_conditional_nlr_splices_both_exits() {
     let mut vm = loop_test_vm(); // Threshold(1); smi prims installed
     install_value_prims(&mut vm);
@@ -8176,7 +8195,6 @@ fn b5_multibb_conditional_nlr_splices_both_exits() {
 }
 
 #[test]
-#[cfg_attr(windows, ignore = "P2: deopt/uncommon-trap `brk #0xDE00` has no VEH yet (MIGRATION.md §3.2)")]
 fn b5_multibb_all_arms_nlr_dead_continuation() {
     let mut vm = loop_test_vm();
     install_value_prims(&mut vm);
@@ -8267,7 +8285,6 @@ fn b5_deopt_home(vm: &mut VmState) -> macvm::oops::wrappers::MethodOop {
 }
 
 #[test]
-#[cfg_attr(windows, ignore = "P2: deopt/uncommon-trap `brk #0xDE00` has no VEH yet (MIGRATION.md §3.2)")]
 fn b5_deopt_inside_nlr_arm_bb_of_grafted_block() {
     let mut vm = loop_test_vm();
     // Pre-4c575c8 trap lowering: keep this materializer pin exercising
@@ -8340,7 +8357,6 @@ fn b5_deopt_inside_nlr_arm_bb_of_grafted_block() {
 /// runs with a moving collector breathing on it, and the grafted block's
 /// scope reconstruction must stay coherent.
 #[test]
-#[cfg_attr(windows, ignore = "P2: deopt/uncommon-trap `brk #0xDE00` has no VEH yet (MIGRATION.md §3.2)")]
 fn b5_deopt_inside_grafted_block_gc_stress() {
     let mut vm = VmState::with_options(VmOptions {
         heap_mib: 64,

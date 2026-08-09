@@ -197,11 +197,43 @@ layer gets `#[cfg(target_os = "macos")]` exactly as WINVM gated it.
 > `MACVM_JIT=off` prints and exits 0; `MACVM_JIT=threshold=2` dies at once
 > with 0xC000001D.
 
+> **Δ (2026-08-09, P2) — BUILT, and one more correction.** Everything the Δ
+> above measured held when the handler was written, and the isolated probe
+> re-confirmed each fact (`ARM64_NT_CONTEXT` size **0x390**, `Cpsr` 0x004,
+> `X` 0x008, `X[16]` **0x088**, `Sp` 0x100, `Pc` **0x108**, `V` 0x110, `Fpcr`
+> 0x310 — all now `const _:` asserts in `deopt_trap.rs`). Two things this
+> section got wrong, both now fixed in the code:
+>
+> 1. **The classification ORDER is not WINVM's, and it cannot be.** WINVM's
+>    x64 handler tests `is_probe_fault(code)` first and only then
+>    `STATUS_BREAKPOINT`, because on x64 the two are disjoint (`int3` →
+>    BREAKPOINT, a bad instruction → ILLEGAL_INSTRUCTION). Here our `brk` and
+>    a genuine illegal instruction arrive with the **same** code, so the
+>    deopt-trap decode must run FIRST for 0xC000001D and fall through to the
+>    fault classifier only when `decode_deopt_brk` refuses the word. Copying
+>    WINVM's order verbatim turns every uncommon trap in the VM into a crash
+>    dossier.
+> 2. **`STATUS_ILLEGAL_INSTRUCTION` must stay in the PROBE fault set anyway.**
+>    Once the decode has refused it, an illegal instruction inside a
+>    registered cache is exactly the "wild jump into unfilled memory" case
+>    §3.2 warned about, and a dossier is the right response — the same reason
+>    WINVM put it there.
+>
+> Also measured, and unrelated to any of the above but load-bearing for
+> §3.3's tests: **x19 cannot be named in a Rust inline `asm!` operand** on
+> aarch64 — rustc rejects it with "x19 is used internally by LLVM" (it is the
+> backend's base-pointer register). It is still callee-saved and still in the
+> jump buffer; only a *test* that wants to plant a sentinel in it has to be
+> written in `global_asm!` instead.
+
 **Probe-first discipline (binding, learned twice in WINVM):** before wiring
 the VEH into the VM, validate the raw mechanism in an isolated test — emitted
 `brk 0xDE00` → VEH → capture trampoline → resume — exactly like WINVM's
 `veh_redirect_smoke`. Same for §3.3's setjmp. Fault mechanisms are validated
-in a scratchpad before they touch the VM.
+in a scratchpad before they touch the VM. **P2 did exactly this and it paid
+twice**: the jump probe surfaced the x19 restriction above before it could
+look like a broken setjmp, and the VEH probe pinned all eight context offsets
+before a single line of handler existed.
 
 ### 3.3 Non-unwinding setjmp/longjmp — the AArch64 twin
 
@@ -231,6 +263,32 @@ longjmp value. Two WINVM findings carry as warnings:
 
 PAC is off (this repo's own stubs already note it), so no `paciasp` pairing
 issues; lr is saved/restored raw.
+
+> **Δ (2026-08-09, P2) — BUILT; the design held, with three notes.**
+> `winvm_setjmp`/`winvm_longjmp` are ~30 instructions each. Buffer layout, as
+> a real `#[repr(C)]` type (`WinJmpBuf`) whose `offset_of!`s feed the
+> `global_asm!` as `const` operands, so there is no magic number in the asm:
+> `0x00` x19–x28, `0x50` fp+lr, `0x60` sp, `0x68` reserved, `0x70` d8–d15 —
+> 176 bytes inside the existing 256-byte `WinJmpSlot`.
+>
+> 1. **AArch64 is genuinely simpler than the x64 twin, in one specific way.**
+>    The caller's continuation is already in `lr` at entry, and `sp` at entry
+>    already IS the post-return sp (nothing was pushed to call us), so x64's
+>    "read the return address off the stack, and remember rsp is 8 past it"
+>    collapses into one `stp x29, x30`.
+> 2. **Neither routine emits `.pdata`/`.xdata`, and that is correct rather
+>    than an omission.** With no unwind record Windows treats a function as a
+>    leaf with the return address in lr — which both of these ARE (they build
+>    no frame). It is also the honest description: the entire contract is that
+>    nothing ever unwinds through them.
+> 3. **`longjmp(env, 0)` must surface as 1** — `csinc w0, w1, wzr, ne` after
+>    `cmp w1, wzr`, one instruction. Easy to leave out and invisible until a
+>    caller's `if rc == 0` branch silently re-runs the guest code it was
+>    recovering from.
+>
+> The `RtlCaptureContext` warning was heeded, not re-tested; the two
+> `#[cfg(windows)]` `sigsetjmp`/`siglongjmp` P0 stubs (a no-op returning 0 and
+> a loud abort) are gone.
 
 ### 3.4 ABI deltas: Apple AAPCS64 → MS AAPCS64 (small, mostly already satisfied)
 
@@ -376,3 +434,109 @@ against a cousin, WINARM diffs against its own twin.
     the literal `gate-p00` — cannot pass without either reformatting ~43 files
     (a large, permanent divergence from MACVM that would fight every
     cherry-pick) or pinning a toolchain. Left as a decision, deliberately.
+- **2026-08-09 — P2 done. The trap layer is alive on Windows ARM64: a
+  compiled `brk #0xDExx` round-trips through a Vectored Exception Handler
+  into the unchanged A64 trampolines, and guest-fatal / foreign-fault
+  recovery works through a hand-written non-unwinding AArch64
+  setjmp/longjmp.** The integration check MIGRATION.md §3.2 specified now
+  passes: `MACVM_JIT=threshold=2 … scripts/p2-deopt-roundtrip.mst` prints the
+  promoted bignum and exits 0, where before P2 it died at once with
+  0xC000001D.
+  - **Suite: 1058 passed / 0 failed / 14 ignored**, from 993 / 0 / 65. All
+    52 `#[cfg_attr(windows, ignore = "P2: …")]` marks removed (26 in
+    `tests/it_tier1.rs`, 25 in `src/embed.rs`, 1 in
+    `src/interpreter/send.rs`); **51 of the 52 converted straight to a pass**
+    (the 52nd is the defect below). `tests/it_probe.rs` — all 4 dossier
+    tests, which P0 had shut off entirely with a file-level
+    `#![cfg(target_os = "macos")]` — is un-gated too and green, so PROBE's
+    dossier, register annotation and `disasm_a64` window all work on ARM64
+    Windows. 10 new tests in `codecache::deopt_trap`. The remaining 14
+    ignores are the 12 P5 marks, one pre-existing `it_codecache` ignore, and
+    the defect below.
+  - **Everything new is delivery; nothing ISA-level was twinned.**
+    `decode_deopt_brk`, the `0xDE00..=0xDE02` namespace, the code-cache
+    registry, `CAPTURED`/`read_captured`, `PROBE_IN_PROGRESS`, the
+    recovery-slot registry, the A64 trampoline builders and the whole PROBE
+    dossier (`disasm_a64` included) are shared code that both platforms
+    reach through different front doors. That is why the sprint's "risky
+    ~400 LoC" estimate held.
+  - **Probe-first paid twice** (§3.2/§3.3's Δ blocks carry the detail): the
+    isolated jump probe surfaced that **x19 cannot be named in a Rust inline
+    `asm!` operand** before that could look like a broken setjmp, and the VEH
+    probe pinned all eight `ARM64_NT_CONTEXT` offsets before a line of
+    handler existed. Both mechanisms were green in the scratchpad before
+    anything in the VM called them.
+  - **The one design correction P2 had to make**: the handler's
+    classification ORDER cannot be WINVM's. On x64 a trap and an illegal
+    instruction are different status codes; here they are the same one, so
+    the `brk` decode must run FIRST and fall through to the fault classifier
+    only when `decode_deopt_brk` refuses the word (§3.2's second Δ).
+  - **The one un-gated test that did NOT convert to a pass — and it is a
+    real VM defect, not a platform gap.**
+    `it_tier1::depth3_deopt_in_block_in_callee_rebuilds_all_frames` (S14 step
+    7-IV-c, the depth-3 spliced-block deopt) fails deterministically. The
+    trap itself is delivered correctly: `rt_uncommon_trap` gets
+    `word@pc == 0xd43bc000`, a `site_off` that `DeoptState::at` resolves
+    without panicking, and an `fp` whose neighbouring slots all read as sane
+    oops — and 104/105 tests in that file pass, including all six sibling
+    `cold_splice_traps` deopt tests. **The depth-3 site's recorded operand
+    stack is wrong**: the block parameter `e` is recorded as
+    `ValueLoc::FrameSlot(-40)`, which holds the spilled CLOSURE oop, while
+    `i` sits at `FrameSlot(-8)`. The materialized block then computes
+    `sum + <closure>`, the smi `+` primitive fails, and a `debug_assert!` in
+    `try_primitive` fires (in release the same corruption surfaces one step
+    later as `DNU #+ (receiver class True)` at `SmallInteger>>upTo: @25`).
+    **Filed as MACVM mainline**: `src/compiler/` contains no
+    `cfg(target_os)`/`cfg(windows)`/`cfg(unix)` at all, and `runtime/deopt.rs`,
+    `compiler/scopes.rs` and the test body are byte-identical to
+    `C:\projects\MACVM` (diffed ignoring line endings), so the same nmethod
+    and the same recorded `ValueLoc`s are produced on both hosts. Marked
+    `#[cfg_attr(windows, ignore = "VM DEFECT (not a port gap): …")]` — NOT a
+    P2 gate, and mac-side still RUNS it, which is the arbitration this
+    diagnosis wants. Re-gated only because the assert is a non-unwinding
+    panic out of an `extern "C"` fn: leaving it live aborts the whole
+    `it_tier1` binary and destroys the other 104 tests' results.
+  - **Also found by un-gating, and not a defect at all — but it LOOKS like
+    one, so the disproof is recorded here.**
+    `embed::tests::mandelvm_dives_once_then_stops_itself` renders 140
+    Mandelbrot frames and costs **~45 minutes in a debug build** (18.2 s in
+    release); it now single-handedly dominates `cargo test` wall-clock. A
+    debug lib binary sitting at 100 % CPU for 40 minutes with no file writes
+    reads exactly like a VEH **exception storm** (a handler that resumes with
+    `Pc` still on the trapping word re-faults forever), and P2 was
+    interrupted once on that hypothesis. It is not one, and the check is
+    cheap enough to keep on file:
+    - **Instrumented count of every `veh_trap_handler` ENTRY** (temporary
+      static, one `raw_stderr` line per entry): **8 entries** for the whole
+      `p2-deopt-roundtrip.mst` gate run, **2 entries** for three Mandelbrot
+      frames. A storm is thousands per second.
+    - **Per-frame wall clock in debug**, printed from the guest: 5969, 5299,
+      5969, 7739, 8417, 10301, 11586, 11588 ms — monotone forward progress,
+      per-frame cost rising because the dive deepens (more iterations near
+      the set boundary), which is the shape a Mandelbrot zoom must have.
+    - `MACVM_TRACE=stats` on the same workload: `deopt_count=2`,
+      `compilations=33`. The JIT is helping — JIT-off is >3× slower again.
+    P0's `#[ignore]` hid the cost, it did not create it. Worth a frame-count
+    reduction upstream in MACVM; deliberately not changed here, since a port
+    must not quietly weaken a shared test. **Operationally: always run this
+    suite with a timeout and, when iterating, `-- --skip mandelvm`** — the
+    other 1057 tests finish in about three minutes.
+  - **Also corrected while here**: `deopt_trap.rs`'s claim that Rust's
+    `abort()` is `brk #1` (it is `__fastfail` on this target, and never
+    reaches a vectored handler at all), and P0's Windows `sigsetjmp` /
+    `siglongjmp` stubs — a no-op returning `0` and a loud abort — are gone.
+  - **Interfaces P3 inherits, already smoke-tested here**:
+    `MACVM_DEOPT_STRESS=1` works (the `0xDE01` `TRAP_STRESS` sites fire and
+    round-trip — `deopt_count=8`, `compilations=84` on the gate script, exit
+    0), so P3's stress modes have a live mechanism to turn on at scale. The
+    one thing tests_p02.md asked for and P2 did NOT automate is the forced
+    re-entrancy test ("a fault INSIDE the dossier path terminates rather than
+    recurses"): the guard IS wired — `PROBE_IN_PROGRESS` is the same static
+    the macOS handler uses, read by [`handle_win_fault`] before it claims a
+    fault — but macOS has no such test either, and a test that gets it wrong
+    hangs the suite rather than failing it.
+  - `just gate-p02` added (chaining `gate-p00`; **`gate-p01` was never added
+    to the justfile by P1**, so the chain skips a rung that does not exist —
+    a real gap, recorded rather than papered over), plus
+    `scripts/p2-deopt-roundtrip.mst` as its JIT-off/JIT-on integration
+    fixture.

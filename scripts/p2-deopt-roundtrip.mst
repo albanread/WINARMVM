@@ -1,0 +1,33 @@
+"p2-deopt-roundtrip.mst — WINARM sprint P2's end-to-end integration check
+ (MIGRATION.md §3.2, `just gate-p02`).
+
+ An smi overflow inside a WARMED method is the shortest path to a real
+ uncommon trap: `n + n` compiles to a `adds`/`b.vs` pair whose overflow edge
+ is an inline `brk #0xDE00` (`emit::emit_uncommon_trap`), so crossing
+ SmallInteger maxVal in compiled code is a genuine deopt — materialize the
+ interpreter frame, re-execute the add, promote to a LargePositiveInteger,
+ and return the result to the compiled method's caller as if nothing had
+ happened.
+
+ The contract this file encodes is a DIFFERENCE, so run it both ways:
+
+   MACVM_JIT=off        cargo run -- run scripts/p2-deopt-roundtrip.mst --world world
+   MACVM_JIT=threshold=2 cargo run -- run scripts/p2-deopt-roundtrip.mst --world world
+
+ Both must print the same four lines and exit 0. Before P2 landed the VEH,
+ the second command died at once on Windows ARM64 with 0xC000001D
+ (STATUS_ILLEGAL_INSTRUCTION — which is what a `brk` outside Microsoft's own
+ 0xF000 namespace raises here, NOT STATUS_BREAKPOINT; that measurement is
+ the whole reason the handler is keyed the way it is).
+
+ The three warm-up sends are what push `f:` past `threshold=2` so the
+ fourth call runs COMPILED and the trap is real rather than interpreted."
+
+Object subclass: DeoptRepro [
+    DeoptRepro class >> f: n [ ^n + n ]
+]
+
+Transcript show: (DeoptRepro f: 1) printString. Transcript cr.
+Transcript show: (DeoptRepro f: 2) printString. Transcript cr.
+Transcript show: (DeoptRepro f: 3) printString. Transcript cr.
+Transcript show: (DeoptRepro f: SmallInteger maxVal) printString. Transcript cr.

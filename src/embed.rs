@@ -1583,33 +1583,38 @@ mod tests {
     // any drift shows up immediately. `cfg_attr(windows, …)` rather than a bare
     // `ignore` so the Mac build of the same commit keeps RUNNING them all.
     //
-    // These are ignored because each one currently ends the test PROCESS —
-    // not because it fails an assertion. A crash takes the other 85 tests in
-    // this binary down with it, which is the difference between `cargo test`
-    // completing and `cargo test` reporting nothing. Three distinct mechanisms,
-    // named individually in each reason string:
+    // They were ignored because each one ended the test PROCESS — not because
+    // it failed an assertion. A crash takes the other 85 tests in this binary
+    // down with it, which is the difference between `cargo test` completing and
+    // `cargo test` reporting nothing. Three distinct mechanisms, named
+    // individually in each reason string:
     //
     //   * P2 / `brk #0xDE00` — a compiled `Ir::UncommonTrap` (`emit::
     //     emit_uncommon_trap`) with no handler, because `deopt_trap::install`
-    //     arms nothing on Windows until P2. **Measured on this host: Windows
-    //     on ARM64 reports a `brk` outside Microsoft's own 0xF000 namespace as
+    //     armed nothing on Windows. **Measured on this host: Windows on ARM64
+    //     reports a `brk` outside Microsoft's own 0xF000 namespace as
     //     STATUS_ILLEGAL_INSTRUCTION (0xC000001D), not STATUS_BREAKPOINT** —
-    //     only `brk #0xF000` yields 0x80000003. MIGRATION.md §3.2's VEH must
-    //     therefore key on 0xC000001D and separate ours from a genuine bad
-    //     instruction by decoding the word at `Pc` (`decode_deopt_brk`, which
-    //     already does exactly that). Symptom: JIT-on tests here die silently.
-    //   * P2 / recovery — `raise_guest_fatal` reaches the `siglongjmp` STUB
-    //     (`deopt_trap.rs`, P0 D2#5), which aborts by construction. Every test
+    //     only `brk #0xF000` yields 0x80000003. **FIXED in P2**: the VEH keys
+    //     on 0xC000001D and separates ours from a genuine bad instruction by
+    //     decoding the word at `Pc` (`decode_deopt_brk`, unchanged).
+    //   * P2 / recovery — `raise_guest_fatal` reached the `siglongjmp` STUB
+    //     (`deopt_trap.rs`, P0 D2#5), which aborted by construction. Every test
     //     whose POINT is that a DNU / `error:` / deliberate worker crash is
-    //     RECOVERED at `eval`'s boundary needs §3.3's AArch64 longjmp twin.
+    //     RECOVERED at `eval`'s boundary needed §3.3's AArch64 longjmp twin.
+    //     **FIXED in P2**: that twin is `winvm_setjmp`/`winvm_longjmp`, and the
+    //     VEH's own foreign-fault branch reuses it for a native fault.
     //   * P5 / FFI — the world's `IoWorker` binds `kqueue` (and `mmap`)
     //     through `<primitive: FFI …>`; the resolver is `dlsym`-only until P5
-    //     (MIGRATION.md §3.5). The unresolved symbol guest-fatals, and the
-    //     guest-fatal then hits the P2 stub above. Worth flagging for P5's
-    //     own planning: `kqueue` has no Windows twin, so these need an
+    //     (MIGRATION.md §3.5). **Still open, and now it fails differently and
+    //     better**: the unresolved symbol guest-fatals, and the guest-fatal is
+    //     now RECOVERED into a `GuestError` instead of aborting — so these
+    //     tests fail their assertions rather than taking the binary down, and
+    //     P5 can iterate on them without a subprocess harness. Worth flagging
+    //     for P5's own planning: `kqueue` has no Windows twin, so these need an
     //     IOCP/WSAPoll backend for `IoWorker`, not just a symbol resolver.
     //
-    // P3 removes the P2 strings; P5 removes the P5 ones.
+    // **P2 removed every P2 mark in this file (25 of them).** Only the P5 ones
+    // remain.
 
     fn boot_test_vm(jit: JitMode) -> VmHandle {
         VmHandle::boot(
@@ -1657,10 +1662,6 @@ mod tests {
     /// exercising the compiled path immediately rather than needing a hot
     /// loop to cross a higher threshold.
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "P2: compiled `brk #0xDE00` uncommon trap has no VEH yet (MIGRATION.md §3.2)"
-    )]
     fn eval_works_with_jit_enabled_and_aggressive_threshold() {
         let mut vm = boot_test_vm(JitMode::Threshold(1));
         let result = vm.eval("6 * 7.").expect("6 * 7 must evaluate cleanly");
@@ -1767,10 +1768,6 @@ mod tests {
     /// and escaped (coloured) pixels — i.e. the float compute really
     /// discriminated points, not painted one flat colour.
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "P2: compiled `brk #0xDE00` uncommon trap has no VEH yet (MIGRATION.md §3.2)"
-    )]
     fn mandelbrot_fills_an_rgba_pixmap() {
         let mut vm = boot_test_vm(JitMode::Threshold(1));
         let (w, h) = (120usize, 90usize);
@@ -1802,10 +1799,6 @@ mod tests {
     /// built by the sunk box on the cold path. Wrong bits here would be a
     /// silent wrong answer, so this pins the exact fallback values.
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "P2: compiled `brk #0xDE00` uncommon trap has no VEH yet (MIGRATION.md §3.2)"
-    )]
     fn float_fuse_deopt_reboxes_sunk_intermediates_correctly() {
         let mut vm = boot_test_vm(JitMode::Threshold(10));
         vm.exec(
@@ -1850,10 +1843,6 @@ mod tests {
     /// would change the final sum. Asserts a deopt actually fired, so the
     /// path can never silently stop being exercised.
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "P2: compiled `brk #0xDE00` uncommon trap has no VEH yet (MIGRATION.md §3.2)"
-    )]
     fn float_temp_promotion_materializes_raw_slots_on_a_midloop_deopt() {
         let mut vm = boot_test_vm(JitMode::Threshold(10));
         vm.exec(
@@ -2169,10 +2158,6 @@ mod tests {
     /// recovery turns the unhandled error into an `Err`, leaving the VM alive
     /// so the next `eval` can read back what the cleanup recorded.
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "P2: guest-fatal recovery needs the AArch64 longjmp twin (MIGRATION.md §3.3)"
-    )]
     fn ensure_block_runs_when_the_protected_block_errors() {
         let mut vm = boot_test_vm(JitMode::Off);
         vm.eval(
@@ -2347,10 +2332,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "P2: compiled `brk #0xDE00` uncommon trap has no VEH yet (MIGRATION.md §3.2)"
-    )]
     fn mandelvm_dives_once_then_stops_itself() {
         // MandelVM (world/46_mandelvm.mst) is MandelZoom that dives ONCE and then
         // ends — the standalone-window demo's "run, then exit" contract. Drive it
@@ -2440,10 +2421,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "P2: compiled `brk #0xDE00` uncommon trap has no VEH yet (MIGRATION.md §3.2)"
-    )]
     fn metrics_snapshot_reports_live_counters() {
         let mut vm = boot_test_vm(JitMode::Threshold(1));
         let m0 = vm.metrics();
@@ -2480,10 +2457,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "P2: compiled `brk #0xDE00` uncommon trap has no VEH yet (MIGRATION.md §3.2)"
-    )]
     fn live_stats_lets_a_monitor_observe_compiled_execution_off_thread() {
         // The interpreter/compiler ratio depends on a monitor sampling a VM's
         // `compiled_depth` from ANOTHER thread while the VM runs. Prove it: warm
@@ -3448,10 +3421,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "P2: guest-fatal recovery needs the AArch64 longjmp twin (MIGRATION.md §3.3)"
-    )]
     fn perform_calls_a_method_by_name() {
         // `perform:withArguments:` (prim 64) + its arity sugar: a Symbol
         // names a method and the real method body runs — a primitive, an
@@ -3544,10 +3513,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "P2: guest-fatal recovery needs the AArch64 longjmp twin (MIGRATION.md §3.3)"
-    )]
     fn worker_crash_is_isolated_and_reported_as_a_message() {
         // §8: a worker whose handler errors dies ALONE — the primary gets a
         // {#workerDied. id} message through the ordinary inbox, the process
@@ -3579,10 +3544,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "P2: guest-fatal recovery needs the AArch64 longjmp twin (MIGRATION.md §3.3)"
-    )]
     fn worker_terminate_and_liveness() {
         let mut vm = boot_worker_primary();
         vm.exec("WkTest w1: (Worker spawn: 'Worker onMessage: [:m | Worker reply: m payload]').")
@@ -3603,10 +3564,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "P2: compiled `brk #0xDE00` uncommon trap has no VEH yet (MIGRATION.md §3.2)"
-    )]
     fn parallel_mandel_computes_a_full_frame_across_worker_vms() {
         // The M4 capstone, headless: ParallelMandel fans one frame out to 4
         // worker VMs (a band each), the continuations assemble `buf`, and the
@@ -3710,10 +3667,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "P2: guest-fatal recovery needs the AArch64 longjmp twin (MIGRATION.md §3.3)"
-    )]
     fn worker_spawn_cap_is_enforced() {
         let mut vm = boot_worker_primary();
         vm.exec("1 to: 16 do: [:i | Worker spawn ].")
@@ -3728,10 +3681,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "P2: guest-fatal recovery needs the AArch64 longjmp twin (MIGRATION.md §3.3)"
-    )]
     fn worker_spawn_without_boot_fn_fails_cleanly() {
         // The GamePane posture: with no registered boot closure the world
         // class is harmless — spawn raises a clean error, nothing hangs.
@@ -3781,10 +3730,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "P2: guest-fatal recovery needs the AArch64 longjmp twin (MIGRATION.md §3.3)"
-    )]
     fn supervised_worker_crash_respawns_and_the_name_answers_again() {
         let mut vm = boot_supervised_echo();
         // Pre-crash: the tree's worker answers through its NAME.
@@ -3813,10 +3758,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "P2: guest-fatal recovery needs the AArch64 longjmp twin (MIGRATION.md §3.3)"
-    )]
     fn supervised_init_crash_storm_gives_up_cleanly() {
         // A child whose INIT crashes: every (re)spawn dies during its init
         // doit, so the tree restarts it maxRestarts times inside the window
@@ -3843,10 +3784,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "P2: guest-fatal recovery needs the AArch64 longjmp twin (MIGRATION.md §3.3)"
-    )]
     fn failed_send_after_crash_costs_one_clean_extra_restart_and_leaks_nothing() {
         // §4.1's ordering + the duplicate-died/reused-id race, manufactured
         // deliberately: crash the worker, then keep sending to the corpse
@@ -3904,10 +3841,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "P2: guest-fatal recovery needs the AArch64 longjmp twin (MIGRATION.md §3.3)"
-    )]
     fn unsupervised_worker_death_leaves_the_tree_untouched() {
         // A raw Worker spawn: next to a live tree: its death routes to the
         // DiedHandler, finds no owner, and is logged-and-dropped — the tree
@@ -4921,16 +4854,25 @@ mod tests {
 
     // ── Cocoa bridge C0 gates (docs/cocoa_bridge_design.md §8) ──────────
     //
-    // WINARM (P0 D3): every test from here to the end of the Cocoa block
-    // carries `#[cfg(target_os = "macos")]`. They drive guest code through
-    // the real Objective-C runtime, which Windows does not have — and the
-    // failure is not a quiet one. On Windows the bridge correctly reports
-    // "NSString class missing" and raises a guest `error:`, that becomes a
-    // guest-fatal, and guest-fatal reaches `siglongjmp`, which is a stub
-    // that ABORTS until sprint P2 lands the AArch64 setjmp/longjmp + VEH
-    // (MIGRATION.md §3.2/§3.3). An aborting test takes the whole test
-    // BINARY down with it, so these would cost every other test in the
-    // crate, not just themselves.
+    // WINARM (P0 D3, **corrected in P2**): every test from here to the end
+    // of the Cocoa block carries `#[cfg(target_os = "macos")]`. They drive
+    // guest code through the real Objective-C runtime, which Windows does
+    // not have.
+    //
+    // P0's stated reason was only half the story, and P2 disproved that
+    // half: it said the failure "is not a quiet one" because the bridge
+    // reports "NSString class missing", raises a guest `error:`, and the
+    // guest-fatal reaches an ABORTING `siglongjmp` stub, taking the whole
+    // test binary down. That stub is gone — P2 landed the real AArch64
+    // longjmp, so a guest-fatal in an embedded `VmHandle` now recovers into
+    // an ordinary `Err(GuestError::…)` and costs nothing but its own test.
+    //
+    // **The gate stays anyway, and permanently**, for the reason that was
+    // always the real one: there is no Objective-C runtime here, so there is
+    // nothing for these tests to assert against. They are NOT "un-gate in
+    // P2" work — P0's closing line ("these come back in P2") was wrong.
+    // Windows' equivalent surface is P4's Win32 + WebView2 shell, which is a
+    // different bridge with its own tests, not a Cocoa one.
     //
     // Gated one-by-one rather than by wrapping the block in a module, so
     // that no existing line moves and the file stays cherry-pickable
@@ -4940,10 +4882,6 @@ mod tests {
     // no ObjC send anywhere in it — and it passes here, so gating it would
     // have thrown away real coverage. Verified by running it, not by
     // reading the name.
-    //
-    // These come back in P2, and they are worth more then than now: they
-    // are the differential evidence that the bridge behaves identically on
-    // both hosts.
 
     /// The wrap/release counters are process-wide and the test harness is
     /// parallel — every Cocoa test takes this lock so counter deltas (and
@@ -5892,10 +5830,6 @@ mod tests {
     /// demands: after any recovered error the stack and arena are byte-for-byte
     /// back at the between-doits baseline, no matter how many errors fire.
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "P2: guest-fatal recovery needs the AArch64 longjmp twin (MIGRATION.md §3.3)"
-    )]
     fn eval_recovers_to_a_clean_stack_and_arena_without_accumulating() {
         for jit in [JitMode::Off, JitMode::Threshold(1)] {
             let mut vm = boot_test_vm(jit);
@@ -5955,10 +5889,6 @@ mod tests {
     /// native fault the VM is byte-for-byte back at the idle baseline, across
     /// repeated faults, under both JIT modes, through both `eval` and `exec`.
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "P2: native-fault recovery needs the VEH + AArch64 longjmp (MIGRATION.md §3.2/§3.3)"
-    )]
     fn eval_recovers_to_a_clean_baseline_after_a_native_fault() {
         for jit in [JitMode::Off, JitMode::Threshold(1)] {
             let mut vm = boot_test_vm(jit);
@@ -6132,10 +6062,6 @@ mod tests {
     /// own `lookup(super_klass, sel)` on every c2i super call, exactly as
     /// `rt_resolve_send` already did for the nmethod super case.
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "P2: compiled `brk #0xDE00` uncommon trap has no VEH yet (MIGRATION.md §3.2)"
-    )]
     fn compiled_super_send_sees_ancestor_redefinition_through_c2i() {
         let mut vm = boot_test_vm(JitMode::Threshold(1));
         // Two traps this test's own drafts fell into, kept as documentation:
@@ -6198,10 +6124,6 @@ mod tests {
     /// disconnect. (`Resume`'s opposite behavior — the worker survives and
     /// stays usable — is covered by the sibling recovery tests.)
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "P2: guest-fatal recovery needs the AArch64 longjmp twin (MIGRATION.md §3.3)"
-    )]
     fn error_policy_die_terminates_the_worker_on_an_unhandled_error() {
         use std::sync::mpsc;
         let (tx, rx) = mpsc::channel::<&'static str>();
@@ -6295,10 +6217,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "P2: guest-fatal recovery needs the AArch64 longjmp twin (MIGRATION.md §3.3)"
-    )]
     fn eval_dnu_recovers_as_runtime_error_and_vm_stays_usable() {
         let mut vm = boot_test_vm(JitMode::Off);
         let err = vm
@@ -6322,10 +6240,6 @@ mod tests {
     /// one doIt, VM stays usable for the next), not that the erroring
     /// computation itself can be resumed mid-flight.
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "P2: guest-fatal recovery needs the AArch64 longjmp twin (MIGRATION.md §3.3)"
-    )]
     fn eval_error_colon_recovers_as_runtime_error_and_vm_stays_usable() {
         let mut vm = boot_test_vm(JitMode::Off);
         let err = vm
@@ -6351,10 +6265,6 @@ mod tests {
     /// `dnu_fallback` fires (S11 step 6's "DNU... from compiled code"
     /// path) — not just an interpreter-only DNU.
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "P2: compiled `brk #0xDE00` uncommon trap has no VEH yet (MIGRATION.md §3.2)"
-    )]
     fn eval_dnu_from_a_compiled_caller_recovers_cleanly() {
         let mut vm = boot_test_vm(JitMode::Threshold(1));
         vm.eval(

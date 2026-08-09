@@ -40,6 +40,44 @@ ci: lint test
 gate-p00: ci
     just run-world-tests
 
+# P2 (docs/sprints/tests_p02.md): the trap layer is alive — a compiled
+# `brk #0xDExx` round-trips through the VEH into the deopt trampolines, and a
+# guest-fatal / foreign fault recovers through the hand-written non-unwinding
+# AArch64 setjmp/longjmp instead of killing the process. `ci`'s `cargo test`
+# already carries the whole gate: the isolated jump + VEH probes, the AV
+# recovery, the concurrency stress, and — the part that matters most — the 52
+# tests P0 marked `#[cfg_attr(windows, ignore = "P2: …")]`, now un-gated and
+# running. The second recipe is the end-to-end integration check
+# MIGRATION.md §3.2 specifies: the same script must print and exit 0 with the
+# JIT off AND with it on (before P2 the JIT-on run died at once with
+# 0xC000001D).
+#
+# P1 (docs/sprints/tests_p01.md): the JIT substrate on target. Most of this
+# gate is the S9 codecache suite, which `ci` already runs; what the recipe
+# adds is running it in isolation, so a failure here reads as "the loader,
+# the region, relocation or the W^X/icache path broke" rather than being one
+# red line among a thousand. The vendored encoder's frozen corpus is included
+# for the same reason.
+#
+# Note what this gate does NOT claim. `patch_flip_churn_stays_coherent` runs
+# a thousand patch-then-execute cycles, and it passes with BOTH halves of
+# `icache_invalidate` commented out (measured — sprint_p01_detail.md's Δ). It
+# is a regression test for the patch path, not evidence the flush works; on
+# this Snapdragon/Oryon host a missing flush is simply not observable.
+gate-p01: gate-p00
+    cargo test --test it_codecache
+    cargo test --lib corpus_replay
+
+# One honest note about the chain rather than a silent divergence:
+#   * `ci` runs `lint`, and `cargo fmt --check`/`clippy -D warnings` still
+#     fail under rustc 1.97.1 on files this port never touched
+#     (MIGRATION.md §8, P0's "Open, and not a port problem"). That is
+#     unchanged by P2 and is why the sprint verifies with `cargo test
+#     --no-fail-fast` directly as well.
+gate-p02: gate-p01
+    MACVM_JIT=off cargo run --release -- run scripts/p2-deopt-roundtrip.mst --world world
+    MACVM_JIT=threshold=2 cargo run --release -- run scripts/p2-deopt-roundtrip.mst --world world
+
 # Sprint acceptance gates. Later sprints append stress runs to their gate
 # (e.g. `MACVM_GC_STRESS=1 just test` from S7 on).
 gate-s00: ci

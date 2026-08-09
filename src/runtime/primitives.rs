@@ -3833,10 +3833,11 @@ fn prim_millisecond_clock(vm: &mut VmState, _args: &[Oop]) -> PrimResult {
 /// (`world/30_date_time.mst`, S22) reaches `clock_gettime(CLOCK_REALTIME)`
 /// through FFI, passing a pointer to a 16-byte `mmap`'d scratch buffer
 /// because FFI argument marshaling only accepts SmallIntegers. None of that
-/// resolves on Windows until sprint P5 — and the failure is not survivable,
-/// since a guest error still aborts until P2. Rather than gate off every
-/// test that reads a clock (the demos seed randomness from it), the world
-/// asks for the value directly here.
+/// resolves on Windows until sprint P5 — and the failure is not survivable
+/// outside an embedded `VmHandle` (P2's recovery only fires for a thread that
+/// claimed a slot; a plain CLI/batch run still takes `fatal_exit`). Rather
+/// than gate off every test that reads a clock (the demos seed randomness
+/// from it), the world asks for the value directly here.
 ///
 /// `SystemTime` is portable, so this needs no `cfg` and no Win32 import:
 /// the same code serves both hosts. Only the Windows arm of
