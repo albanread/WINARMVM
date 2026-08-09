@@ -179,6 +179,39 @@ minimal-diff beats symmetric-looking.
 > elsewhere after preemption. `tests_p01.md`'s prescribed
 > "deliberate stale-icache reproducer" should be struck for the same reason:
 > it cannot be built reliably here.
+>
+> **Why this host is probably forgiving — the likely mechanism, named.**
+> This machine is a **Snapdragon X (X1-26-100), Qualcomm Oryon, 8 cores**.
+> AArch64 advertises exactly this property in `CTR_EL0`:
+>
+> | bit | name | meaning when set |
+> |---|---|---|
+> | 28 | `IDC` | data-cache clean to PoU **not required** for instruction-to-data coherence |
+> | 29 | `DIC` | instruction-cache invalidation **not required** for data-to-instruction coherence |
+>
+> A core with both set is I/D coherent to the Point of Unification in
+> hardware, so `dc cvau` / `ic ivau` are architecturally unnecessary *on that
+> implementation* — which would explain the observation exactly. Modern
+> high-performance designs commonly set them.
+>
+> **Not confirmed, and here is why:** Windows traps `mrs ctr_el0` from user
+> mode and does not emulate it — the read dies with 0xC000001D, the same
+> illegal-instruction code §3.2 documents. So the bits cannot be sampled from
+> a normal process. Treat the above as the leading hypothesis, not a finding.
+>
+> **Two cautions against over-reading it, even if true.** (1) `DIC`/`IDC`
+> excuse *cache maintenance*; they do **not** excuse the `isb`, which is
+> context synchronization — it discards instructions this core has already
+> fetched, something no coherency protocol addresses. The mutation test
+> removed the `isb` too and still passed, so what that really demonstrates is
+> that the test cannot see even the part that remains mandatory. (2) These
+> are per-implementation bits. Code that runs on one Windows-ARM64 machine
+> ships to all of them.
+>
+> Cost of keeping both halves on such a core is near zero — on a DIC/IDC
+> implementation `FlushInstructionCache` has almost nothing to do. So the
+> decision is unchanged, and now it is unchanged *for a stated reason*
+> rather than by default.
 
 ## Implementation order
 

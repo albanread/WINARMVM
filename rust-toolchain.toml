@@ -1,0 +1,27 @@
+# Pinned so the two halves of this project compile with the SAME compiler.
+#
+# That is not just hygiene here. P3's headline claim is the cross-build
+# differential — Windows-ARM64 against macOS-ARM64, same commit, same world,
+# same benchmarks, same ISA — and that comparison only means anything if both
+# sides were built by the same rustc. A version skew between the machines
+# would show up as a codegen difference and be indistinguishable from a port
+# defect.
+#
+# 1.97.1 is the version this port was brought up and verified on
+# (993 tests green on aarch64-pc-windows-msvc, 2026-08-09).
+#
+# It also fixes the lint surface in place. `just ci` runs `cargo fmt --check`
+# and `clippy -D warnings`, and on this toolchain both fail on files the port
+# never touched (src/types/, image_store/, src/oops/) — the warning set is
+# dominated by lints newer than the code: `doc list item without indentation`
+# (21 of 51), `manual_is_multiple_of`, `manual_repeat_n`, `items after a test
+# module`. Reformatting ~43 files would fight every MACVM cherry-pick, so the
+# pin is the answer instead: the lint set stops moving underfoot, and the
+# cleanup becomes a deliberate decision rather than a moving target.
+#
+# To make `just ci` fully green, set `channel` to whatever the macOS side
+# builds with — that is the version this codebase was last formatted and
+# linted against.
+[toolchain]
+channel = "1.97.1"
+components = ["rustfmt", "clippy"]
