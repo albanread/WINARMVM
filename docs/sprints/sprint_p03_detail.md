@@ -88,6 +88,44 @@ since the set may have grown — record the grep).
    with one exception: the S10/S11-era tripwires (fail < 2× interpreter)
    still apply and now run on this target.
 
+### D5. The Cog head-to-head needs one more axis on this platform
+
+`docs/cog_bench.md` exists because the previous Cog comparison was "wrong in
+both directions" — clock truncation and an unfaithful translation. Running it
+on Windows ARM64 introduces a **third** way to be wrong, and it is the one
+most likely to flatter us:
+
+**Record whether the Cog side is running natively or under emulation.** Pharo
+ships production Windows builds for x86-64; a Windows-ARM64 Cog build may not
+exist at all, in which case Windows' x64 translation layer runs it. That is
+not a like-for-like yardstick — an emulated-x64 Cog loses a large factor to
+translation alone, so beating it demonstrates far less than the number
+suggests, and quoting it unqualified would be the same class of error the
+harness was built to remove.
+
+So the harness must, on this platform:
+
+1. Report the **architecture of the Cog process itself** (PE machine type of
+   the running binary, or `IMAGE_FILE_MACHINE` via
+   `IsWow64Process2`/`GetProcessInformation`), not just its version string.
+2. Label every recorded figure `cog=native-arm64` or `cog=emulated-x64`.
+   A comparison whose two sides differ on this is reported as **indicative,
+   not a head-to-head**, in PERF.md's own words.
+3. If no native ARM64 Cog exists, say so explicitly in PERF.md and keep the
+   emulated number as *context* while making the **honest primary claim** the
+   one that needs no caveat: MACVM-on-Windows-ARM64 against **MACVM-on-macOS
+   -ARM64**, same commit, same world, same benchmarks, same ISA — the
+   cross-build differential in D4 step 6. That comparison has no emulation
+   term and no translation term in it at all.
+
+The standing "at least as fast as Cog" target is unchanged; what changes is
+that on this host the target must name which Cog it means.
+
+> The interesting claim — a native-ARM64 Smalltalk with an adaptive JIT on
+> Windows — is worth making precisely because it is checkable. It is only
+> worth making with the emulation axis recorded, or the first person to
+> reproduce it will find the caveat we didn't.
+
 ## Implementation order
 
 1. D3 pinning test (fastest, catches ABI surprise before bulk runs).

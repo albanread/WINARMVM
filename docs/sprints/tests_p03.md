@@ -18,6 +18,11 @@ All on this machine, natively, at the same commit as a Mac comparison run:
    Windows-ARM64 table.
 6. S10/S11 perf tripwires still pass (fail < 2× interpreter on their
    micro-benches); no other perf gating.
+6a. Any Cog head-to-head recorded in PERF.md carries the **architecture of
+   the Cog process** (`cog=native-arm64` / `cog=emulated-x64`, D5). A run
+   whose two sides differ there is labelled indicative, not head-to-head.
+   The unqualified claim in PERF.md is the Windows-vs-macOS same-commit
+   differential, which has no emulation term in it.
 7. Zero `#[ignore = "P1"]`/`"P2"` marks remain (grep in the gate script).
 8. `just gate-p03` (chains gate-p02) encodes 1–4 + 7.
 

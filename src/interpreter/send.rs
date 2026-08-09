@@ -675,7 +675,20 @@ mod tests {
     /// bailout fallback). Both must reach `install_smi_plus`'s interpreted
     /// fallback (the [`OVERFLOW_SENTINEL`]) without disturbing the
     /// still-valid compiled IC entry.
+    // WINARM (P0 D3): the overflowing arm the compiled `+` lowers to is an
+    // `Ir::UncommonTrap`, i.e. an inline `brk #0xDE00` (`emit::
+    // emit_uncommon_trap`). With no VEH armed on Windows (deopt_trap::install
+    // is a documented no-op there until P2) that instruction ends the PROCESS,
+    // taking every other test in this binary with it — hence `ignore`, not a
+    // plain failure. Measured on this host: Windows-on-ARM64 reports a `brk`
+    // outside Microsoft's own 0xF000 namespace as STATUS_ILLEGAL_INSTRUCTION
+    // (0xC000001D), NOT STATUS_BREAKPOINT — see the P2 note in MIGRATION.md
+    // §3.2. macOS keeps running this test unchanged.
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "P2: compiled `brk #0xDE00` uncommon trap has no VEH yet (MIGRATION.md §3.2)"
+    )]
     fn compile_trigger_bailout_falls_back_correctly() {
         let mut vm = VmState::with_options(VmOptions {
             heap_mib: 64,

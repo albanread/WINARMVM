@@ -857,7 +857,19 @@ mod tests {
     /// indirect Alien via `forAddress:size:`, genuinely reads and writes
     /// REAL mapped memory through this module's raw-pointer path — not a
     /// mock, not a direct-mode-only round trip.
+    // WINARM (P0 D3, gate row 3): `mmap` is POSIX, and the `<primitive: FFI …>`
+    // symbol resolver is still `dlsym`-only here — sprint_p00_detail.md gates
+    // this whole group to P5, when the winkb resolver + LoadLibraryA/
+    // GetProcAddress land (MIGRATION.md §3.5). It has to be `ignore`d rather
+    // than merely left failing: the unresolved symbol raises a GUEST-FATAL,
+    // and outside an embedded `VmHandle` no recovery slot is registered, so
+    // `raise_guest_fatal` takes its `fatal_exit(1)` arm and exits the PROCESS
+    // — killing the rest of this test binary. macOS runs it unchanged.
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "P5: no Win32 FFI symbol resolver yet; the guest-fatal exits the process (MIGRATION.md §3.5)"
+    )]
     fn mmap_capstone_indirect_alien_reads_writes_real_mapped_memory() {
         let mut vm = test_vm();
         // Real macOS/arm64 flag values (verified against `/usr/include/
