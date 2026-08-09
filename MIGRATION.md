@@ -136,15 +136,66 @@ Both halves already exist:
 
 New glue: the ARM64 `CONTEXT` (`ARM64_NT_CONTEXT`: `Cpsr`, `X0..X28`, `Fp`,
 `Lr`, `Sp`, `Pc`, `V[32]`, `Fpcr`, `Fpsr` — declared by hand, `extern
-"system"`, same discipline as WINVM's win structs). On `STATUS_BREAKPOINT`:
-read the u32 **at `Pc`** (the kernel reports Pc AT the `brk`, and `brk` does
-not auto-advance — no x64 "imm lives at Rip+1" rewind subtlety), run
-`decode_deopt_brk`, stash the trap pc in **`X16`** (the same register the
-macOS handler uses — the stub trampolines expect it there: `mov lr, x16` /
-`mov x1, x16` in `build_uncommon_trampoline` et al.), set `Pc` to the owning
-cache's trampoline via the existing per-cache registry, continue execution.
-The macOS Mach/signal layer gets `#[cfg(target_os = "macos")]` exactly as
-WINVM gated it.
+"system"`, same discipline as WINVM's win structs). Read the u32 **at `Pc`**
+(the kernel reports Pc AT the `brk`, and `brk` does not auto-advance — no x64
+"imm lives at Rip+1" rewind subtlety), run `decode_deopt_brk`, stash the trap
+pc in **`X16`** (the same register the macOS handler uses — the stub
+trampolines expect it there: `mov lr, x16` / `mov x1, x16` in
+`build_uncommon_trampoline` et al.), set `Pc` to the owning cache's trampoline
+via the existing per-cache registry, continue execution. The macOS Mach/signal
+layer gets `#[cfg(target_os = "macos")]` exactly as WINVM gated it.
+
+> **Δ (2026-08-09) — MEASURED ON THIS HOST, and it corrects this section.**
+> An earlier draft said the handler keys on `STATUS_BREAKPOINT`
+> (0x8000_0003), by analogy with the x64 port's `int3`. **That is wrong for
+> AArch64 Windows**, and a P2 built on it would register a handler that never
+> fires. A standalone probe (`aarch64-pc-windows-msvc`, `rustc -O`) gives:
+>
+> | instruction | exception code |
+> |---|---|
+> | `brk #0xDE00` / `#0xDE01` / `#0xDE02` — MACVM's whole claimed namespace | **0xC000001D `STATUS_ILLEGAL_INSTRUCTION`** |
+> | `brk #1` | 0xC000001D |
+> | `udf #0` (an all-zero word) | 0xC000001D |
+> | `brk #0xF000` (`__debugbreak`) | 0x8000_0003 `STATUS_BREAKPOINT` |
+> | `std::process::abort()`, `brk #0xF003` | **never dispatched to a VEH at all** (`__fastfail`) |
+>
+> Three consequences for P2:
+>
+> 1. **Register for `STATUS_ILLEGAL_INSTRUCTION`.** Only Microsoft's own
+>    `0xF000` immediate produces `STATUS_BREAKPOINT`; every trap this VM
+>    emits arrives as 0xC000001D.
+> 2. **The status code cannot discriminate.** A genuine `udf`, a jump into
+>    zeroed code, and one of our `brk`s are indistinguishable by code alone —
+>    so the handler *must* still read the word at `Pc` and run
+>    `decode_deopt_brk`. That function is unchanged and is exactly the right
+>    discriminator; only the status keyed on was wrong. This also means a
+>    wild jump into unfilled code presents identically to a real trap, which
+>    is worth knowing before debugging one.
+> 3. **Rust's `abort()` is NOT `brk #1` here** — it is `__fastfail`, which
+>    bypasses vectored handlers entirely. So it can never collide with our
+>    namespace and P2 need not defend against it. (`deopt_trap.rs`'s
+>    `siglongjmp` doc still claims otherwise; correct it there too.)
+>
+> The rest of the design validated end to end in the same probe: a VEH
+> reached on 0xC000001D finds `ARM64_NT_CONTEXT.Pc` at offset **0x108**, sees
+> `ExceptionAddress == Pc == the brk's own address` (confirming the
+> "no rewind" claim above), decodes `word@Pc == 0xD43BC000 | (imm << 5)`
+> exactly as `deopt_trap::brk_word` produces it, writes `X[16]` at offset
+> **0x88**, sets `Pc`, and returns `EXCEPTION_CONTINUE_EXECUTION` — resuming
+> cleanly for all three immediates. One caution: **x16 is IP0 and any
+> intervening call or linker veneer clobbers it**, so the redirect must go
+> straight from handler to trampoline with nothing in between (the design
+> above already does; do not add a helper call there).
+>
+> Minimal repro for P2, no test harness involved — smi overflow in a warmed
+> method is the shortest path to an uncommon trap:
+> ```
+> Object subclass: DeoptRepro [ DeoptRepro class >> f: n [ ^n + n ] ]
+> "warm f: three times, then:"
+> Transcript show: (DeoptRepro f: SmallInteger maxVal) printString.
+> ```
+> `MACVM_JIT=off` prints and exits 0; `MACVM_JIT=threshold=2` dies at once
+> with 0xC000001D.
 
 **Probe-first discipline (binding, learned twice in WINVM):** before wiring
 the VEH into the VM, validate the raw mechanism in an isolated test — emitted
@@ -288,4 +339,40 @@ against a cousin, WINARM diffs against its own twin.
 - **2026-08-09 — Design.** This document + Phase P sprint ladder
   (`docs/SPRINTS.md`, `docs/sprints/sprint_p0*_detail.md`, `tests_p0*.md`)
   written against verified source facts in both reference checkouts (file
-  cites throughout). Toolchain still absent; P0 not started.
+  cites throughout).
+- **2026-08-09 — P0 done. Interpreted Smalltalk runs natively on Windows
+  ARM64: 992 passed, 0 failed, 65 ignored.** Toolchain was already present
+  (rustc 1.97.1, host `aarch64-pc-windows-msvc`, VS 18 Professional); proved
+  native rather than emulated by checking the PE machine type of a built
+  binary (`AA64`), which the startup banner now also reports.
+  - Build went 59 errors in 9 files → **0 errors, 0 warnings, all targets**.
+    Nearly all of it one cause: on Windows `libc` exposes CRT functions only,
+    so every seam is hand-declared `extern "system"` — no new dependency.
+  - **The port thesis holds, and it is measured, not argued.** Compiled
+    AArch64 executes correctly here: tier-1 tests compile and run real
+    methods, `it_bench_smoke` requires compiled ≥ 2× interpreter and passes,
+    and the FFI trampolines call real kernel32/CRT functions. The loader, the
+    code region, relocation and the icache discipline are all sound. **Every
+    one of the 65 gated tests is a trap, a recovery point, or an unresolvable
+    POSIX symbol — not one is a codegen defect.**
+  - Two plan corrections, both now folded in above: §3.1's stub pair (P0
+    cannot defer the code region — stubs publish at genesis "regardless of
+    `options.jit`"), and §3.2's exception code (the Δ above — the single most
+    valuable thing this sprint produced for P2).
+  - New: `Smalltalk platformName` (prim 266) and `wallClockMilliseconds`
+    (267). The world asks the platform instead of assuming, so `world/*.mst`
+    stays shared with MACVM verbatim rather than forked the way WINVM had to.
+  - **Found in MACVM mainline, not caused by the port** — worth cherry-picking
+    back: `tests/golden/s10_absDiff.lst.expected` is stale since 552831a
+    (2026-08-08) and fails in any debug `cargo test`, on macOS too; `ir.rs`
+    listed `RefCmpBr` in a no-op match arm it already handled 50 lines
+    earlier; `emit.rs` cast a fn item straight to an integer. And the clone's
+    `core.autocrlf=true` had rewritten `world/04_transcript.mst`'s newline
+    literal to CRLF, so `Transcript cr` emitted CRLF — a checkout defect that
+    changed guest-visible VM behaviour.
+  - **Open, and not a port problem:** `cargo fmt --check` and `clippy -D
+    warnings` fail under rustc 1.97.1 on files the port never touched
+    (`src/types/`, `image_store/`, `src/oops/`), so `just ci` — and therefore
+    the literal `gate-p00` — cannot pass without either reformatting ~43 files
+    (a large, permanent divergence from MACVM that would fight every
+    cherry-pick) or pinning a toolchain. Left as a decision, deliberately.
