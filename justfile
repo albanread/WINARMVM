@@ -2,6 +2,16 @@
 # docs/sprints/sprint_s00_detail.md — this file IS the CI contract until a
 # hosted CI is set up.
 
+# WINARM (P0): every recipe below is written in POSIX shell — `/tmp/` paths,
+# `diff`, `sed`, and `VAR=value cmd` env prefixes. `just`'s default shell on
+# Windows is `cmd`, which understands none of that, so the gates would fail
+# for reasons that have nothing to do with the VM. This setting affects
+# WINDOWS ONLY (`windows-shell`, not `shell`), so the macOS side keeps its
+# default `sh` and every existing recipe stays byte-identical there — the
+# same gate-don't-fork discipline MIGRATION.md §2 applies to source files.
+# Requires Git for Windows' bash on PATH, which the toolchain already needs.
+set windows-shell := ['bash', '-uc']
+
 test:
     cargo test
 
@@ -13,6 +23,22 @@ lint:
     cargo clippy --all-targets -- -D warnings
 
 ci: lint test
+
+# --- Phase P: the Windows-ARM64 port (MIGRATION.md, docs/sprints/*p0*) ------
+#
+# The P gates deliberately do NOT chain the S gates. An S gate is a claim
+# about a FEATURE landing ("the scavenger works"); a P gate is a claim about
+# a PLATFORM ("all of it still works over there"), so P0 re-runs the whole
+# suite rather than inheriting a ladder. They also cannot chain in the other
+# direction: P0's whole point is that the JIT is off, while gate-s10 and up
+# require it on.
+#
+# P0 (docs/sprints/tests_p00.md): interpreter-only Windows ARM64 is green.
+# `ci` covers build + clippy + `cargo test`; the world run is what proves a
+# real Smalltalk world boots and its in-language suite passes -- the number
+# that gets compared against the Mac build of the same commit (gate item 3).
+gate-p00: ci
+    just run-world-tests
 
 # Sprint acceptance gates. Later sprints append stress runs to their gate
 # (e.g. `MACVM_GC_STRESS=1 just test` from S7 on).
