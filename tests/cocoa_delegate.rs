@@ -21,20 +21,40 @@
 //! No display and no AppKit UI class needed — the delegate classes are plain
 //! `NSObject` subclasses, dispatched on the (real) main thread.
 
+// WINARM (P0 D3): the Cocoa reverse-dispatch gate — macOS-only, like the
+// bridge it tests (MIGRATION.md §2). `harness = false` (see Cargo.toml) means
+// cargo demands a `main` on every platform, so this file cannot be dismissed
+// with a single file-level `#![cfg]` the way a harnessed test file can; each
+// item is gated instead, and Windows gets the trivial `main` below. Gating
+// item-by-item rather than wrapping the body in a `mod` keeps every existing
+// line exactly where it is, so this file stays cherry-pickable against MACVM.
+#[cfg(not(target_os = "macos"))]
+fn main() {
+    eprintln!("cocoa_delegate: skipped — the Cocoa bridge is macOS-only (MIGRATION.md §2).");
+}
+
+#[cfg(target_os = "macos")]
 use macvm::embed::{self, VmHandle};
+#[cfg(target_os = "macos")]
 use macvm::runtime::objc_bridge::{
     self, RetKind, SEND_FPR_SLOTS, SEND_GPR_SLOTS, SEND_STACK_SLOTS,
 };
+#[cfg(target_os = "macos")]
 use macvm::runtime::objc_delegate;
+#[cfg(target_os = "macos")]
 use macvm::runtime::vm_state::VmOptions;
+#[cfg(target_os = "macos")]
 use macvm::runtime::JitMode;
+#[cfg(target_os = "macos")]
 use std::os::raw::c_void;
+#[cfg(target_os = "macos")]
 use std::path::Path;
 
 /// Boot a UI-worker-style VM in place on THIS thread and layer the conditional
 /// Cocoa world (`MacvmDelegate` lives in `world/65_cocoadelegate.mst`, loaded
 /// only via `cocoaui.list`). JIT off keeps the fault path deterministic — the
 /// foreign-fault handler is armed by `boot` regardless of JIT mode.
+#[cfg(target_os = "macos")]
 fn boot_ui_worker() -> VmHandle {
     let mut vm = VmHandle::boot(
         VmOptions {
@@ -54,6 +74,7 @@ fn boot_ui_worker() -> VmHandle {
 /// an ObjC delegate of `role` bound to it — the two halves of
 /// `MacvmDelegate on:role:`, split so we learn the raw instance pointer to
 /// objc_msgSend. Returns the raw ObjC delegate instance pointer.
+#[cfg(target_os = "macos")]
 fn mint(vm: &mut VmHandle, role: &str, receiver_src: &str) -> *mut c_void {
     let ticket: i64 = vm
         .eval(&format!("MacvmDelegate register: ({receiver_src})"))
@@ -68,10 +89,12 @@ fn mint(vm: &mut VmHandle, role: &str, receiver_src: &str) -> *mut c_void {
 /// objc_msgSend the selector for a GPR-returning shape (NSInteger / BOOL): the
 /// bridge send reads `x0`. `a`/`b` fill x2/x3 (the first real args after
 /// self/_cmd).
+#[cfg(target_os = "macos")]
 fn send_gpr(inst: *mut c_void, selector: &str, a: *mut c_void, b: *mut c_void) -> u64 {
     objc_bridge::try_send(inst, selector, a, b).expect("delegate send must not throw") as u64
 }
 
+#[cfg(target_os = "macos")]
 fn main() {
     let mut vm = boot_ui_worker();
 

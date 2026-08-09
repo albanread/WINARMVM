@@ -1476,6 +1476,23 @@ pub static PRIMITIVES: &[PrimDesc] = &[
         can_allocate: false,
         can_fail: true,
     },
+    // WINARM (P0 D5). See `prim_platform_name` for why the world needs this.
+    PrimDesc {
+        id: 266,
+        name: "platformName",
+        f: prim_platform_name,
+        argc: 0,
+        can_allocate: true,
+        can_fail: false,
+    },
+    PrimDesc {
+        id: 267,
+        name: "wallClockMilliseconds",
+        f: prim_wall_clock_milliseconds,
+        argc: 0,
+        can_allocate: false,
+        can_fail: false,
+    },
 ];
 
 pub fn prim_by_id(id: u16) -> Option<&'static PrimDesc> {
@@ -3787,6 +3804,71 @@ fn prim_millisecond_clock(vm: &mut VmState, _args: &[Oop]) -> PrimResult {
     PrimResult::Ok(SmallInt::new(millis).oop())
 }
 
+/// `Smalltalk platformName` — the host OS as an interned Symbol (`#macos`,
+/// `#windows`, or `#unknown`). WINARM (P0 D5, MIGRATION.md §3.5).
+///
+/// Why the world needs this at all: a handful of library files are backed by
+/// FFI against POSIX (`Time class>>millisecondClockValue` reaches
+/// `clock_gettime` through an mmap'd scratch buffer, `world/30_date_time.mst`),
+/// and until sprint P5 supplies Windows FFI resolution there is no way to run
+/// them here. Guest code therefore needs to *ask* rather than assume — and the
+/// alternative, deleting the affected lines on one platform, forks files that
+/// MACVM and WINARM otherwise share verbatim.
+///
+/// Deliberately the OS only, not the architecture: every consumer so far
+/// branches on "does this OS have that syscall", never on the ISA — and both
+/// supported hosts are AArch64 anyway, so an arch component would be a
+/// constant that invites someone to branch on the wrong thing. The `-v`
+/// startup banner still reports both, since a human reading a log wants to
+/// know whether an x64 build is running under emulation.
+///
+/// `#unknown` rather than a failure on a third platform: this is an
+/// informational accessor, and a guest asking "where am I" on an unforeseen
+/// host should get an honest answer it can compare against, not an error.
+/// `Smalltalk wallClockMilliseconds` — milliseconds since the Unix epoch.
+/// WINARM (P0), the portable counterpart to `millisecondClock` (prim 92),
+/// which is monotonic-since-VM-start and deliberately NOT wall-clock.
+///
+/// The world already has a wall clock: `Time class>>millisecondClockValue`
+/// (`world/30_date_time.mst`, S22) reaches `clock_gettime(CLOCK_REALTIME)`
+/// through FFI, passing a pointer to a 16-byte `mmap`'d scratch buffer
+/// because FFI argument marshaling only accepts SmallIntegers. None of that
+/// resolves on Windows until sprint P5 — and the failure is not survivable,
+/// since a guest error still aborts until P2. Rather than gate off every
+/// test that reads a clock (the demos seed randomness from it), the world
+/// asks for the value directly here.
+///
+/// `SystemTime` is portable, so this needs no `cfg` and no Win32 import:
+/// the same code serves both hosts. Only the Windows arm of
+/// `millisecondClockValue` calls it today — macOS keeps its existing FFI
+/// path untouched, since changing a working mac path is not this port's
+/// business — but nothing stops macOS adopting it later, and the FFI route
+/// exists mainly as proof that FFI works, not because a clock needs it.
+///
+/// A pre-epoch system clock yields `Err`; that answers 0 rather than
+/// failing, because this is an informational reading and a guest asking the
+/// time on a badly-set machine should get a number it can reason about.
+/// Epoch milliseconds are ~1.7e12 — far inside SmallInt's 61 bits, and it
+/// stays that way for another ~36 million years.
+fn prim_wall_clock_milliseconds(_vm: &mut VmState, _args: &[Oop]) -> PrimResult {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    PrimResult::Ok(SmallInt::new(millis).oop())
+}
+
+fn prim_platform_name(vm: &mut VmState, _args: &[Oop]) -> PrimResult {
+    let name: &[u8] = if cfg!(target_os = "macos") {
+        b"macos"
+    } else if cfg!(windows) {
+        b"windows"
+    } else {
+        b"unknown"
+    };
+    PrimResult::Ok(vm.universe.intern(name).oop())
+}
+
 /// `Smalltalk microsecondClock` — the monotonic elapsed-since-VM-start clock
 /// (same `start_instant` source as `millisecondClock`, prim 92), in
 /// MICROSECONDS. Added for the Cog-comparison harness (`docs/cog_bench.md`):
@@ -5301,6 +5383,8 @@ mod tests {
             (263, "Sound class>>playEffect:"),
             (264, "Worker class>>primEvalDoitQuiet:"),
             (265, "instVarAt:put:"),
+            (266, "platformName"),
+            (267, "wallClockMilliseconds"),
         ];
         assert_eq!(
             PRIMITIVES.len(),

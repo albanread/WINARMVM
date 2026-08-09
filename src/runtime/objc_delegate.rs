@@ -512,8 +512,24 @@ extern "C" fn imp_outline_selection_did_change(
 /// libobjc's class-pair entry points — plain `dlsym`, exactly as
 /// `objc_bridge::macvm_action_class` resolves them (its `resolve` is private to
 /// that module; this mirrors it rather than widening its surface).
+#[cfg(target_os = "macos")]
 fn dlsym(name: &str) -> Option<u64> {
     crate::vendor::wfasm::native_macos::dlsym_resolve(None, name)
+}
+
+/// WINARM (P0 D2#6): this module's ONLY foreign-symbol dependency — every
+/// other `extern "C"` here is a Rust-side IMP *definition*, which compiles
+/// (and is simply never installed) on any host. So one gate at this seam is
+/// the whole of the Windows story for the delegate layer; the module keeps
+/// existing, `primitives.rs`'s `macvmDelegate` prim keeps compiling, and the
+/// registry/staleness/re-entrancy tests below keep running as pure logic.
+/// Answering `None` walks `register_class_under` down its existing
+/// missing-runtime path (`?` on the first symbol), exactly as a stripped
+/// libobjc would. See [`crate::runtime::objc_bridge::NO_OBJC_RUNTIME`] for
+/// why no Win32 re-routing is offered: there is no `libobjc` to find.
+#[cfg(not(target_os = "macos"))]
+fn dlsym(_name: &str) -> Option<u64> {
+    None
 }
 
 type AllocPair = unsafe extern "C" fn(*mut c_void, *const c_char, usize) -> *mut c_void;
@@ -1173,6 +1189,30 @@ fn role_class(role: &str) -> Option<*mut c_void> {
     }
 }
 
+/// Why [`role_class`] answered nothing. On macOS there is exactly one cause —
+/// the role name isn't one we register — so the message stays as it was.
+#[cfg(target_os = "macos")]
+fn no_class_for_role(role: &str) -> String {
+    format!("unknown delegate role '{role}' (want app/window/text/table/outline/action)")
+}
+
+/// WINARM (P0 D2#6): on Windows the class is missing for a reason that has
+/// nothing to do with the role NAME — `objc_allocateClassPair` cannot be
+/// resolved, so every role fails identically and the mac wording would send a
+/// guest off to fix a spelling that is perfectly correct. Only the message
+/// changes: `new_delegate` still answers on the same `Result<_, String>`
+/// channel its alloc/init failures use, and `prim_cocoa_new_delegate` still
+/// hands it to `cocoa_exception_fail` — transcript line, then
+/// `PrimResult::Fail`, so `Cocoa delegateFor:` raises an ordinary catchable
+/// Smalltalk error instead of crashing or answering a live-looking nil.
+#[cfg(not(target_os = "macos"))]
+fn no_class_for_role(role: &str) -> String {
+    format!(
+        "no delegate class for role '{role}': {}",
+        crate::runtime::objc_bridge::NO_OBJC_RUNTIME
+    )
+}
+
 /// Mint one delegate instance of `role`'s class, bound (Rust-side) to
 /// `(gen, ticket)` — the world-side `MacvmDelegate` owns the ticket→receiver
 /// map. Answers a +1 id (alloc/init — the caller wraps with `wrap_owned`).
@@ -1180,9 +1220,7 @@ fn role_class(role: &str) -> Option<*mut c_void> {
 /// inbox sender — the dispatch is synchronous through the callback door, which
 /// lifts C4's primary-only refusal for the UI worker (design §4.3, review item 5).
 pub fn new_delegate(role: &str, gen: u64, ticket: i64) -> Result<*mut c_void, String> {
-    let cls = role_class(role).ok_or_else(|| {
-        format!("unknown delegate role '{role}' (want app/window/text/table/outline/action)")
-    })?;
+    let cls = role_class(role).ok_or_else(|| no_class_for_role(role))?;
     let inst = crate::runtime::objc_bridge::try_send(
         cls,
         "alloc",

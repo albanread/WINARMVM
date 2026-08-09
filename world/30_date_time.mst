@@ -189,6 +189,15 @@ Object subclass: Time [
      milliseconds apart return distinct, correctly-ordered values."
     Time class >> millisecondClockValue ^ <Integer> [
         | addr ts sec nsec |
+        "WINARM (P0): the FFI route below needs mmap + clock_gettime, neither
+         of which resolves on Windows until sprint P5 (MIGRATION.md §3.5) —
+         and an unresolved FFI symbol raises a guest error, which aborts the
+         process until P2. That would take out every demo and benchmark that
+         merely seeds randomness from the clock. Prim 267 answers exactly the
+         same quantity (epoch milliseconds) with no FFI at all. The macOS arm
+         is untouched on purpose: this port does not rewrite a working mac
+         path, and the FFI route also stands as living proof that FFI works."
+        Smalltalk platformName == #windows ifTrue: [ ^Smalltalk wallClockMilliseconds ].
         addr := self clockBufferAddress.
         self ffiClockGettime: 0 timespec: addr.
         ts := Alien forAddress: addr size: 16.

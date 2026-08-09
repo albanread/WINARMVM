@@ -147,8 +147,8 @@ pub fn set_jit_compile_enabled(on: bool) {
 /// as today). `ExitThread` is new, for a `VmHandle`-embedded VM running on
 /// its own dedicated worker thread (`docs/SPEC.md` §16, the GUI's own
 /// architecture): it terminates ONLY the calling OS thread
-/// (`libc::pthread_exit`), never the process — so a bad guest program can
-/// never take down whatever embedded it.
+/// (`libc::pthread_exit`; WINARM P0 D2#4: `ExitThread` on Windows), never the
+/// process — so a bad guest program can never take down whatever embedded it.
 ///
 /// Deliberately a **thread-local**, not a [`VmOptions`] field.
 /// `VmOptions { .. }` literals exist at over 100 call sites across this
@@ -231,7 +231,45 @@ pub(crate) fn fatal_exit(code: i32) -> ! {
             // skips, so `join()` panics and `is_finished()` never becomes
             // true; dropping an unjoined handle is safe, per the same
             // experiment).
-            unsafe { libc::pthread_exit(std::ptr::null_mut()) }
+            #[cfg(unix)]
+            unsafe {
+                libc::pthread_exit(std::ptr::null_mut())
+            }
+            // WINARM (P0 D2#4): `ExitThread` is the exact analogue, and it is
+            // the analogue this call site wants. The surrounding code has
+            // ALREADY chosen thread-vs-process one level up — `FatalMode`'s
+            // other variant is `ExitProcess`, handled by the `std::process::
+            // exit(code)` arm above; reaching here means a supervisor called
+            // `set_fatal_mode(ExitThread)` precisely so a guest fatal takes
+            // down only this VM's dedicated worker and leaves the embedder
+            // (today: the GUI's watchdog, which has just been told via
+            // `FATAL_HOOK` and will respawn) alive. `ExitProcess` here would
+            // invert that whole design.
+            //
+            // It also preserves the property the doc comment above calls the
+            // reason this mechanism is used at all: `ExitThread` terminates
+            // the thread directly, so NO Rust `Drop` glue for live locals
+            // runs and no unwinder walks the stack — sound even with
+            // JIT-compiled native frames (which carry no unwind info) sitting
+            // underneath, exactly like `pthread_exit` and unlike `panic!`.
+            // Per-thread destructor callbacks still fire on both platforms
+            // (pthread key dtors there, the image's TLS callbacks here), so
+            // the two paths are equivalent down to the same detail.
+            //
+            // `libc` on Windows is the CRT only — no pthreads — so kernel32
+            // is declared by hand (`extern "system"`, no new dependency).
+            #[cfg(windows)]
+            {
+                extern "system" {
+                    fn ExitThread(code: u32) -> !;
+                }
+                // SAFETY: terminates only the calling thread; touches no
+                // memory and never returns. The never-`.join()` contract on
+                // the spawner documented above applies verbatim — a Windows
+                // `JoinHandle` is no more joinable after `ExitThread` than a
+                // POSIX one is after `pthread_exit`.
+                unsafe { ExitThread(code as u32) }
+            }
         }
     }
 }

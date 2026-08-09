@@ -67,8 +67,34 @@ code).
 | 5 | `src/codecache/deopt_trap.rs` | WINVM same file | gate the Mach/signal layer (`sigaction`, alt-stacks, `sigsetjmp` imports) to `#[cfg(target_os = "macos")]`; portable thread-ids stay; **do NOT port the VEH here** — that is P2's whole scope; until then guest-fatal on Windows may abort (WINVM M0 shipped exactly this state) |
 | 6 | Cocoa bridge (`src/runtime/objc_bridge.rs`, objc prims, AppleScript, gamepane prims) | WINVM's gating | clean-fail Windows stubs: each mac-only prim guest-fatals with a clear message rather than failing to compile |
 | 7 | `src/runtime/alien.rs` | WINVM's gating | the POSIX FFI demo path (`mmap`/`getpid` tests) gates to macOS until P5 |
-| 8 | `src/vendor/wfasm/mod.rs` | WINVM same file | `native_macos` already `#[cfg(target_os = "macos")]`-gated internally; ensure the module list compiles on Windows with NO native loader yet (P1 adds `native_winarm64`); `codecache/guard.rs`'s import of `jit_write_protect`/`icache_invalidate` therefore needs a temporary Windows stub pair (no-op + no-op) **clearly marked `// P0: replaced in P1`** so the crate links with the JIT off |
+| 8 | `src/vendor/wfasm/mod.rs` + new `native_winarm64.rs` | WINVM same file | `native_macos` is `#[cfg(target_os = "macos")]`-gated internally, so on Windows nothing supplies the W^X pair `guard.rs` imports. Add the dispatch + a Windows sibling — see the Δ below for what it must actually contain |
 | 9 | `src/main.rs` / `src/lib.rs` | WINVM same files | whatever residual mac-only wiring the compile surfaces (WINVM's M0 list: "Cocoa bridge + prims gated with clean-fail Windows stubs") |
+
+> **Δ (2026-08-09, from implementing D2#8).** This row originally read
+> "a temporary Windows stub pair (no-op + no-op) … so the crate links with
+> the JIT off". **Both halves of that were wrong**, and the second one
+> would have failed at run time rather than at compile time:
+>
+> 1. Only `jit_write_protect` is a no-op. **`icache_invalidate` must be
+>    real from the first commit** — `FlushInstructionCache` **plus** a local
+>    `isb sy` (MIGRATION.md §3.1, which this row contradicted). ARM64 has
+>    split I/D caches; a no-op here is the classic rare, unreproducible,
+>    wrong-instruction bug, and it would have been introduced deliberately.
+> 2. **P0 cannot defer the code region.** `VmState::new` installs the
+>    hand-assembled A64 stub trampolines into the code cache
+>    *unconditionally* — its own comment says "Stubs are installed
+>    unconditionally (regardless of `options.jit`)", so this happens in
+>    `JitMode::Off` too. A null or zero-capacity region therefore panics at
+>    **boot**, which is precisely the thing P0 exists to make work. So P0
+>    owns a small real region (`VirtualAlloc` `PAGE_EXECUTE_READWRITE`,
+>    `region_raw`, `Drop` → `VirtualFree`, page size from `GetSystemInfo`)
+>    — ~40 LoC. P1 still owns the ~250 LoC that matter: relocation through
+>    the unchanged vendored `relocpatch.rs`, `define_extern`/`lookup`, the
+>    `backend::Loader` impl, and `dlsym_resolve`'s Windows twin.
+>
+> The general lesson for the remaining P sprints: "the JIT is off" does
+> **not** mean "no native code exists". The stub trampolines are published
+> at genesis on every path.
 
 JIT posture in P0: `JitMode::Off` semantics must be the effective default on
 Windows until P2 lands (compile guard: tier-up entry refuses on

@@ -53,6 +53,12 @@ use std::sync::OnceLock;
 // One general entry (C1): the full AAPCS64 outgoing model — 6 GPR words
 // (x2..x7), 8 FPR doubles (d0..d7), 4 spilled stack words — plus a
 // return-kind token selecting which result registers the shim reads.
+//
+// WINARM (P0 D2#6): `build.rs` compiles `objc_shim.m` (and links `-lobjc`)
+// only on macOS, so this symbol does not exist in a Windows link — the
+// declaration is gated with the shim that defines it, not left dangling for
+// the linker to discover. Every caller is gated in the same breath below.
+#[cfg(target_os = "macos")]
 extern "C" {
     #[allow(clippy::too_many_arguments)]
     fn macvm_try_msgsend(
@@ -155,8 +161,47 @@ thread_local! {
     static POOL: Cell<*mut c_void> = const { Cell::new(std::ptr::null_mut()) };
 }
 
+/// WINARM (P0 D2#6): the ONE reason every refusal in this module names, so
+/// the Cocoa prims (`primClassNamed:`, `macvmDelegate`, every `cocoaSend*`)
+/// all report the same true cause rather than a symptom. The Cocoa bridge is
+/// a macOS-only GUEST feature (MIGRATION.md §2 — "Cocoa bridge, `cocoa_gui/`,
+/// `abc_player/`, MacGamePane, AppleScript … gated out on Windows"); there is
+/// no `objc_msgSend`, no Foundation, and no Windows counterpart is planned.
+/// The unrelated Win32 FFI story is sprint P5 (`winkb` +
+/// `LoadLibraryA`/`GetProcAddress`, MIGRATION.md §3.5) and answers a
+/// different question, so it is deliberately NOT offered here as a
+/// workaround.
+#[cfg(not(target_os = "macos"))]
+pub(crate) const NO_OBJC_RUNTIME: &str =
+    "the Cocoa/Objective-C bridge is macOS-only (MIGRATION.md §2): this platform has no \
+     Objective-C runtime, no Foundation, and no Windows counterpart is planned — the send \
+     was refused, nothing was performed";
+
+/// WINARM (P0 D2#6): the bridge's SOLE foreign-symbol seam, gated here at
+/// the one narrow boundary rather than at the module declaration. Gating the
+/// whole module (the shape WINVM chose, `WINVM/src/runtime/mod.rs`) is not
+/// available to this port yet: `primitives.rs` (70 sites), `embed.rs` (20)
+/// and `frontend/classdef.rs` reference `objc_bridge` unconditionally, so the
+/// module must keep EXISTING on Windows and fail at its edges instead. The
+/// mac arm is the original call, verbatim.
+#[cfg(target_os = "macos")]
+fn dlsym_resolve(lib: Option<&str>, name: &str) -> Option<u64> {
+    crate::vendor::wfasm::native_macos::dlsym_resolve(lib, name)
+}
+
+/// WINARM (P0 D2#6): no `dlopen`/`dlsym` on Windows, and — deliberately — no
+/// re-routing to `LoadLibraryA`/`GetProcAddress` either: even with a working
+/// loader there is no `libobjc` to find. Answering `None` is the honest
+/// result and lands every caller on this module's ALREADY-EXISTING
+/// missing-runtime path (`syms()` answers `None`, `class_named` answers
+/// `None`, the prims answer `PrimResult::Fail`) — no new failure channel.
+#[cfg(not(target_os = "macos"))]
+fn dlsym_resolve(_lib: Option<&str>, _name: &str) -> Option<u64> {
+    None
+}
+
 fn resolve(name: &str) -> Option<u64> {
-    crate::vendor::wfasm::native_macos::dlsym_resolve(None, name)
+    dlsym_resolve(None, name)
 }
 
 fn syms() -> Option<&'static Syms> {
@@ -165,7 +210,7 @@ fn syms() -> Option<&'static Syms> {
         // objc_getClass; dlopen-by-path with RTLD_GLOBAL does that. libobjc
         // itself is already linked (build.rs: rustc-link-lib=objc), so its
         // symbols resolve from the process image.
-        let _ = crate::vendor::wfasm::native_macos::dlsym_resolve(
+        let _ = dlsym_resolve(
             Some("/System/Library/Frameworks/Foundation.framework/Foundation"),
             "NSStringFromClass",
         );
@@ -756,10 +801,17 @@ pub fn is_manual_memory_selector(selector: &str) -> bool {
 // libdispatch/pthread entry points — plain libSystem symbols, linked, not
 // dlsym'd. `_dispatch_main_q` is the main queue object itself (what the
 // dispatch_get_main_queue() macro takes the address of).
+//
+// WINARM (P0 D2#6): libdispatch and `pthread_main_np` are libSystem symbols
+// — they are not merely absent from a Windows link, the CONCEPT is (there is
+// no main queue and no framework that owns the main thread). Declaration and
+// every use are gated together; the Windows siblings follow each.
+#[cfg(target_os = "macos")]
 #[repr(C)]
 struct DispatchQueueS {
     _opaque: [u8; 0],
 }
+#[cfg(target_os = "macos")]
 extern "C" {
     static _dispatch_main_q: DispatchQueueS;
     fn dispatch_sync_f(queue: *mut c_void, context: *mut c_void, work: extern "C" fn(*mut c_void));
@@ -833,6 +885,7 @@ pub fn hop_stats() -> (u64, u64) {
 /// frames. And the standing misuse warning: driving AppKit from a NON-main
 /// thread via the plain send path (bypassing this hop) can interleave with
 /// AppKit's own internal main dispatches — use the hop for AppKit, always.
+#[cfg(target_os = "macos")]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::type_complexity)]
@@ -939,6 +992,30 @@ pub fn try_send_full_on_main_owned(
         .unwrap_or_else(|| Err("main-thread hop completed without a result".to_string()))
 }
 
+/// WINARM (P0 D2#6): the Windows clean-fail twin of the C3 main-thread hop.
+/// Same `Result<_, String>` channel the un-enabled-hop refusal above already
+/// uses — `primitives.rs`'s `cocoa_send_auto_impl`/`cocoa_exception_fail`
+/// write the description to the transcript and answer `PrimResult::Fail`, so
+/// a guest `onMain` send raises an ordinary Smalltalk error naming the cause
+/// instead of hanging, crashing, or quietly answering nil. Refusing BEFORE
+/// touching the hop counters keeps `hop_stats()` honest: nothing was
+/// dispatched and nothing ran inline.
+#[cfg(not(target_os = "macos"))]
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
+pub fn try_send_full_on_main_owned(
+    _target: *mut c_void,
+    _selector: &str,
+    _gpr: &[u64; SEND_GPR_SLOTS],
+    _fpr: &[f64; SEND_FPR_SLOTS],
+    _stack: &[u64; SEND_STACK_SLOTS],
+    _ret: RetKind,
+    _retain_result: bool,
+    _copy_cstr: bool,
+) -> Result<(SendOut, Option<Vec<u8>>), String> {
+    Err(NO_OBJC_RUNTIME.to_string())
+}
+
 /// The plain-registers hop (no ownership post-step) — for results that are
 /// VALUES (BOOL/int/float/struct registers), where nothing pool-owned
 /// crosses back. Object/char* results must use
@@ -1012,8 +1089,23 @@ pub fn is_appkit_ui_class(name: &str) -> bool {
 
 /// Are we on the process's main thread — the only thread AppKit may be driven
 /// from? A thin wrap of `pthread_main_np()` (nonzero on main).
+#[cfg(target_os = "macos")]
 pub fn on_main_thread() -> bool {
     unsafe { pthread_main_np() == 1 }
+}
+
+/// WINARM (P0 D2#6): the question this predicate asks — "am I on the thread
+/// that OWNS the UI framework?" — has the answer `false` everywhere on
+/// Windows, because no thread in this build owns one: AppKit does not exist
+/// and the P4 Win32/WebView2 shell (MIGRATION.md §3, sprint P4) will bring
+/// its own thread discipline rather than reusing this predicate. `false` is
+/// the safe answer for all three callers: [`ensure_pool`] and
+/// [`drain_pool_at_doit_boundary`] then take their normal (no-pool, no-op)
+/// path, and [`appkit_guard`] keeps its pure semantics for the unit test
+/// below, which must go on passing on every host.
+#[cfg(not(target_os = "macos"))]
+pub fn on_main_thread() -> bool {
+    false
 }
 
 /// The pure guard decision (design §8), split out so ALL three inputs are
@@ -1025,6 +1117,13 @@ pub fn on_main_thread() -> bool {
 /// what keeps the shipping WKWebView GUI working: there the single VM runs on a
 /// worker thread and legitimately resolves an AppKit class off-main before the
 /// C3 `onMain` hop (CocoaPad, C5), which a thread-only guard would wrongly break.
+///
+/// WINARM (P0 D2#6): on Windows [`check_appkit_main_thread`] refuses every class
+/// ahead of this decision, so nothing outside `#[cfg(test)]` reaches it there —
+/// but it stays COMPILED and unit-tested on every host deliberately, so the mac
+/// rule can never silently drift while the Windows port evolves. The `allow`
+/// records that choice instead of deleting a gate we still verify.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn appkit_guard(name: &str, on_main: bool, cocoa_mode: bool) -> Result<(), String> {
     if cocoa_mode && is_appkit_ui_class(name) && !on_main {
         return Err(format!(
@@ -1044,6 +1143,7 @@ fn appkit_guard(name: &str, on_main: bool, cocoa_mode: bool) -> Result<(), Strin
 /// `primClassNamed:` primitive for a loud transcript line; class *resolution*
 /// itself is deliberately NOT blocked (it is thread-safe and the legitimate
 /// first half of the C3 resolve-then-`onMain` pattern).
+#[cfg(target_os = "macos")]
 pub fn check_appkit_main_thread(name: &str) -> Result<(), String> {
     // Foundation (and any non-AppKit class) short-circuits before any atomic or
     // pthread call — the common path pays only a short list scan.
@@ -1051,6 +1151,25 @@ pub fn check_appkit_main_thread(name: &str) -> Result<(), String> {
         return Ok(());
     }
     appkit_guard(name, on_main_thread(), cocoa_ui_mode())
+}
+
+/// WINARM (P0 D2#6): on Windows NO Objective-C class is reachable — AppKit or
+/// Foundation — so the refusal is unconditional and the AppKit/main-thread
+/// question never arises. This pre-flight check is the ONLY channel in the
+/// class-resolution path that carries a REASON: [`class_named`] can answer
+/// nothing but `None`, whereas `prim_cocoa_class_named` already calls this and
+/// writes the description to the transcript (`[cocoa-guard] {msg}`) before
+/// failing the primitive — so re-using it is what turns `Cocoa classNamed:
+/// 'NSString'` from a bare primitive failure into a named one, with no change
+/// to `primitives.rs`. Deliberately NOT folded into [`appkit_guard`], which
+/// stays the pure AppKit/main-thread decision its unit test pins identically
+/// on every host.
+#[cfg(not(target_os = "macos"))]
+pub fn check_appkit_main_thread(name: &str) -> Result<(), String> {
+    Err(format!(
+        "Objective-C class '{name}' is unavailable: {}",
+        NO_OBJC_RUNTIME
+    ))
 }
 
 /// Look up an Objective-C class by name. NULL if unknown.
@@ -1079,6 +1198,7 @@ pub fn class_named(name: &str) -> Option<*mut c_void> {
 /// the raw result registers out, exception-caught. `Err` carries the
 /// caught NSException's description. Bridge-produced pointers only (see
 /// `wrap`'s note).
+#[cfg(target_os = "macos")]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn try_send_full(
     target: *mut c_void,
@@ -1114,6 +1234,33 @@ pub fn try_send_full(
         let end = excbuf.iter().position(|&c| c == 0).unwrap_or(excbuf.len());
         Err(String::from_utf8_lossy(&excbuf[..end]).into_owned())
     }
+}
+
+/// WINARM (P0 D2#6): the Windows clean-fail twin of the general send — the
+/// choke point EVERY bridged send funnels through ([`try_send`],
+/// [`try_send_string`], [`nsstring_from`], `objc_delegate`'s alloc/init, and
+/// `primitives.rs`'s 231/232/233/`cocoaSendFull`), so one refusal here covers
+/// the whole guest-visible send surface.
+///
+/// The channel is deliberately the module's own, unchanged: this function
+/// already answers `Err(String)` for a caught `NSException` and for
+/// `"Objective-C runtime unavailable"`, and every call site already writes
+/// that description to the transcript and answers `PrimResult::Fail` (see
+/// `primitives.rs`'s `cocoa_exception_fail`). So a guest that sends to a
+/// Cocoa object on Windows gets a named, catchable Smalltalk error — not a
+/// compile error, not a crash, and never a silent `nil`. Refused before any
+/// argument is touched: nothing is marshalled, no pool is pushed, nothing is
+/// retained, so no ownership accounting can drift.
+#[cfg(not(target_os = "macos"))]
+pub fn try_send_full(
+    _target: *mut c_void,
+    _selector: &str,
+    _gpr: &[u64; SEND_GPR_SLOTS],
+    _fpr: &[f64; SEND_FPR_SLOTS],
+    _stack: &[u64; SEND_STACK_SLOTS],
+    _ret: RetKind,
+) -> Result<SendOut, String> {
+    Err(NO_OBJC_RUNTIME.to_string())
 }
 
 /// One bridged send: up to two GPR arguments, GPR result, exception-caught
@@ -1271,6 +1418,12 @@ mod tests {
     /// AppKit class *resolution* off-main is NOT refused (it is the legitimate
     /// first half of the C3 resolve-then-`onMain` pattern the WKWebView GUI's
     /// CocoaPad demo ships), and Foundation resolves as always.
+    /// WINARM (P0 D2#6, sprint_p00_detail.md §D3 "Cocoa bridge … tests → gate
+    /// to `target_os = "macos"` → never comes back (mac-only feature)"): this
+    /// one needs a LIVE Objective-C runtime — it asserts `class_named` actually
+    /// resolves `NSString`. The Windows twin below asserts the opposite
+    /// contract (clean, named refusal), which is the real Windows behaviour.
+    #[cfg(target_os = "macos")]
     #[test]
     fn guard_inert_off_main_outside_cocoa_mode() {
         assert!(
@@ -1297,6 +1450,70 @@ mod tests {
             "Foundation NSString must resolve off-main"
         );
         assert!(class_named("NSProcessInfo").is_some());
+    }
+
+    /// WINARM (P0 D2#6): the Windows twin of the gate above — the sprint's
+    /// "one test per gated mac-only prim group". Every guest-reachable entry
+    /// into the bridge must FAIL, cleanly, naming the reason: no panic, no
+    /// abort, no silent `nil`, and no hang on the C3 main-thread hop (which
+    /// on macOS would block forever waiting for a queue nobody drains). The
+    /// assertions run the same functions `primitives.rs`'s prims 230-233 /
+    /// `cocoaSendFull` / `macvmAction` call, so a regression that made any of
+    /// them panic or succeed-vacuously fails here rather than in a world test.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn cocoa_entry_points_fail_cleanly_and_name_the_reason() {
+        let null = std::ptr::null_mut();
+        // The send choke point (prims 231/232/233 and `cocoaSendFull`).
+        // `let ... else` rather than `expect_err`: `SendOut` is deliberately
+        // not `Debug` (it is a raw register file), and this gate must not
+        // change a mac-facing type to test the Windows path.
+        let Err(err) = try_send_full(
+            null,
+            "length",
+            &[0u64; SEND_GPR_SLOTS],
+            &[0.0; SEND_FPR_SLOTS],
+            &[0u64; SEND_STACK_SLOTS],
+            RetKind::Gpr,
+        ) else {
+            panic!("a Cocoa send must be refused where there is no ObjC runtime")
+        };
+        assert!(
+            err.contains("macOS-only"),
+            "the refusal must NAME the reason, got: {err}"
+        );
+        // The C0 view over it, and the NSString convenience path.
+        assert!(try_send(null, "length", null, null).is_err());
+        assert!(try_send_string(null, "description").is_err());
+        // The C3 hop must refuse rather than wait on a main queue that does
+        // not exist — and must not perturb the hop counters doing so.
+        let hops_before = hop_stats();
+        assert!(try_send_full_on_main(
+            null,
+            "length",
+            &[0u64; SEND_GPR_SLOTS],
+            &[0.0; SEND_FPR_SLOTS],
+            &[0u64; SEND_STACK_SLOTS],
+            RetKind::Gpr,
+        )
+        .is_err());
+        assert_eq!(
+            hop_stats(),
+            hops_before,
+            "a refused hop must neither dispatch nor run inline"
+        );
+        // Class resolution (prim 230): `None`, with the reason available on
+        // the pre-flight check the primitive prints to the transcript.
+        assert!(class_named("NSString").is_none());
+        let guard = check_appkit_main_thread("NSString")
+            .expect_err("no Objective-C class is reachable on this platform");
+        assert!(guard.contains("macOS-only"), "got: {guard}");
+        // Selector interning and NSString minting fail without a runtime too.
+        assert!(register_selector("length").is_none());
+        assert!(nsstring_from(b"hello").is_err());
+        // And the pool hygiene the doit boundary calls unconditionally
+        // (`frontend::classdef`) is a no-op rather than a crash.
+        drain_pool_at_doit_boundary();
     }
 
     /// ARC's method-family rule, pinned against its own documented edge
@@ -1540,8 +1757,19 @@ pub fn new_action(
     sender: crate::runtime::workers::InboxSender,
     bytes: Vec<u8>,
 ) -> Result<*mut c_void, String> {
-    let cls =
-        macvm_action_class().ok_or_else(|| "MacvmAction class registration failed".to_string())?;
+    // WINARM (P0 D2#6): on Windows the class-pair registration fails for ONE
+    // reason and it is not a registration bug — say so. `objc_allocateClassPair`
+    // is simply not there to `dlsym`, so this is the first thing a guest
+    // `Cocoa actionFor:` hits, and the generic mac wording ("registration
+    // failed") would send a reader hunting a name collision that cannot exist.
+    // `prim_cocoa_new_action` routes this string through `cocoa_exception_fail`
+    // to the transcript and answers `PrimResult::Fail` either way — the channel
+    // is unchanged, only the accuracy of the message.
+    #[cfg(not(target_os = "macos"))]
+    const ACTION_CLASS_UNAVAILABLE: &str = NO_OBJC_RUNTIME;
+    #[cfg(target_os = "macos")]
+    const ACTION_CLASS_UNAVAILABLE: &str = "MacvmAction class registration failed";
+    let cls = macvm_action_class().ok_or_else(|| ACTION_CLASS_UNAVAILABLE.to_string())?;
     let inst = try_send(cls, "alloc", std::ptr::null_mut(), std::ptr::null_mut())?;
     let inst = try_send(inst, "init", std::ptr::null_mut(), std::ptr::null_mut())?;
     if inst.is_null() {

@@ -12,12 +12,21 @@
 //! before the exec-mode flip races a concurrent instruction fetch on
 //! another core against a write this thread hasn't finished committing to
 //! the executable view yet).
+//!
+//! WINARM (P0 D2#8) — the Windows-on-ARM64 reading of all of the above, which
+//! changes none of it (MIGRATION.md §3.1): there is no `MAP_JIT` and no
+//! per-thread toggle on Windows, so `jit_write_protect` is a no-op there and
+//! the region is executable-and-writable throughout. The icache half is
+//! *more* load-bearing, not less — AArch64 has split I/D caches whatever the
+//! OS. So P9's order survives verbatim: the flip is free, the invalidation is
+//! the substance, and this file needs no `#[cfg]` because
+//! [`crate::vendor::wfasm::native_jit`] is already the per-target alias.
 
 use std::cell::Cell;
 
 use smallvec::SmallVec;
 
-use crate::vendor::wfasm::native_macos::{icache_invalidate, jit_write_protect};
+use crate::vendor::wfasm::native_jit::{icache_invalidate, jit_write_protect};
 
 /// `MACVM_GUARD_COUNT=1`: how many W^X write windows were opened, and how many
 /// icache bytes were invalidated. The question this answers is whether guards

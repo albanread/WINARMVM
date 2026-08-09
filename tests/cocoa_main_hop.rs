@@ -16,13 +16,37 @@
 //! identical for AppKit calls, which the CocoaPad capstone (C5) will
 //! exercise on-screen.
 
+// WINARM (P0 D3): this whole binary IS the Cocoa bridge's gate, and there is
+// no Cocoa on Windows — MIGRATION.md §2 lists the bridge as gated out, never
+// ported. A harnessed test file could be dismissed with a single file-level
+// `#![cfg(target_os = "macos")]`, but `harness = false` (see Cargo.toml) makes
+// cargo demand a `main` for this target on EVERY platform, so the gate has to
+// be per-item plus the trivial Windows `main` below. Gating item-by-item
+// rather than wrapping the body in a `mod` is deliberate: not one existing
+// line moves, so this file stays cherry-pickable against MACVM.
+//
+// Windows does have `#[link(kind = "framework")]` as a hard error, not a
+// warning (`error[E0455]`), so the extern block below must be gated even
+// though nothing would ever call it here.
+#[cfg(not(target_os = "macos"))]
+fn main() {
+    eprintln!("cocoa_main_hop: skipped — the Cocoa bridge is macOS-only (MIGRATION.md §2).");
+}
+
+#[cfg(target_os = "macos")]
 use macvm::embed::VmHandle;
+#[cfg(target_os = "macos")]
 use macvm::runtime::vm_state::VmOptions;
+#[cfg(target_os = "macos")]
 use macvm::runtime::JitMode;
+#[cfg(target_os = "macos")]
 use std::path::Path;
+#[cfg(target_os = "macos")]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(target_os = "macos")]
 use std::sync::Arc;
 
+#[cfg(target_os = "macos")]
 #[link(name = "CoreFoundation", kind = "framework")]
 extern "C" {
     fn CFRunLoopRunInMode(
@@ -33,6 +57,7 @@ extern "C" {
     static kCFRunLoopDefaultMode: *const std::os::raw::c_void;
 }
 
+#[cfg(target_os = "macos")]
 fn main() {
     // The inline degenerate case FIRST, from the genuine main thread: a
     // sync hop while already on main must run inline (a Cocoa-callback

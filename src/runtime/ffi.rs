@@ -267,7 +267,7 @@ pub(crate) fn dispatch_ffi_primitive(vm: &mut VmState, m: MethodOop, argc: u8) -
         let result = vm.ffi_stubs.invoke(ret_class, target, &argv_g, &argv_f);
         return unmarshal_ret(vm, ret_class, result, &name);
     }
-    let Some(target) = crate::vendor::wfasm::native_macos::dlsym_resolve(None, &name) else {
+    let Some(target) = resolve_ffi_symbol(vm, &name) else {
         // A `ffi_gen`-generated binding names only functions verified to
         // exist in the real ABI database (docs/FFI.md) — but bindings are
         // also HAND-authored every day (all of world/61's Posix surface, a
@@ -290,6 +290,54 @@ pub(crate) fn dispatch_ffi_primitive(vm: &mut VmState, m: MethodOop, argc: u8) -
 
     let result = vm.ffi_stubs.invoke(ret_class, target, &argv_g, &argv_f);
     unmarshal_ret(vm, ret_class, result, &name)
+}
+
+/// WINARM (P0 D2#7): symbol resolution is this module's ONE OS seam — every
+/// other step (descriptor decode, marshalling, the A64 trampolines in
+/// `codecache::ffi_stubs`, unmarshalling) is arch-coupled, not OS-coupled, and
+/// AArch64 is AArch64 on both hosts (MIGRATION.md §1). So the gate goes here
+/// and nowhere else: the descriptor validation ABOVE this point still runs on
+/// Windows and still reports its own, more specific guest errors (a bad arity,
+/// an unsupported shape token), which is strictly better diagnostics than
+/// refusing the whole primitive at entry would give.
+///
+/// The mac arm is the original call, verbatim.
+#[cfg(target_os = "macos")]
+fn resolve_ffi_symbol(_vm: &mut VmState, name: &str) -> Option<u64> {
+    crate::vendor::wfasm::native_macos::dlsym_resolve(None, name)
+}
+
+/// WINARM (P0 D2#7): Windows has no `dlsym`, and its replacement is NOT a
+/// drop-in — sprint P5 resolves FFI symbols through the `winkb` knowledge
+/// base plus `LoadLibraryA`/`GetProcAddress` (MIGRATION.md §3.5), which needs
+/// the per-DLL export mapping `dlsym`'s process-global namespace does not
+/// have, and an ABI classifier re-derived for AArch64. None of that exists in
+/// P0, so resolution refuses rather than guesses.
+///
+/// This is `guest_fatal`, matching every other "missing runtime/feature
+/// support" condition in [`dispatch_ffi_primitive`] (Tier 2 dispatch, an
+/// unsupported return-shape token, a symbol that fails to resolve) — see this
+/// module's header for why that bucket must NOT be `PrimitiveOutcome::
+/// Fallthrough`: an FFI pragma's generated method body is otherwise EMPTY, so
+/// a Fallthrough would answer the receiver and masquerade as quiet success.
+/// Loud at the GUEST level and not a Rust `panic!`, for the same reason the
+/// header gives: a `<primitive: FFI …>` pragma is hand-authorable Smalltalk,
+/// so reaching here is a guest program's doing and must cost that doit, not
+/// the embedding host. Diverges (`-> !` coerced to `Option`), so the
+/// caller's own not-found arm — whose "check the function: name" advice would
+/// be wrong here — is never reached on this platform.
+#[cfg(not(target_os = "macos"))]
+fn resolve_ffi_symbol(vm: &mut VmState, name: &str) -> Option<u64> {
+    crate::runtime::error::guest_fatal(
+        vm,
+        format!(
+            "FFI: cannot resolve native symbol {name:?} — the `<primitive: FFI …>` symbol \
+             resolver is macOS-only in this build (it is `dlsym` against RTLD_DEFAULT). \
+             Windows FFI resolution (the `winkb` knowledge base + LoadLibraryA/GetProcAddress, \
+             MIGRATION.md §3.5) arrives in sprint P5; until then no FFI pragma can be called \
+             on this platform"
+        ),
+    )
 }
 
 /// The return-value unmarshal, shared by the cached-address fast path and
@@ -371,6 +419,21 @@ fn sym_text(o: Oop) -> String {
 }
 
 #[cfg(test)]
+// WINARM (P0 D2#7, sprint_p00_detail.md §D3 row 3 "real-FFI tests
+// (`mmap`/`getpid`), alien POSIX → gate to `target_os = "macos"` → comes back
+// in P5 as Win32 twins"): every test below calls a REAL libc symbol
+// (`getpid`, `llabs`, `fabs`) end to end through `dispatch_ffi_primitive`, so
+// each one needs both a POSIX C library AND the `dlsym` resolver this sprint
+// just gated. `#[cfg]` rather than `#[ignore]` is right here (contrast D3's
+// last row): these are OS-coupled, not merely blocked on a later sprint's
+// loader — `getpid` is not a Windows symbol at all (`_getpid` is), so there
+// is nothing for them to keep compiling against. P5 re-introduces them as
+// Win32 twins over `winkb`. The Windows-side contract meanwhile — an FFI
+// pragma guest-fatals cleanly instead of panicking — is asserted where the
+// recovery machinery lives (`embed::tests`), for the reason the notes at the
+// end of this module already give: a bare `test_vm()` cannot observe a
+// `guest_fatal` without killing the test process.
+#[cfg(target_os = "macos")]
 // This test module only (not `dispatch_ffi_primitive` or its helpers
 // above, which contain no `unsafe` at all): the `getpid` cross-check test
 // below needs a raw `extern "C"` call to compare against, exactly the

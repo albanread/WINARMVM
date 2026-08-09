@@ -257,6 +257,16 @@ mod tests {
     #[test]
     fn ret_g_zero_args_calls_real_getpid() {
         extern "C" {
+            // WINARM (P0 D3): the UCRT spells it `_getpid` (POSIX names are
+            // the deprecated aliases on MSVC), so the symbol is renamed
+            // rather than the test gated away. What this test actually
+            // proves — that a published A64 `ret_g` trampoline calls a real
+            // native function and returns its value — is arch-correct on
+            // Windows ARM64 and worth keeping, unlike the `mmap`-based FFI
+            // tests that have no counterpart at all until P5. Without this
+            // the symbol is simply unresolved and the whole lib TEST BINARY
+            // fails to link, taking every unrelated test down with it.
+            #[cfg_attr(windows, link_name = "_getpid")]
             fn getpid() -> i32;
         }
         let mut cache = test_cache();

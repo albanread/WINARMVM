@@ -36,6 +36,23 @@ Object subclass: SystemDictionary [
     millisecondClock ^ <Integer> [
         <primitive: 92>
     ]
+    wallClockMilliseconds ^ <Integer> [
+        "Milliseconds since the Unix epoch — real wall-clock time, unlike
+         millisecondClock above, which is monotonic since VM start and must
+         stay that way (a duration must never see an NTP or DST adjustment
+         as elapsed time). WINARM P0, prim 267."
+        <primitive: 267>
+    ]
+    platformName ^ <Symbol> [
+        "The host operating system, as a Symbol: #macos, #windows, or
+         #unknown (WINARM P0 D5, prim 266). Ask this rather than assuming —
+         a few library methods are backed by FFI against POSIX and cannot
+         run everywhere, and branching on the answer keeps one shared file
+         instead of two forked ones. It names the OS only, never the
+         architecture: every use so far is 'does this OS have that
+         syscall', and both supported hosts are AArch64 regardless."
+        <primitive: 266>
+    ]
     microsecondClock ^ <Integer> [
         "Monotonic elapsed-since-VM-start clock in microseconds (same source
          as millisecondClock, without its .as_millis truncation) — the

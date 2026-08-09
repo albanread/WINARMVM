@@ -24,11 +24,50 @@
 //! living in `runtime/deopt.rs`. The handoff seam here is
 //! [`rt_uncommon_trap`], which resolves the `DeoptState` and then
 //! deliberately aborts with a "step 6" marker (see its body).
+//!
+//! **WINARM (P0 D2#5) — platform split.** Everything above is macOS-as-written
+//! and stays byte-identical there. The Mach/POSIX signal layer (`sigaction`,
+//! `sigaltstack`, the Apple `ucontext` mirrors, the two handlers,
+//! `sigsetjmp`/`siglongjmp`) is now `#[cfg]`-gated rather than ungated, and
+//! Windows gets NO trap layer in P0: that is sprint **P2**'s entire scope — a
+//! Vectored Exception Handler decoding A64 `brk` plus a non-unwinding AArch64
+//! setjmp/longjmp (MIGRATION.md §3.2/§3.3, `docs/sprints/sprint_p00_detail.md`
+//! D2#5, which says in as many words "do NOT port the VEH here"). P0's accepted
+//! end state on Windows is an interpreter-only VM where a guest-fatal error may
+//! abort the process — WINVM shipped its M0/M1 in exactly this state.
+//!
+//! What that leaves on Windows, and why the split falls where it does: the
+//! ISA-level and bookkeeping halves stay COMPILED AND LIVE on both platforms —
+//! [`decode_deopt_brk`] and the `0xDE00..=0xDE02` namespace, the code-cache
+//! registry, `CAPTURED`/`read_captured`, the A64 trampoline builders, the
+//! frame/pool slot readers — because P2 reuses them verbatim and drift in them
+//! must surface now. Only *delivery* is missing. The Windows shims for it split
+//! on one question: is this function on the interpreter's normal path?
+//!   - **No-op (must not abort):** `arm_foreign_fault_handler`,
+//!     `arm_this_threads_altstack`, [`install`]'s arming step, and `sigsetjmp`
+//!     (returns `0` = "ordinary pass"). Every one of these sits on a boot/eval
+//!     path an interpreter-only build takes, so an abort would stop P0's own
+//!     gate (a green interpreted suite) from passing. Each announces what it is
+//!     not doing.
+//!   - **Loud abort:** `siglongjmp` — reachable only after the VM has already
+//!     decided to abandon the current computation, never from ordinary
+//!     interpretation, and its `!` return type forbids a no-op.
+//!
+//! Each Windows shim carries a `// WINARM (P2):` marker naming what replaces it.
 
 #![allow(unsafe_code)]
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
+
+/// WINARM (P0 D2#5): `AtomicU32` has exactly one user in this file — the
+/// POSIX `sigjmp_buf` storage `JMP_BUFS`, which Windows replaces with
+/// `WIN_JMP_BUFS` (a `sigjmp_buf` is a libc type; the hand-written Windows
+/// setjmp P2 lands has its own layout). Gated WITH its single user rather
+/// than left to fire `unused_imports` — P0's bar is a zero-warning build
+/// (sprint_p00_detail.md, implementation order step 6).
+#[cfg(unix)]
+use std::sync::atomic::AtomicU32;
 
 use crate::compiler::assembler::xr;
 use crate::compiler::assembler::{imm, mem, mem_post, mem_pre, sp, x, Assembler, RelocKind};
@@ -185,9 +224,43 @@ static CAPTURED: [AtomicU64; 36] = [const { AtomicU64::new(0) }; 36];
 // hand-declared here, with `sigjmp_buf`'s exact layout confirmed from this
 // system's own `/usr/include/.../usr/include/setjmp.h`: on `arm64` macOS,
 // `_JBLEN = (14 + 8 + 2) * 2 = 48`, `sigjmp_buf` is `int[_JBLEN + 1]` =
-// `[c_int; 49]`.
+// `[c_int; 49]`. (Windows has no `sigjmp_buf` at all; its recovery buffer is
+// [`WinJmpSlot`], written by the AArch64 setjmp/longjmp P2 lands.)
+#[cfg(unix)]
 const SIGJMP_BUF_LEN: usize = 49;
 
+/// WINARM (P0 D2#5): the identity key the jmp/recovery registries use for
+/// "this thread". `pthread_self()` on unix; `GetCurrentThreadId()` on Windows
+/// — nonzero for any real thread, which is the one property the registries
+/// depend on (`0 == empty slot`, see [`JMP_OWNER`]). Both are pure reads of a
+/// per-thread kernel/TEB field: no allocation, no lock, hence usable from the
+/// fault-handler-side scan ([`lookup_jmp_slot_for_current_thread`]) under the
+/// same async-signal-safety argument the POSIX side already made.
+///
+/// This is an OS-capability seam, not a Mach seam, so it gates on
+/// `unix`/`windows` rather than `target_os = "macos"` (MIGRATION.md §3.5:
+/// "the gates here must say what they mean"). Ported from WINVM's identical
+/// split, which is arch-neutral.
+#[cfg(unix)]
+fn current_thread_id() -> u64 {
+    // SAFETY: no arguments, no memory access — returns this thread's own id.
+    unsafe { libc::pthread_self() as u64 }
+}
+
+#[cfg(windows)]
+fn current_thread_id() -> u64 {
+    // House rule (sprint_p00_detail.md Pitfalls): `libc` on Windows exposes
+    // the CRT only, never Win32 — kernel32 imports are hand-declared
+    // `extern "system"`, as `memory/reservation.rs` and the WINVM loader do.
+    // No `windows-sys` dependency enters the core crate.
+    extern "system" {
+        fn GetCurrentThreadId() -> u32;
+    }
+    // SAFETY: no arguments, no memory access — returns the caller's TID.
+    unsafe { GetCurrentThreadId() as u64 }
+}
+
+#[cfg(unix)]
 extern "C" {
     /// Callers MUST invoke this DIRECTLY, inline, at their own call site —
     /// never through an intervening Rust wrapper function. `sigsetjmp`
@@ -217,12 +290,125 @@ extern "C" {
     pub(crate) fn siglongjmp(env: *mut core::ffi::c_int, val: core::ffi::c_int) -> !;
 }
 
+// ── WINARM (P0 D2#5): the Windows recovery seam — DELIBERATELY UNBUILT ─────
+//
+// MIGRATION.md §3.3 assigns the non-unwinding AArch64 setjmp/longjmp twin
+// (`global_asm!`: x19–x28, fp, lr, sp, d8–d15) to sprint **P2**, together
+// with §3.2's VEH. sprint_p00_detail.md D2#5 says so in as many words: "do
+// NOT port the VEH here — that is P2's whole scope; until then guest-fatal on
+// Windows may abort (WINVM M0 shipped exactly this state)". So this file
+// deliberately ships NO Windows jump implementation. What it must ship is the
+// SHAPE: `src/embed.rs` (not a P0 file) calls
+// `sigsetjmp(jmp_buf_ptr(slot), 1)` unconditionally, so both symbols and the
+// buffer accessor have to exist on Windows or the crate does not compile.
+//
+// The abort/no-op split below is the whole P0 design decision here, and it is
+// chosen so the INTERPRETER can run:
+//
+//   * `sigsetjmp` → documented no-op returning 0. `0` is precisely "this is
+//     the ordinary, non-resumed pass" — every caller (`embed::VmHandle::
+//     eval`/`exec`) then proceeds straight into ordinary interpreted
+//     execution, which is exactly P0's accepted end state. An abort here
+//     would make an embedded VM unable to evaluate a single expression.
+//   * `siglongjmp` → loud abort. It cannot be a no-op: its return type is
+//     `!`, and every caller has already committed to abandoning the current
+//     computation. It is reachable ONLY from `raise_guest_fatal` (an
+//     unhandled DNU / `self error:` on a thread that claimed a slot) and,
+//     from P2 on, the VEH's foreign-fault branch — never from the
+//     interpreter's normal path. On a plain CLI/`cargo test` run no slot is
+//     ever claimed, so `raise_guest_fatal` takes its `fatal_exit` arm
+//     unchanged and this is never reached; the P0 gate is unaffected.
+#[cfg(windows)]
+#[repr(C, align(16))]
+struct WinJmpSlot(core::cell::UnsafeCell<[u8; 256]>);
+// SAFETY: each slot is exclusively owned by the thread that claimed it
+// (`claim_jmp_slot`, keyed by `current_thread_id`), so there is no real
+// sharing to guard — the same argument `ProbeStack` above makes.
+#[cfg(windows)]
+unsafe impl Sync for WinJmpSlot {}
+/// Per-thread recovery-buffer storage for the Windows [`sigsetjmp`]/
+/// [`siglongjmp`] — the counterpart of the POSIX `JMP_BUFS`. Nothing writes
+/// it in P0 (see the section comment above); it exists so `jmp_buf_ptr` has a
+/// real, stable, per-slot address to hand out on both platforms rather than a
+/// null the P2 asm would have to special-case.
+///
+/// 256 bytes, 16-aligned, sized for what P2 will actually store: the
+/// Windows-ARM64 nonvolatile set is x19–x28 (80 B) + fp/lr/sp (24 B) + d8–d15
+/// (64 B) = 168 B, so 256 leaves room for a cookie/flags word and keeps the
+/// buffer one 16-aligned block (`stp` pairs land naturally). Ported from
+/// WINVM's `WinJmpSlot`, whose x64 set (128 B of XMM6–15 + 80 B GPR/RSP/RIP +
+/// control words) also fits — the constant is arch-neutral, its CONTENTS are
+/// not, and P2 writes those.
+#[cfg(windows)]
+static WIN_JMP_BUFS: [WinJmpSlot; JMP_REGISTRY_CAP] =
+    [const { WinJmpSlot(core::cell::UnsafeCell::new([0u8; 256])) }; JMP_REGISTRY_CAP];
+
+/// Fires once per process the first time something asks for a recovery point
+/// on Windows, so a P0 build never *silently* pretends to be protected.
+#[cfg(windows)]
+static WARNED_NO_RECOVERY: AtomicBool = AtomicBool::new(false);
+
+/// WINARM (P0 D2#5) STUB — establishes NO recovery point and always returns
+/// `0` ("ordinary, non-resumed pass"), so the caller runs its guest code
+/// normally. The recovery window it appears to open does not exist until P2
+/// lands the AArch64 `global_asm!` twin (MIGRATION.md §3.3); a native fault or
+/// guest-fatal inside that window therefore takes the platform default
+/// (process death / [`siglongjmp`]'s abort below) instead of unwinding here.
+/// Announced once on stderr rather than silently, because "I am protected" is
+/// exactly the belief a caller forms from a `0` return.
+///
+/// # Safety
+/// Signature-compatible with the POSIX `sigsetjmp` it stands in for (`unsafe`
+/// so `embed.rs`'s existing `unsafe { … }` call site is neither a compile
+/// error nor an `unused_unsafe` warning); `env` is never dereferenced here.
+#[cfg(windows)]
+pub(crate) unsafe fn sigsetjmp(
+    _env: *mut core::ffi::c_int,
+    _savemask: core::ffi::c_int,
+) -> core::ffi::c_int {
+    // WINARM (P2): real Windows implementation is the non-unwinding AArch64
+    // setjmp — see MIGRATION.md §3.3.
+    if !WARNED_NO_RECOVERY.swap(true, Ordering::AcqRel) {
+        raw_stderr(
+            b"MACVM (WINARM P0): no fault-recovery point established -- \
+              sigsetjmp is a stub until sprint P2 lands the AArch64 \
+              setjmp/longjmp + VEH (MIGRATION.md 3.2/3.3). Guest-fatal errors \
+              and native faults will end the process.\n",
+        );
+    }
+    0
+}
+
+/// WINARM (P0 D2#5) STUB — aborts. There is no saved context to jump to (see
+/// [`sigsetjmp`] above), and the return type `!` forbids doing nothing, so the
+/// only honest behavior is to die with a message that names the sprint which
+/// fills this in. This IS the "guest-fatal on Windows may abort" state
+/// sprint_p00_detail.md D2#5 accepts and WINVM's own M0 shipped.
+///
+/// `abort()` (not `exit`) so a debugger/crash reporter still gets a stack: on
+/// AArch64 it lowers to `brk #1`, which [`decode_deopt_brk`] deliberately
+/// classifies as foreign, so P2's VEH will pass it through untouched.
+///
+/// # Safety
+/// Signature-compatible with the POSIX `siglongjmp`; `env` is never read.
+#[cfg(windows)]
+pub(crate) unsafe fn siglongjmp(_env: *mut core::ffi::c_int, _val: core::ffi::c_int) -> ! {
+    // WINARM (P2): real Windows implementation is the non-unwinding AArch64
+    // longjmp, and its second caller is the VEH — see MIGRATION.md §3.2/§3.3.
+    raw_stderr(
+        b"MACVM (WINARM P0): siglongjmp reached with no recovery point -- the \
+          Windows trap/recovery layer is sprint P2 (MIGRATION.md 3.2/3.3). \
+          Aborting; this is the documented interpreter-only end state.\n",
+    );
+    std::process::abort()
+}
+
 /// Same signal-safety discipline as the code-cache registry above: a fixed
 /// array of plain atomics (never a `Mutex`, never a `thread_local!` — the
 /// latter's lazy-init path on first touch is not obviously async-signal-safe,
 /// and this registry's whole POINT is being read from inside a handler).
-/// `0` marks an empty/retired slot (`libc::pthread_self()` is never 0 for a
-/// real thread). Each slot's own `sigjmp_buf` is stored as
+/// `0` marks an empty/retired slot ([`current_thread_id`] is never 0 for a
+/// real thread, on either platform). Each slot's own `sigjmp_buf` is stored as
 /// `[AtomicU32; SIGJMP_BUF_LEN]` (`AtomicU32` is layout-identical to the
 /// `c_int` `sigjmp_buf` itself uses, and `AtomicU32::as_ptr` gives the raw
 /// `*mut i32`/`*mut c_int` `sigsetjmp`/`siglongjmp` need) rather than a
@@ -230,6 +416,10 @@ extern "C" {
 /// this file of using atomics even for what is conceptually a raw buffer.
 const JMP_REGISTRY_CAP: usize = 64;
 static JMP_OWNER: [AtomicU64; JMP_REGISTRY_CAP] = [const { AtomicU64::new(0) }; JMP_REGISTRY_CAP];
+/// POSIX recovery buffers. Windows uses `WIN_JMP_BUFS` instead — a
+/// `sigjmp_buf` is a libc type with no Windows counterpart, and P2's
+/// hand-written AArch64 setjmp has its own layout (WINARM P0 D2#5).
+#[cfg(unix)]
 static JMP_BUFS: [[AtomicU32; SIGJMP_BUF_LEN]; JMP_REGISTRY_CAP] =
     [const { [const { AtomicU32::new(0) }; SIGJMP_BUF_LEN] }; JMP_REGISTRY_CAP];
 /// The triggering fault's `(signal, pc, far)`, published into THIS thread's
@@ -256,7 +446,7 @@ static JMP_REGISTRY_LOCK: Mutex<()> = Mutex::new(());
 /// Only ever called from ordinary (non-signal) code — `VmHandle::boot`
 /// (S21 step 2), once, before any guest code runs on that thread.
 pub(crate) fn claim_jmp_slot() -> usize {
-    let me = unsafe { libc::pthread_self() } as u64;
+    let me = current_thread_id();
     let _g = JMP_REGISTRY_LOCK.lock().unwrap();
     let slot = (0..JMP_REGISTRY_CAP)
         .find(|&i| JMP_OWNER[i].load(Ordering::Acquire) == me)
@@ -275,6 +465,7 @@ pub(crate) fn claim_jmp_slot() -> usize {
 /// # Safety
 /// `i` must be a slot this thread itself claimed via [`claim_jmp_slot`] and
 /// has not yet released via [`deregister_setjmp`].
+#[cfg(unix)]
 #[allow(unsafe_code)]
 pub(crate) unsafe fn jmp_buf_ptr(i: usize) -> *mut core::ffi::c_int {
     // SAFETY (of the cast, not the caller contract above): `JMP_BUFS[i]` is
@@ -284,6 +475,24 @@ pub(crate) unsafe fn jmp_buf_ptr(i: usize) -> *mut core::ffi::c_int {
     // `pthread_self()`), so treating its start as one contiguous
     // `*mut c_int` is sound.
     JMP_BUFS[i][0].as_ptr() as *mut core::ffi::c_int
+}
+
+/// WINARM (P0 D2#5): the Windows twin — a pointer into slot `i`'s
+/// [`WinJmpSlot`], the buffer P2's hand-written AArch64 setjmp/longjmp will
+/// read/write by fixed byte offset (MIGRATION.md §3.3). In P0 nothing
+/// dereferences it (the [`sigsetjmp`] stub above ignores `env` entirely), but
+/// it is a real, stable, per-slot address rather than a null, so the accessor
+/// keeps ONE contract on both platforms and P2 changes only the asm.
+///
+/// # Safety
+/// As the POSIX version: `i` must be a slot this thread claimed and has not
+/// released.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+pub(crate) unsafe fn jmp_buf_ptr(i: usize) -> *mut core::ffi::c_int {
+    // SAFETY: exclusive per-thread ownership of slot `i` (as POSIX); the 256-
+    // byte, 16-aligned cell is exactly the buffer P2's asm will address.
+    WIN_JMP_BUFS[i].0.get() as *mut core::ffi::c_int
 }
 
 /// Clears this thread's own registered slot, if any — called once a worker
@@ -300,7 +509,7 @@ pub(crate) unsafe fn jmp_buf_ptr(i: usize) -> *mut core::ffi::c_int {
 /// restarts. Keyed by `pthread_self()`, so calling it from a thread that
 /// never claimed a slot is a harmless no-op.
 pub(crate) fn deregister_setjmp() {
-    let me = unsafe { libc::pthread_self() } as u64;
+    let me = current_thread_id();
     let _g = JMP_REGISTRY_LOCK.lock().unwrap();
     for owner in JMP_OWNER.iter() {
         if owner.load(Ordering::Acquire) == me {
@@ -337,7 +546,7 @@ pub fn active_probe_slots() -> usize {
 /// immune to other threads' concurrent tests (unlike the process-global
 /// [`active_jmp_slots`]).
 pub fn current_thread_jmp_slots() -> usize {
-    let me = unsafe { libc::pthread_self() } as u64;
+    let me = current_thread_id();
     let _g = JMP_REGISTRY_LOCK.lock().unwrap();
     JMP_OWNER
         .iter()
@@ -350,7 +559,7 @@ pub fn current_thread_jmp_slots() -> usize {
 /// no lock, no allocation — the same shape as `lookup_pc_full` above, just
 /// keyed by owning thread instead of by pc range.
 fn lookup_jmp_slot_for_current_thread() -> Option<usize> {
-    let me = unsafe { libc::pthread_self() } as u64;
+    let me = current_thread_id();
     (0..JMP_REGISTRY_CAP).find(|&i| JMP_OWNER[i].load(Ordering::Acquire) == me)
 }
 
@@ -429,11 +638,17 @@ pub(crate) fn has_registered_jmp_slot() -> bool {
 pub(crate) fn raise_guest_fatal(message: String) -> ! {
     if let Some(i) = lookup_jmp_slot_for_current_thread() {
         GUEST_FATAL_MSG.lock().unwrap()[i] = Some(message);
+        // WINARM (P0 D2#5): routed through [`jmp_buf_ptr`], the
+        // platform-neutral accessor (POSIX `JMP_BUFS` / Windows
+        // `WIN_JMP_BUFS`), so this one call site serves both. On macOS this is
+        // the identical pointer the inlined `JMP_BUFS[i][0].as_ptr()` produced
+        // — behavior is unchanged. On Windows in P0 this reaches the
+        // [`siglongjmp`] stub, i.e. a loud abort: exactly the "guest-fatal may
+        // abort" state sprint_p00_detail.md D2#5 accepts until P2. Note the
+        // CLI/`cargo test` path never gets here at all — no slot is claimed
+        // outside `embed::VmHandle`, so the `fatal_exit` arm below runs.
         unsafe {
-            siglongjmp(
-                JMP_BUFS[i][0].as_ptr() as *mut core::ffi::c_int,
-                GUEST_FATAL_JMP_VAL,
-            );
+            siglongjmp(jmp_buf_ptr(i), GUEST_FATAL_JMP_VAL);
         }
     }
     crate::runtime::vm_state::fatal_exit(1);
@@ -454,6 +669,10 @@ pub(crate) fn take_last_guest_fatal_message() -> Option<String> {
 /// dossier itself dereferencing something the validation missed) restores
 /// `SIG_DFL` and dies with the original signal — the per-step-flushed
 /// dossier prefix survives on stderr.
+// WINARM (P0 D2#5): read only by the macOS fault handlers below; the Windows
+// reader is the VEH, which is sprint P2 (MIGRATION.md §3.2). Kept compiled on
+// both platforms so P2 adds a reader, not a static.
+#[cfg_attr(windows, allow(dead_code))]
 static PROBE_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
 /// The dedicated stack `rt_probe_crash` runs on. A SEGV frame's own sp may
@@ -504,33 +723,57 @@ static PROBE_STACK: ProbeStack = ProbeStack(core::cell::UnsafeCell::new([0; PROB
 ///     at freed-but-still-mapped memory until the thread is fully torn down —
 ///     a benign window (no signal can arrive there; freed heap is not
 ///     unmapped), not a live-use hazard.
+///
+/// WINARM (P0 D2#5): unix-only, buffer INCLUDED. An alternate signal stack is
+/// a POSIX concept with no Windows counterpart at all — Win32 exception
+/// dispatch (SEH/VEH) runs the handler on the faulting thread's own stack, so
+/// P2's VEH will need none either (MIGRATION.md §3.2). WINVM keeps the
+/// `thread_local` allocated on Windows and discards the pointer to preserve the
+/// call's shape; here the whole buffer is gated out instead, because on the
+/// worker fleet that is 256 KiB per arming thread bought for nothing and there
+/// is no future sprint that will want it. Gated on `unix`, not
+/// `target_os = "macos"`: `sigaltstack` is POSIX, and MIGRATION.md §3.5 asks
+/// each gate to say what it actually means.
+#[cfg(unix)]
 const ALT_STACK_BYTES: usize = 256 * 1024;
+#[cfg(unix)]
 thread_local! {
     static ALT_STACK: core::cell::RefCell<Option<Box<[u8; ALT_STACK_BYTES]>>> =
         const { core::cell::RefCell::new(None) };
 }
 
 /// Registers THIS thread's own sigaltstack, allocating its buffer on the first
-/// call on this thread (see [`ALT_STACK`]). Ordinary-context only — never call
+/// call on this thread (see `ALT_STACK`). Ordinary-context only — never call
 /// from inside a signal handler (the lazy `thread_local` init may allocate).
 /// Idempotent: re-arming a thread just points `sigaltstack` at the same buffer.
+///
+/// WINARM (P0 D2#5): a documented NO-OP on Windows — not an abort. It sits on
+/// the arming path both `install` and `arm_foreign_fault_handler` take (the
+/// latter runs on every `embed::VmHandle::boot`, JIT or not), so aborting here
+/// would stop an interpreter-only build from booting at all; and there is
+/// genuinely nothing to register, since a VEH delivers on the faulting
+/// thread's own stack.
 fn arm_this_threads_altstack() {
-    let sp = ALT_STACK.with(|cell| {
-        cell.borrow_mut()
-            .get_or_insert_with(|| Box::new([0u8; ALT_STACK_BYTES]))
-            .as_mut_ptr()
-    });
-    // SAFETY: `sp` points at this thread's own live, thread-local-owned buffer
-    // of exactly `ALT_STACK_BYTES`, valid for as long as this thread runs any
-    // code that could fault (see [`ALT_STACK`] for the exit-teardown analysis);
-    // the `stack_t` is fully zeroed then fully initialized.
-    unsafe {
-        let mut alt: libc::stack_t = core::mem::zeroed();
-        alt.ss_sp = sp as *mut core::ffi::c_void;
-        alt.ss_size = ALT_STACK_BYTES;
-        alt.ss_flags = 0;
-        let rc = libc::sigaltstack(&alt, core::ptr::null_mut());
-        assert_eq!(rc, 0, "deopt_trap: sigaltstack failed");
+    #[cfg(unix)]
+    {
+        let sp = ALT_STACK.with(|cell| {
+            cell.borrow_mut()
+                .get_or_insert_with(|| Box::new([0u8; ALT_STACK_BYTES]))
+                .as_mut_ptr()
+        });
+        // SAFETY: `sp` points at this thread's own live, thread-local-owned
+        // buffer of exactly `ALT_STACK_BYTES`, valid for as long as this thread
+        // runs any code that could fault (see [`ALT_STACK`] for the
+        // exit-teardown analysis); the `stack_t` is fully zeroed then fully
+        // initialized.
+        unsafe {
+            let mut alt: libc::stack_t = core::mem::zeroed();
+            alt.ss_sp = sp as *mut core::ffi::c_void;
+            alt.ss_size = ALT_STACK_BYTES;
+            alt.ss_flags = 0;
+            let rc = libc::sigaltstack(&alt, core::ptr::null_mut());
+            assert_eq!(rc, 0, "deopt_trap: sigaltstack failed");
+        }
     }
 }
 
@@ -541,6 +784,12 @@ fn arm_this_threads_altstack() {
 /// # Safety
 /// `ss`/`far` come from the kernel-provided ucontext of the CURRENT
 /// delivery.
+// WINARM (P0 D2#5): takes an Apple `_STRUCT_ARM_THREAD_STATE64` by reference,
+// so it gates with that struct. P2's VEH captures from an `ARM64_NT_CONTEXT`
+// into the same `CAPTURED` array (MIGRATION.md §3.2) — the array, the CAP_*
+// offsets and [`read_captured`] all stay portable so only the source struct
+// differs.
+#[cfg(target_os = "macos")]
 unsafe fn capture_regs(ss: &ArmThreadState64, far: u64, sig: i32) {
     for (slot, &v) in CAPTURED.iter().zip(ss.__x.iter()) {
         slot.store(v, Ordering::Relaxed);
@@ -624,12 +873,19 @@ pub(crate) fn deregister(lo: u64) {
 /// atomic scan, no lock/alloc). Returns `(tramp, assert)` of the owning cache,
 /// or `None` if `pc` is in no registered cache. Reads `lo` with Acquire (the
 /// publish key) before the rest of the entry.
+// WINARM (P0 D2#5): the only consumer is the macOS SIGTRAP handler; the
+// Windows consumer is P2's VEH (MIGRATION.md §3.2). The registry itself stays
+// live on both platforms — `install`/`deregister` populate it regardless.
+#[cfg_attr(windows, allow(dead_code))]
 fn lookup_pc(pc: u64) -> Option<(u64, u64)> {
     lookup_pc_full(pc).map(|(t, a, _)| (t, a))
 }
 
 /// Like [`lookup_pc`] but also returns the owning cache's PROBE trampoline
 /// (0 when none was registered — a pre-DBG0 test arm).
+// WINARM (P0 D2#5): consumers are the macOS fault handlers; P2's VEH is the
+// Windows one.
+#[cfg_attr(windows, allow(dead_code))]
 fn lookup_pc_full(pc: u64) -> Option<(u64, u64, u64)> {
     let n = REG_LEN.load(Ordering::Acquire);
     for i in 0..n {
@@ -660,10 +916,19 @@ fn lookup_pc_full(pc: u64) -> Option<(u64, u64, u64)> {
 // left as an opaque tail sized to match the real struct — the handler never
 // touches them, and getting their *size* right keeps `mcontext64`'s own size
 // honest should anything ever take `size_of` of it (nothing in step 5 does).
+//
+// WINARM (P0 D2#5): the whole block is `#[cfg(target_os = "macos")]` — these
+// are Apple header mirrors, not portable AArch64 ones. Windows' equivalent is
+// `ARM64_NT_CONTEXT` (`Cpsr`, `X0..X28`, `Fp`, `Lr`, `Sp`, `Pc`, `V[32]`,
+// `Fpcr`, `Fpsr`), hand-declared the same way when P2 writes the VEH —
+// MIGRATION.md §3.2 already specifies its shape. Gated, never deleted: the
+// macOS build must stay byte-identical (sprint_p00_detail.md Pitfalls, "Do not
+// 'fix' mac-only code to compile by deleting it").
 
 /// `_STRUCT_ARM_THREAD_STATE64` — the integer register file at a fault. `__x`
 /// is x0..x28; `__fp`/`__lr`/`__sp`/`__pc` are the named specials; `__cpsr`
 /// + `__pad` complete the 34-word block.
+#[cfg(target_os = "macos")]
 #[repr(C)]
 struct ArmThreadState64 {
     __x: [u64; 29],
@@ -677,6 +942,7 @@ struct ArmThreadState64 {
 
 /// `_STRUCT_ARM_EXCEPTION_STATE64` — 3 words (far/esr/exception). Read never;
 /// present only so `__ss` lands at the right offset within `mcontext64`.
+#[cfg(target_os = "macos")]
 #[repr(C)]
 struct ArmExceptionState64 {
     __far: u64,
@@ -687,6 +953,7 @@ struct ArmExceptionState64 {
 /// `_STRUCT_ARM_NEON_STATE64` — 32×128-bit V registers + fpsr/fpcr. Opaque
 /// tail; present only for correct total size. `__v` is `[u128; 32]`; the two
 /// trailing u32s are fpsr/fpcr.
+#[cfg(target_os = "macos")]
 #[repr(C)]
 struct ArmNeonState64 {
     __v: [u128; 32],
@@ -696,6 +963,7 @@ struct ArmNeonState64 {
 
 /// `_STRUCT_MCONTEXT64` — exception state, then thread state (`__ss`, the one
 /// we touch), then NEON state.
+#[cfg(target_os = "macos")]
 #[repr(C)]
 struct Mcontext64 {
     __es: ArmExceptionState64,
@@ -708,6 +976,7 @@ struct Mcontext64 {
 /// *pointer* to the `mcontext64` (Apple stores it out-of-line and points
 /// `uc_mcontext` at `__mcontext_data`), which is why the handler double-
 /// dereferences: `(*(*ctx).uc_mcontext).__ss.__pc`.
+#[cfg(target_os = "macos")]
 #[repr(C)]
 struct Ucontext {
     uc_onstack: i32,
@@ -720,6 +989,7 @@ struct Ucontext {
     // (we go through `uc_mcontext`, which points at it), so it is omitted.
 }
 
+#[cfg(target_os = "macos")]
 #[repr(C)]
 struct StackT {
     ss_sp: *mut core::ffi::c_void,
@@ -728,6 +998,18 @@ struct StackT {
 }
 
 // ── The SIGTRAP handler (D3) ──────────────────────────────────────────────
+//
+// WINARM (P0 D2#5): the two handlers below and their `SIG_DFL` helpers are the
+// Mach/POSIX signal layer proper — `#[cfg(target_os = "macos")]`, unchanged
+// otherwise. Windows' counterpart is ONE Vectored Exception Handler
+// (`AddVectoredExceptionHandler`; `STATUS_BREAKPOINT` classify → redirect →
+// resume, foreign breakpoints out via `EXCEPTION_CONTINUE_SEARCH`), and it is
+// sprint P2's entire scope — MIGRATION.md §3.2, docs/sprints/
+// sprint_p00_detail.md D2#5 ("do NOT port the VEH here"). Note the pieces P2
+// reuses VERBATIM are all above this line and stay compiled on both platforms:
+// [`decode_deopt_brk`] with its `0xDE00..=0xDE02` namespace check, the
+// code-cache registry + [`lookup_pc_full`], [`CAPTURED`]/[`read_captured`], and
+// the A64 trampoline builders. Only the delivery mechanism is missing.
 
 /// SA_SIGINFO handler for SIGTRAP. Async-signal-safe: no allocation, no lock,
 /// no formatting, no unwinding across the signal boundary. Its whole job:
@@ -749,6 +1031,7 @@ struct StackT {
 /// Installed only via [`install`] as SIGTRAP's `sa_sigaction`; the kernel
 /// guarantees `info`/`ctx` are valid for a SIGTRAP delivery. Never called
 /// from Rust.
+#[cfg(target_os = "macos")]
 extern "C" fn sigtrap_handler(_sig: i32, _info: *mut libc::siginfo_t, ctx: *mut core::ffi::c_void) {
     // SAFETY: `ctx` is the kernel-provided `ucontext_t*` for this SIGTRAP; the
     // field layout mirrors Apple's headers (see the struct docs above). We
@@ -824,6 +1107,7 @@ extern "C" fn sigtrap_handler(_sig: i32, _info: *mut libc::siginfo_t, ctx: *mut 
 ///
 /// # Safety
 /// Only reached from within [`sigtrap_handler`].
+#[cfg(target_os = "macos")]
 unsafe fn restore_default_and_return() {
     unsafe { restore_default_for(libc::SIGTRAP) }
 }
@@ -833,6 +1117,7 @@ unsafe fn restore_default_and_return() {
 ///
 /// # Safety
 /// Signal-handler context only.
+#[cfg(target_os = "macos")]
 unsafe fn restore_default_for(sig: i32) {
     let mut sa: libc::sigaction = unsafe { core::mem::zeroed() };
     sa.sa_sigaction = libc::SIG_DFL;
@@ -844,6 +1129,71 @@ unsafe fn restore_default_for(sig: i32) {
 }
 
 // ── DBG0: the SIGSEGV/SIGBUS handler (docs/DEBUGGER.md §4.1) ─────────────
+
+/// WINARM (P0 D2#5): the byte-level, allocation-free stderr write, lifted out
+/// of `write_foreign_verdict` so ONE call site carries the platform-dependent
+/// count conversion below, and so the Windows P0 stubs (`sigsetjmp`/
+/// `siglongjmp`) and, later, P2's own VEH verdict line all reuse it instead of
+/// each re-deriving it. macOS emits the identical bytes to the identical fd
+/// through the identical call — this is an extraction, not a behavior change.
+///
+/// Why not `eprintln!`: every caller runs either in signal/exception-handler
+/// context or on a dying thread, where the formatting machinery may allocate,
+/// take a lock the faulting thread already holds, or reenter the very code that
+/// faulted. `write(2)` on fd 2 is on the async-signal-safe list, and on Windows
+/// `libc::write` links to the CRT's `_write`, which is a thin `WriteFile` on
+/// the inherited stderr handle — no Win32 import needed, so this stays inside
+/// the "no new dependencies, hand-declare only what you must" house rule.
+///
+/// **The count argument is NOT the same type on the two platforms**, and that
+/// is the whole reason this helper exists rather than an inline call — see
+/// [`write_count`].
+fn raw_stderr(bytes: &[u8]) {
+    // SAFETY: a plain write of a borrowed, live buffer to fd 2 (stderr, always
+    // open). `write_count` never returns more than `bytes.len()`, so the kernel
+    // never reads past the slice. A short write / EINTR is ignored
+    // deliberately: there is nothing useful to do about it from here, and
+    // retrying inside a fault handler risks looping forever.
+    let _ = unsafe {
+        libc::write(
+            2,
+            bytes.as_ptr() as *const core::ffi::c_void,
+            write_count(bytes.len()),
+        )
+    };
+}
+
+/// WINARM (P0 D2#5): converts a Rust byte length into the count type
+/// `libc::write` wants on THIS platform — the fix for the one genuine
+/// (non-`cfg`) type error P0 found in this file.
+///
+/// POSIX `write(2)` takes `size_t`, i.e. `usize` (64-bit here). The Windows
+/// CRT's `_write` — which `libc::write` links to on `*-pc-windows-msvc`, since
+/// libc on Windows is the CRT and nothing else — takes `unsigned int`, i.e.
+/// `u32`. So the ungated `libc::write(2, …, n)` this file used to end
+/// `write_foreign_verdict` with was `error[E0308]: expected u32, found usize`
+/// on `aarch64-pc-windows-msvc` and simultaneously correct on
+/// `aarch64-apple-darwin`. It is a real ABI difference, not a `cfg` accident,
+/// so it gets a real conversion rather than a gate.
+///
+/// The unix arm performs no conversion at all (the value is already `size_t`),
+/// and the Windows arm clamps BEFORE narrowing, so the cast there is provably
+/// lossless rather than silently truncating. In practice every caller in this
+/// module passes a fixed ≤ 128-byte stack buffer, so the clamp can never bind —
+/// but a bare `as u32` in a fault-reporting path is exactly the kind of thing
+/// that turns into a silent wrong-length write the first time someone hands it
+/// a bigger buffer, and "silently wrong" is the one failure mode a crash
+/// reporter must not have.
+#[cfg(unix)]
+fn write_count(n: usize) -> usize {
+    n
+}
+
+#[cfg(windows)]
+fn write_count(n: usize) -> core::ffi::c_uint {
+    // Clamp first: the cast below is then lossless by construction.
+    n.min(core::ffi::c_uint::MAX as usize) as core::ffi::c_uint
+}
 
 /// Async-signal-safe verdict line for a FOREIGN fault (pc outside every
 /// registered code cache): raw `write(2)` of a fixed message + hand-rolled
@@ -857,6 +1207,11 @@ unsafe fn restore_default_for(sig: i32) {
 /// to it instead — the message says so, so a stderr log never claims
 /// "dying" immediately before evidence (a subsequent report over the
 /// `TranscriptSink` channel, S21 step 2) that it didn't.
+// WINARM (P0 D2#5): mac-gated — it takes a POSIX signal number and switches on
+// `libc::SIGBUS`, neither of which exists on Windows. P2's VEH twin switches on
+// the `EXCEPTION_RECORD`'s status code instead (WINVM's `write_foreign_verdict_
+// win`/`fault_name` are the worked example) and reuses [`raw_stderr`] below.
+#[cfg(target_os = "macos")]
 unsafe fn write_foreign_verdict(sig: i32, pc: u64, far: u64, recovering: bool) {
     fn put(buf: &mut [u8; 128], n: &mut usize, s: &[u8]) {
         for &b in s {
@@ -901,7 +1256,12 @@ unsafe fn write_foreign_verdict(sig: i32, pc: u64, far: u64, recovering: bool) {
             b" FOREIGN (not in any code cache); dying\n"
         },
     );
-    let _ = unsafe { libc::write(2, buf.as_ptr() as *const core::ffi::c_void, n) };
+    // WINARM (P0 D2#5): same fd, same bytes, same `write(2)` — the call moved
+    // into [`raw_stderr`] so the `size_t`-vs-`unsigned int` count conversion is
+    // written once and correctly for both platforms (see its doc). Still
+    // async-signal-safe: an ordinary non-inlined call that allocates nothing
+    // and takes no lock.
+    raw_stderr(&buf[..n]);
 }
 
 /// SA_SIGINFO handler for SIGSEGV/SIGBUS (DBG0). Same discipline as
@@ -917,6 +1277,7 @@ unsafe fn write_foreign_verdict(sig: i32, pc: u64, far: u64, recovering: bool) {
 /// x28-is-&VmState convention trustworthy (docs/DEBUGGER.md §4.1);
 /// everything else gets the raw-write verdict line and the default fatal
 /// disposition.
+#[cfg(target_os = "macos")]
 extern "C" fn sig_fault_handler(
     sig: i32,
     _info: *mut libc::siginfo_t,
@@ -1422,11 +1783,22 @@ pub unsafe extern "C" fn rt_probe_crash(
     // SAFETY: contract above.
     let vm = unsafe { &mut *vm };
     let regs = read_captured();
+    #[cfg(unix)]
     let trigger = if regs.sig == libc::SIGBUS {
         "SIGBUS (pc in code cache)"
     } else {
         "SIGSEGV (pc in code cache)"
     };
+    // WINARM (P0 D2#5): `SIGBUS` has no Windows counterpart, and in P0 nothing
+    // can reach this landing at all — the probe trampoline is entered only by a
+    // fault handler redirect, and Windows has none until P2 wires the VEH
+    // (MIGRATION.md §3.2). Kept honest rather than aborting: `rt_probe_crash`
+    // is the crash REPORTER, so if P2's VEH ever lands here before its own
+    // classification is finished, a generic-but-true trigger string beats an
+    // abort that destroys the dossier this function exists to print. P2
+    // replaces this with the `EXCEPTION_RECORD` status code's name.
+    #[cfg(windows)]
+    let trigger = "native fault (pc in code cache)";
     // SAFETY: vm is the live VmState per this function's own contract.
     unsafe { crate::runtime::probe::crash_dossier(vm, &regs, trigger) }
 }
@@ -1522,7 +1894,7 @@ pub fn read_pool_oop(nm: &crate::codecache::nmethod::Nmethod, pool_ix: u32) -> O
 /// same process, each needs its OWN call to register its OWN alt-stack — an
 /// "arm once, process-wide" guard would silently leave the second thread
 /// with none. Each thread's alt-stack is now its own per-thread buffer
-/// ([`ALT_STACK`], CG0), so two threads faulting concurrently no longer race
+/// (`ALT_STACK`, CG0), so two threads faulting concurrently no longer race
 /// on shared memory — the case the worker fleet and the Cocoa GUI (a primary
 /// VM on a background thread + a UI callback on main) make likely, proven by
 /// `concurrent_foreign_faults_on_two_threads_each_recover_on_their_own_altstack`.
@@ -1531,13 +1903,26 @@ pub fn read_pool_oop(nm: &crate::codecache::nmethod::Nmethod, pool_ix: u32) -> O
 /// thread) are harmless — `arm_this_threads_altstack`/`sigaction` are
 /// themselves idempotent, and both paths install the exact same
 /// `sig_fault_handler` function pointer.
+///
+/// WINARM (P0 D2#5): a documented NO-OP on Windows, deliberately NOT an abort.
+/// `embed::VmHandle::boot`/`boot_without_world` call this unconditionally
+/// (`src/embed.rs`), so it is squarely on the interpreter's normal path — an
+/// abort here would mean an interpreter-only Windows build could not boot an
+/// embedded VM at all, and P0's gate is precisely "the world boots and the full
+/// suite runs interpreted". The cost of the no-op is honest and bounded: a
+/// foreign fault on Windows keeps the OS default disposition (the process
+/// dies) instead of being recovered onto the eval point, which is the state
+/// WINVM's M0 shipped and sprint_p00_detail.md D2#5 accepts. P2 arms the VEH
+/// here (MIGRATION.md §3.2) and the recovery becomes real.
 pub(crate) fn arm_foreign_fault_handler() {
     // Register THIS thread's own sigaltstack (per-thread — CG0). Ordinary
-    // context here, so the lazy thread-local buffer alloc is safe.
+    // context here, so the lazy thread-local buffer alloc is safe. (Itself a
+    // no-op on Windows — see its doc: a VEH needs no alternate stack.)
     arm_this_threads_altstack();
     // SAFETY: a fully zeroed, fully initialized `sigaction`, matching the
     // SA_SIGINFO 3-arg ABI `sig_fault_handler` expects — the same shape
     // `install`'s own arm block uses below.
+    #[cfg(target_os = "macos")]
     unsafe {
         let mut sf: libc::sigaction = core::mem::zeroed();
         sf.sa_sigaction = sig_fault_handler as *const () as usize;
@@ -1608,9 +1993,25 @@ pub fn install(cache: &mut CodeCache) -> DeoptTrampolines {
 
     // 4. Arm the handlers on the first install only (process-global,
     //    idempotent). SA_SIGINFO for the 3-arg form.
+    //
+    //    WINARM (P0 D2#5): on Windows this arms NOTHING — a documented no-op,
+    //    the case sprint_p00_detail.md D2#5 names explicitly ("installing
+    //    handlers" is the canonical safe no-op). Not an abort, because
+    //    `install` is reachable from ordinary configuration: `VmState::
+    //    with_options` calls it whenever the JIT is on, `rusttcl::verbs` has a
+    //    JIT-arming verb, and integration tests build JIT-armed VmStates — an
+    //    abort would take the whole test process down for something that, in
+    //    P0, cannot matter. It cannot matter because the ONLY way a trap can
+    //    fire is compiled code executing, and P0 keeps `JitMode::Off`
+    //    effective on Windows (sprint_p00_detail.md D2, "JIT posture in P0")
+    //    with no loader to publish nmethods anyway (P1). Steps 1–2 above still
+    //    run: the A64 trampolines are emitted and the cache range is
+    //    registered, so P2 only has to add `arm_veh()` right here and the
+    //    registry it consults is already populated and correct.
     if !HANDLER_ARMED.swap(true, Ordering::AcqRel) {
         // SAFETY: both handlers match the SA_SIGINFO 3-arg ABI; armed exactly
         // once (the swap above) with zeroed, fully-initialized structures.
+        #[cfg(target_os = "macos")]
         unsafe {
             let mut sa: libc::sigaction = core::mem::zeroed();
             sa.sa_sigaction = sigtrap_handler as *const () as usize;
@@ -1655,7 +2056,10 @@ pub fn install(cache: &mut CodeCache) -> DeoptTrampolines {
 /// stub. Serialize test use (`#[serial]`-style single-threaded runner) — the
 /// registry + SIGTRAP disposition are process-global, shared with the real
 /// handler. `test_disarm_handler` restores `SIG_DFL` + retires the entry.
-#[cfg(test)]
+// WINARM (P0 D2#5 / D3 row 1): mac-only — it arms a `sigaction`. P2 adds the
+// VEH twin alongside it (`test_register_range` + `arm_veh` in WINVM is the
+// worked shape).
+#[cfg(all(test, target_os = "macos"))]
 unsafe fn test_arm_handler(lo: u64, hi: u64, uncommon_tramp: u64) {
     register_with_probe(lo, hi, uncommon_tramp, 0, 0);
     // SAFETY: same contract as `install`'s sigaction arm.
@@ -2011,6 +2415,18 @@ mod tests {
     /// `cargo test` run (which may execute tests in parallel and must not have
     /// a live deopt handler swallowing unrelated traps) stays stable. Run
     /// explicitly with `cargo test -- --ignored handler_redirect_smoke`.
+    // WINARM (P0 D3 row 1): the signal-based fault-recovery and `sigsetjmp`
+    // tests below gate to macOS and come back in P2 as VEH/winjmp twins —
+    // recorded in this sprint's status entry, never silently dropped. Each is
+    // marked individually (not one `#[cfg]`'d sub-module) so the un-gating
+    // sprint sees exactly which mechanism each one pins. Note what is NOT
+    // gated: `brk_imm_decode`, `emit_brk_lays_raw_word`, the two
+    // `rt_*_runs_to_completion` end-to-end deopt tests, the NLR-sentinel test
+    // and `read_frame_slot_reads_offset` all stay live on Windows — they are
+    // arch/ISA tests, and MIGRATION.md §3.2 has P2 reusing `decode_deopt_brk`
+    // verbatim, so drift in the trap-site codec must surface immediately here
+    // rather than in P2.
+    #[cfg(target_os = "macos")] // WINARM (P0 D3): drives the macOS SIGTRAP handler; P2 adds the VEH twin
     #[test]
     #[ignore = "installs a process-global SIGTRAP handler; run single-threaded with --ignored"]
     fn handler_redirect_smoke() {
@@ -2126,6 +2542,7 @@ mod tests {
     /// so a genuine miss in this mechanism (the fault reaching `SIG_DFL`
     /// instead of being recovered) is exactly the failure this whole
     /// design exists to prevent, made concrete rather than hidden.
+    #[cfg(target_os = "macos")] // WINARM (P0 D3): real-SIGSEGV recovery via sigsetjmp; P2 twin
     #[test]
     fn foreign_fault_recovers_via_registered_jmp_slot_on_a_real_segv() {
         // Arms SIGTRAP/SIGSEGV/SIGBUS (idempotent — may already be armed by
@@ -2174,6 +2591,7 @@ mod tests {
     /// is called FRESH each loop iteration, matching the real deployment
     /// shape (once per guest eval), each call still inline at this same
     /// closure's own call site.
+    #[cfg(target_os = "macos")] // WINARM (P0 D3): sigsetjmp mask semantics across two real faults; P2 twin
     #[test]
     fn foreign_fault_recovers_from_a_second_real_segv_too() {
         let mut cache = CodeCache::new(1 << 16).unwrap();
@@ -2205,6 +2623,10 @@ mod tests {
     /// `take_last_crash_info` must not falsely report a crash for a thread
     /// that registered a slot but never actually faulted — `sigsetjmp`'s
     /// own `0` return (no recovery happened yet).
+    // Gated with the group even though the Windows stub also returns 0: on
+    // Windows it would assert a property of the P0 stub, not of a real
+    // recovery point, which is a test that passes for the wrong reason.
+    #[cfg(target_os = "macos")] // WINARM (P0 D3): sigsetjmp's ordinary `0` return; P2 twin
     #[test]
     fn take_last_crash_info_is_none_before_any_fault() {
         let mut cache = CodeCache::new(1 << 16).unwrap();
@@ -2228,6 +2650,7 @@ mod tests {
     /// the actual gap this function closes: SPEC §16.5 requires the GUI's
     /// Browser accept path to run with `MACVM_JIT=off`, and `with_options`
     /// never calls `install` in that mode.
+    #[cfg(target_os = "macos")] // WINARM (P0 D3): JIT-off foreign-fault recovery; P2 twin
     #[test]
     fn arm_foreign_fault_handler_recovers_without_install_or_code_cache() {
         let handle = std::thread::spawn(|| {
@@ -2261,6 +2684,11 @@ mod tests {
     /// must see ITS OWN fault address across every iteration, and the whole
     /// test process must survive. Each thread faults at a DISTINCT address so a
     /// cross-thread stomp would surface as a mismatched `far`.
+    // Pins a per-thread `sigaltstack` — a POSIX resource with no Windows
+    // counterpart at all (a VEH runs on the faulting thread's own stack), so
+    // this one does NOT get a P2 twin in the same shape; P2's equivalent
+    // question is "do two concurrent VEH recoveries stay independent".
+    #[cfg(target_os = "macos")] // WINARM (P0 D3): per-thread sigaltstack under concurrent faults
     #[test]
     fn concurrent_foreign_faults_on_two_threads_each_recover_on_their_own_altstack() {
         use std::sync::{Arc, Barrier};

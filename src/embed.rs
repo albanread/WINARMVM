@@ -4772,16 +4772,42 @@ mod tests {
     }
 
     // ── Cocoa bridge C0 gates (docs/cocoa_bridge_design.md §8) ──────────
+    //
+    // WINARM (P0 D3): every test from here to the end of the Cocoa block
+    // carries `#[cfg(target_os = "macos")]`. They drive guest code through
+    // the real Objective-C runtime, which Windows does not have — and the
+    // failure is not a quiet one. On Windows the bridge correctly reports
+    // "NSString class missing" and raises a guest `error:`, that becomes a
+    // guest-fatal, and guest-fatal reaches `siglongjmp`, which is a stub
+    // that ABORTS until sprint P2 lands the AArch64 setjmp/longjmp + VEH
+    // (MIGRATION.md §3.2/§3.3). An aborting test takes the whole test
+    // BINARY down with it, so these would cost every other test in the
+    // crate, not just themselves.
+    //
+    // Gated one-by-one rather than by wrapping the block in a module, so
+    // that no existing line moves and the file stays cherry-pickable
+    // against MACVM. Note what is deliberately NOT gated:
+    // `cocoa_browser_resolves_paths_over_a_snapshot_and_fails_closed` is
+    // named for the Cocoa BROWSER but is the pure headless path model —
+    // no ObjC send anywhere in it — and it passes here, so gating it would
+    // have thrown away real coverage. Verified by running it, not by
+    // reading the name.
+    //
+    // These come back in P2, and they are worth more then than now: they
+    // are the differential evidence that the bridge behaves identically on
+    // both hosts.
 
     /// The wrap/release counters are process-wide and the test harness is
     /// parallel — every Cocoa test takes this lock so counter deltas (and
     /// pool traffic) can't interleave.
+    #[cfg(target_os = "macos")]
     fn cocoa_serial() -> std::sync::MutexGuard<'static, ()> {
         static L: Mutex<()> = Mutex::new(());
         L.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn cocoa_c0_process_name_round_trips() {
         let _serial = cocoa_serial();
         // The canonical C0 gate: a real Foundation object, a real send, a
@@ -4797,6 +4823,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn cocoa_c0_tagged_pointer_ids_survive_the_byte_tail() {
         let _serial = cocoa_serial();
         // The adversarial-review regression: small NSNumbers and short
@@ -4816,6 +4843,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn cocoa_c0_release_poisons_and_double_release_fails() {
         let _serial = cocoa_serial();
         let mut vm = boot_test_vm(JitMode::Off);
@@ -4837,6 +4865,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn cocoa_c0_nsexception_is_caught_not_fatal() {
         let _serial = cocoa_serial();
         // An unrecognized ObjC selector throws NSInvalidArgumentException;
@@ -4855,6 +4884,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn cocoa_c0_wrap_release_counters_balance() {
         let _serial = cocoa_serial();
         let mut vm = boot_test_vm(JitMode::Off);
@@ -4868,6 +4898,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn cocoa_c0_wrappers_survive_gc_stress_churn() {
         let _serial = cocoa_serial();
         // The moving-GC gate: wrappers churn (and one stays live) while
@@ -4910,6 +4941,7 @@ mod tests {
     // x2..x7, the last two cross on the STACK.
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn cocoa_c1_double_and_bool_marshal_both_directions() {
         let _serial = cocoa_serial();
         let mut vm = boot_test_vm(JitMode::Off);
@@ -4945,6 +4977,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn cocoa_c1_nsrange_returns_the_x0_x1_pair() {
         let _serial = cocoa_serial();
         let mut vm = boot_test_vm(JitMode::Off);
@@ -4965,6 +4998,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn cocoa_c1_hfa_point_and_rect_round_trip() {
         let _serial = cocoa_serial();
         // The flat-register model's HFA payoff: a CGPoint argument IS two
@@ -4986,6 +5020,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn cocoa_c1_eight_arg_send_spills_to_the_stack() {
         let _serial = cocoa_serial();
         // dateWithEra:year:month:day:hour:minute:second:nanosecond: is 8
@@ -5011,6 +5046,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn cocoa_c1_alloc_init_transfers_ownership_and_balances() {
         let _serial = cocoa_serial();
         // The +1-family classifier live (design §3.2): alloc's result is
@@ -5081,6 +5117,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn cocoa_c1_hfa_results_survive_gc_stress() {
         let _serial = cocoa_serial();
         // The write-barrier regression (C1 review finding 1): the
@@ -5120,6 +5157,7 @@ mod tests {
     // ── Cocoa bridge C2 gates (DNU dispatch + cached shape resolution) ──
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn cocoa_c2_keyword_sends_drive_foundation() {
         let _serial = cocoa_serial();
         // The design's own acceptance shape: a Workspace-style doit drives
@@ -5162,6 +5200,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn cocoa_c2_encoding_driven_coercion() {
         let _serial = cocoa_serial();
         let mut vm = boot_test_vm(JitMode::Off);
@@ -5222,6 +5261,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn cocoa_nil_selector_argument_marshals_to_null_sel() {
         // A nil SEL argument marshals to a NULL SEL, NOT a failed send — the
         // on-screen CocoaUI bug: a submenu-holding NSMenuItem is built with
@@ -5244,6 +5284,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn cocoa_c2_struct_shapes_via_dnu() {
         let _serial = cocoa_serial();
         let mut vm = boot_test_vm(JitMode::Off);
@@ -5263,6 +5304,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn cocoa_c2_shape_cache_hits_are_visible_in_stats() {
         let _serial = cocoa_serial();
         // The design's "PIC hit-rate visible in stats": repeated DNU sends
@@ -5296,6 +5338,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn cocoa_c2_unknown_selector_and_non_cocoa_dnu_fail_cleanly() {
         let _serial = cocoa_serial();
         let mut vm = boot_test_vm(JitMode::Off);
@@ -5322,6 +5365,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn cocoa_c3_hop_disabled_fails_cleanly() {
         let _serial = cocoa_serial();
         // Headless: nothing drains the main dispatch queue, so the sync
@@ -5350,6 +5394,7 @@ mod tests {
     // ── Cocoa bridge C4 gates (callbacks + the in-heap mint-list) ───────
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn cocoa_c4_action_fires_and_dead_ticket_drops() {
         let _serial = cocoa_serial();
         // The full callback circle, headless: Cocoa action: registers a
@@ -5385,6 +5430,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn cocoa_c4_pool_releases_minted_keeps_kept() {
         let _serial = cocoa_serial();
         let mut vm = boot_test_vm(JitMode::Off);
@@ -5403,6 +5449,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn cocoa_c4_pool_and_callbacks_survive_gc_stress() {
         let _serial = cocoa_serial();
         // The design's own C4 soak gate: poolDo: scopes with enough mints
@@ -5457,6 +5504,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn cocoa_c4_error_in_pool_scope_clears_the_stack() {
         let _serial = cocoa_serial();
         // The C4 review's F1: a doit that raises INSIDE poolDo: aborts with
@@ -5489,6 +5537,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn cocoa_c5_cocoapad_fails_cleanly_headless() {
         let _serial = cocoa_serial();
         // The C5 demo class loads everywhere; headless (no AppKit linked,
@@ -5513,6 +5562,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn cocoa_c2_dnu_sends_survive_the_jit() {
         let _serial = cocoa_serial();
         // DNU sends from COMPILED callers: threshold-1 compiles the loop
@@ -5533,6 +5583,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn cocoa_c1_oversized_send_fails_cleanly() {
         let _serial = cocoa_serial();
         // 11 GPR-class arguments = 6 registers + 4 stack words + 1 too

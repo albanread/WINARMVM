@@ -655,7 +655,21 @@ fn ring_dump(vm: &VmState, emit: &mut dyn FnMut(String)) {
     }
 }
 
-/// The current thread's stack bounds (macOS): `[addr - size, addr)`.
+/// The current thread's stack bounds, half-open `[low, high)`. This pair is
+/// the ONLY thing standing between the dossier and a wild dereference —
+/// every caller treats "in range" as licence to do an unguarded read on a
+/// crash-scene pointer (§4.5): `frames::probe_walk_native` rejects an fp on
+/// `fp < lo || fp + 16 > hi` before chasing the frame record,
+/// `claims_vs_reality` gates each spill-slot read on `addr >= lo && addr + 8
+/// <= hi`, and `walkback` prints the pair verbatim as `[lo, hi)`. So both
+/// ends must be REAL and measured — a guessed or deliberately wide bound
+/// would not "degrade gracefully", it would convert the dossier's guarded
+/// reads into unguarded ones and fault inside the crash handler.
+///
+/// macOS: `pthread_get_stackaddr_np` returns the HIGH end (the address the
+/// stack was started at and grows down from), so the low end is
+/// `addr - size`.
+#[cfg(target_os = "macos")]
 fn thread_stack_bounds() -> (u64, u64) {
     unsafe {
         let t = libc::pthread_self();
@@ -663,6 +677,127 @@ fn thread_stack_bounds() -> (u64, u64) {
         let size = libc::pthread_get_stacksize_np(t) as u64;
         (hi - size, hi)
     }
+}
+
+// WINARM (P0 D2#3): the Windows sibling of the above. `libc` on Windows is
+// the CRT only — no pthreads — so the thread's stack is read through Win32,
+// declared by hand (`extern "system"`, no new crate dependency; same
+// discipline as `memory::reservation`'s kernel32 block).
+//
+// The pair Windows keeps is in the `NT_TIB` at the front of the Thread
+// Environment Block: `StackLimit` and `StackBase`. **`StackLimit` is the LOW
+// address and `StackBase` is the HIGH one** — the reverse of how most
+// readers parse those names, and an easy silent bug. The stack grows DOWN,
+// so "Base" is where it began (its maximum) and "Limit" is how far down it
+// has grown so far (its current minimum). Handing the callers above an
+// inverted pair would not crash — it would produce an empty range that
+// quietly rejects every genuine frame, i.e. a dossier that always says
+// "outside stack bounds". `probe_stack_bounds_contain_local` (below) fails
+// on an inversion exactly as loudly as on a wrong API, which is why that one
+// assertion is worth a test of its own.
+//
+// We obtain that pair with `VirtualQuery` on the address of a live local
+// rather than reading the TEB directly, for two reasons:
+//
+//  1. **The low bound has to be `StackLimit`, not the reservation floor.**
+//     `NtCurrentTeb()` is a compiler intrinsic, not an exported symbol (it
+//     is `x18` on ARM64, `gs:0x30` on x64), so a direct TEB read needs
+//     arch-specific `asm!`; and the one exported wrapper that looks right,
+//     `GetCurrentThreadStackLimits`, reports `Teb->DeallocationStack` as its
+//     low limit — the base of the whole *reservation*, not `StackLimit`.
+//     Nearly all of that range is reserved-but-uncommitted address space
+//     plus a `PAGE_GUARD` page, so a wild fp landing in it would PASS the
+//     range check and then fault on the very dereference the check exists to
+//     authorize. That is not a theoretical margin: measured on this host
+//     (2026-08-09, aarch64-pc-windows-msvc), a just-started thread with a
+//     2 MiB stack has **4 KiB committed and 2044 KiB reserved-only** — the
+//     permissive bound would vouch for ~99.8 % unmapped address space.
+//     `VirtualQuery` instead reports the *committed* run containing our
+//     local: the guard page's differing protection ends the region below,
+//     and the reservation ends it above, so its `[BaseAddress, BaseAddress +
+//     RegionSize)` is exactly `[StackLimit, StackBase)` — the tight bound,
+//     in which every address is committed and readable. The same
+//     measurement confirms both ends behave as claimed: as the thread
+//     recursed the low end tracked the stack down (4 KiB → 340 KiB
+//     committed) while the high end never moved and stayed bit-identical to
+//     `GetCurrentThreadStackLimits`' `HighLimit`, i.e. `StackBase`. Nothing
+//     the walker needs is ever excluded — a live frame is by definition on
+//     committed stack. (If something had `VirtualProtect`ed part of this
+//     thread's own stack the region would come back narrower still; that
+//     errs toward rejecting reads, which is the safe direction.)
+//  2. It is plain Win32 with no arch-specific code, so this file stays
+//     cherry-pickable against the x64 Windows sibling port (MIGRATION.md §4)
+//     instead of forking on `target_arch`.
+#[cfg(windows)]
+fn thread_stack_bounds() -> (u64, u64) {
+    use std::ffi::c_void;
+
+    // `MEMORY_BASIC_INFORMATION` (winnt.h), 64-bit layout — an ABI contract
+    // with the kernel, so the whole struct is declared even though only
+    // three fields are read: `VirtualQuery` validates the `dwLength` we pass
+    // against its own `sizeof`, and a short or misaligned struct would make
+    // it fail (or, worse, land `RegionSize` on the wrong offset). `PartitionId`
+    // is the Win10-1803+ name for what older SDKs left as explicit padding
+    // after `AllocationProtect`; the byte layout is identical either way.
+    #[allow(dead_code)]
+    #[repr(C)]
+    struct MemoryBasicInformation {
+        base_address: *mut c_void,
+        allocation_base: *mut c_void,
+        allocation_protect: u32,
+        partition_id: u16,
+        _pad0: u16,
+        region_size: usize,
+        state: u32,
+        protect: u32,
+        mem_type: u32,
+        _pad1: u32,
+    }
+    // Pin the layout at compile time rather than trusting the field list to
+    // have been transcribed correctly.
+    const MBI_SIZE: usize = std::mem::size_of::<MemoryBasicInformation>();
+    const _: () = assert!(MBI_SIZE == 48);
+
+    // `MEM_COMMIT` — the only `State` whose pages are backed and readable.
+    const MEM_COMMIT: u32 = 0x1000;
+
+    extern "system" {
+        fn VirtualQuery(addr: *const c_void, buf: *mut MemoryBasicInformation, len: usize)
+            -> usize;
+    }
+
+    // A genuine stack local: its address is handed to an opaque extern fn,
+    // so it cannot be kept in a register or promoted to static storage — the
+    // address really is a point inside the run we want to measure.
+    let anchor = 0usize;
+    let anchor_addr = &anchor as *const usize as u64;
+    let mut mbi = std::mem::MaybeUninit::<MemoryBasicInformation>::uninit();
+    // SAFETY: `anchor_addr` is a live address in this thread's stack and the
+    // out-buffer is correctly sized (asserted above). `VirtualQuery` reads
+    // the page tables — it never dereferences `addr` — so this is safe even
+    // when called from the crash handler with the heap in an unknown state.
+    let n = unsafe { VirtualQuery(anchor_addr as *const c_void, mbi.as_mut_ptr(), MBI_SIZE) };
+    // Fail CLOSED on anything unexpected, never permissive. An inverted,
+    // empty range makes every caller's `fp >= lo && fp < hi` test false, so
+    // the walkback degrades to "no frames" — whereas a wide fallback would
+    // hand the dossier a licence to dereference an unvalidated pointer, the
+    // one thing §4.5 forbids. The `[0xffffffffffffffff, 0x0)` it prints is
+    // itself the diagnosis.
+    const UNKNOWN: (u64, u64) = (u64::MAX, 0);
+    if n != MBI_SIZE {
+        return UNKNOWN;
+    }
+    // SAFETY: `VirtualQuery` returned the full struct size, i.e. it wrote
+    // every field.
+    let mbi = unsafe { mbi.assume_init() };
+    let lo = mbi.base_address as u64;
+    let hi = lo + mbi.region_size as u64;
+    // The VM is the SUSPECT, not the authority (§4.5): verify the answer
+    // has the shape we reasoned about instead of assuming it.
+    if mbi.state != MEM_COMMIT || anchor_addr < lo || anchor_addr >= hi {
+        return UNKNOWN;
+    }
+    (lo, hi)
 }
 
 /// Zero-dep JSON assembly (house style: gui/vm_host.rs hand-rolls too).
@@ -784,5 +919,54 @@ mod tests {
         assert_eq!(got.len(), 256);
         assert_eq!(*got.first().unwrap(), 44); // 300 - 256
         assert_eq!(*got.last().unwrap(), 299);
+    }
+
+    /// WINARM (P0 D2#3), docs/sprints/tests_p00.md: the address of a stack
+    /// local must fall inside the reported bounds. That single assertion is
+    /// the whole contract `crash_dossier` leans on, and it catches BOTH ways
+    /// the Windows read can be wrong: a wrong API (bounds of something that
+    /// is not this thread's stack) and — the likelier, quieter bug — an
+    /// inverted low/high, since `StackLimit`/`StackBase` name the LOW and
+    /// HIGH ends respectively, the opposite of how they read. Deliberately
+    /// NOT `cfg`'d to Windows: it is the same property the macOS
+    /// `pthread_get_stackaddr_np` path must satisfy, so the Mac build of
+    /// this checkout (the behavioral oracle, MIGRATION.md §5) runs the same
+    /// check on the same line.
+    #[test]
+    fn probe_stack_bounds_contain_local() {
+        let local = 0u64;
+        let addr = &local as *const u64 as u64;
+        let (lo, hi) = thread_stack_bounds();
+        assert!(lo < hi, "bounds inverted or empty: [{lo:#x}, {hi:#x})");
+        assert!(
+            addr >= lo && addr < hi,
+            "local {addr:#x} outside reported stack [{lo:#x}, {hi:#x})"
+        );
+
+        // WINARM (P0 D2#3): pin the reasoning behind choosing `VirtualQuery`
+        // over `GetCurrentThreadStackLimits` (see `thread_stack_bounds`).
+        // That API's low limit is `Teb->DeallocationStack`, the floor of the
+        // whole reservation — most of which is uncommitted and would fault
+        // on the unguarded reads these bounds authorize. Our committed run
+        // must therefore sit INSIDE it, sharing its top (`StackBase`) and
+        // starting strictly above its floor once the stack has grown at all.
+        // If a future Windows ever made the whole reservation committed up
+        // front, `lo == low` would still hold the assertion — it is the
+        // containment, not the tightness, that is load-bearing.
+        #[cfg(windows)]
+        {
+            extern "system" {
+                fn GetCurrentThreadStackLimits(low: *mut usize, high: *mut usize);
+            }
+            let (mut low, mut high) = (0usize, 0usize);
+            // SAFETY: writes two out-params describing the calling thread;
+            // touches no other memory.
+            unsafe { GetCurrentThreadStackLimits(&mut low, &mut high) };
+            assert!(
+                lo >= low as u64 && hi <= high as u64,
+                "committed run [{lo:#x}, {hi:#x}) escapes the thread's stack \
+                 reservation [{low:#x}, {high:#x})"
+            );
+        }
     }
 }

@@ -4,8 +4,9 @@
 //! bytes goes through [`guard::JitWriteGuard`], never a bare pointer store.
 //!
 //! `src/compiler/` may not call `mmap`/`pthread_jit_write_protect_np`
-//! directly — this module (plus [`crate::vendor::wfasm::native_macos`],
-//! which owns the actual FFI) is the only place those calls happen (D4).
+//! directly — this module (plus [`crate::vendor::wfasm::native_jit`], the
+//! per-target alias for `native_macos` / `native_winarm64`, which owns the
+//! actual FFI) is the only place those calls happen (D4).
 //! `CodeCache` itself knows nothing about IR, bytecode, or the
 //! interpreter — it only ever sees byte lengths, addresses, and
 //! [`crate::compiler::assembler::CodeBlob`]. [`stubs`] is the one
@@ -31,8 +32,13 @@ use std::collections::BTreeMap;
 use anyhow::Result;
 
 use crate::compiler::assembler::CodeBlob;
-use crate::vendor::wfasm::native_macos::{jit_write_protect, MacJit};
+// WINARM (P0 D2#8): both imports now come from the per-target seam selected
+// in `vendor/wfasm/mod.rs` (`native_macos` on macOS, `native_winarm64` on
+// Windows ARM64) instead of naming macOS directly — no `#[cfg]` belongs in
+// this file (MIGRATION.md §3.5).
+use crate::vendor::wfasm::native_jit::jit_write_protect;
 use crate::vendor::wfasm::relocpatch::{abs_veneer, VENEER_LEN};
+use crate::vendor::wfasm::NativeJit;
 use guard::JitWriteGuard;
 
 fn code_pad() -> usize {
@@ -99,7 +105,7 @@ impl CodeHandle {
 /// resizes blocks once handed out (S12 depends on this: a published
 /// nmethod's address is stable for its whole lifetime).
 pub struct CodeCache {
-    _jit: MacJit,
+    _jit: NativeJit,
     base: *mut u8,
     cap: usize,
     /// Bump pointer for never-yet-used space, always 16-aligned.
@@ -111,15 +117,22 @@ pub struct CodeCache {
 
 impl CodeCache {
     /// Reserve `cap` bytes (rounded up to a page by the underlying
-    /// `MacJit`) of `MAP_JIT` space. Leaves the region in executable mode —
+    /// `NativeJit`) of `MAP_JIT` space. Leaves the region in executable mode —
     /// `MacJit::with_capacity` itself leaves the calling thread *writable*
     /// (S9 P2), which would otherwise make the very first call into any
     /// published code fault; flipping here means every state a `CodeCache`
     /// is observed in from the outside is "protected, until a
     /// `JitWriteGuard` says otherwise", matching what `JitWriteGuard::drop`
     /// itself leaves behind.
+    ///
+    /// WINARM (P0 D2#8): on Windows ARM64 the flip is a no-op and there is no
+    /// per-thread state to leave writable in the first place — the region is
+    /// `PAGE_EXECUTE_READWRITE` for its lifetime. The call stays because the
+    /// invariant it establishes is the platform-neutral one, and because a
+    /// future `VirtualProtect` RW↔RX implementation would need it (see
+    /// `native_winarm64::jit_write_protect`).
     pub fn new(cap: usize) -> Result<CodeCache> {
-        let jit = MacJit::with_capacity(cap)?;
+        let jit = NativeJit::with_capacity(cap)?;
         let (base, cap) = jit.region_raw();
         jit_write_protect(true);
         Ok(CodeCache {
@@ -363,7 +376,7 @@ impl CodeCache {
 
 impl Drop for CodeCache {
     /// S13: retire this cache's `deopt_trap` registry entry (if any) BEFORE the
-    /// `_jit: MacJit` field's own `Drop` unmaps the region (fields drop after
+    /// `_jit: NativeJit` field's own `Drop` unmaps the region (fields drop after
     /// the struct's own `Drop::drop`). Without this, the SIGTRAP handler could
     /// keep a live registry range pointing at freed memory and redirect a trap
     /// into a dangling trampoline. A no-op for a cache that was never

@@ -33,7 +33,23 @@ TestRunner run: IdentityCollectionsTests.
 TestRunner run: DateTimeTests.
 TestRunner run: ReadWriteStreamTests.
 TestRunner run: ObjectProtocolGapsTests.
-TestRunner run: FFIAlienTests.
+"WINARM (P0 D3): a few suites below are guarded by `Smalltalk platformName`
+ (prim 266). They are not skipped for tidiness — on Windows their FFI
+ pragmas cannot resolve until sprint P5 (MIGRATION.md §3.5), the failure
+ raises a guest error, and an unhandled guest error ABORTS the process
+ until sprint P2 lands the recovery layer. One unrunnable assertion would
+ therefore take the whole suite's report with it.
+
+ Guarded here rather than by dropping the files from tests.list, because
+ the files LOAD fine everywhere — only running them touches FFI — and
+ because the test classes must stay declared for these very lines to
+ compile. Written as a condition rather than deleted on one platform so
+ MACVM and WINARM keep sharing this file verbatim.
+
+ Two different conditions, deliberately: `~~ #windows` marks a POSIX
+ dependency (a Linux host would run it), `== #macos` marks something only
+ macOS has at all -- Accelerate.framework and the Objective-C runtime."
+Smalltalk platformName ~~ #windows ifTrue: [ TestRunner run: FFIAlienTests ].
 TestRunner run: NilMacroTests.
 TestRunner run: NumberExtTests.
 TestRunner run: CollectionExtTests.
@@ -48,19 +64,19 @@ TestRunner run: ReflectionTests.
 TestRunner run: CurtailmentTests.
 TestRunner run: RopeTests.
 TestRunner run: EditorSessionTests.
-TestRunner run: PosixIoTests.
+Smalltalk platformName ~~ #windows ifTrue: [ TestRunner run: PosixIoTests ].
 TestRunner run: IoStreamTests.
 TestRunner run: ScaledDecimalTests.
-TestRunner run: SocketTests.
-TestRunner run: AccelTests.
+Smalltalk platformName ~~ #windows ifTrue: [ TestRunner run: SocketTests ].
+Smalltalk platformName == #macos ifTrue: [ TestRunner run: AccelTests ].
 TestRunner run: SupervisorTests.
 TestRunner run: ExceptionTests.
 TestRunner run: CollectionCompletionTests.
 TestRunner run: NumericCompletionTests.
-TestRunner run: ClockCompletionTests.
+Smalltalk platformName ~~ #windows ifTrue: [ TestRunner run: ClockCompletionTests ].
 TestRunner run: ExceptionVerbTests.
 TestRunner run: VmErrorTests.
-TestRunner run: CocoaStringTests.
+Smalltalk platformName == #macos ifTrue: [ TestRunner run: CocoaStringTests ].
 TestRunner run: StringCompletionTests.
 TestRunner run: ObjectStreamTests.
 TestRunner run: ExceptionResumeTests.

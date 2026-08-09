@@ -8556,8 +8556,7 @@ fn map_uses(op: &mut Ir, mut f: impl FnMut(VReg) -> VReg) {
         }
         // RetSelf's implicit VReg(0) use is never a copy-prop target (VReg(0)
         // is the multi-use self param, never a single-def Move dst).
-        Ir::RefCmpBr { .. }
-        | Ir::RetSelf
+        Ir::RetSelf
         | Ir::ConstSmi { .. }
         | Ir::ConstPool { .. }
         | Ir::FConst { .. }

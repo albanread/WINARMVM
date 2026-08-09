@@ -2679,7 +2679,11 @@ pub fn emit(
         .map(|fnptr| {
             (
                 asm.literal_u64(
-                    crate::codecache::stubs::rt_call_leaf_primitive as usize as u64,
+                    // WINARM (P0): via `*const ()` — casting a fn item
+                    // straight to an integer trips rustc's newer
+                    // `function_casts_as_integer` lint, and P0's gate is a
+                    // zero-warning build. Same address either way.
+                    crate::codecache::stubs::rt_call_leaf_primitive as *const () as usize as u64,
                     Some(RelocKind::RuntimeAddr),
                 ),
                 asm.literal_u64(fnptr, Some(RelocKind::RuntimeAddr)),

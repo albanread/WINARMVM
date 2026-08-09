@@ -353,8 +353,11 @@ mod tests {
         let mut vm = test_vm();
         // Smallest legal cache: page-granular, and exhausted by design —
         // fill it with one dummy alloc spanning (almost) everything.
-        // (`CodeCache::new` rounds up to page granularity — 16 KiB on
-        // Apple Silicon — so "fill it" must mean: alloc until refusal.)
+        // (`CodeCache::new` rounds up to page granularity, and that
+        // granularity is PLATFORM-DEPENDENT — 16 KiB on Apple Silicon,
+        // 4 KiB on Windows ARM64 — which is exactly why "fill it" must
+        // mean "alloc until refusal" rather than a computed count.
+        // WINARM P0 D4: prose fixed; the code was already page-agnostic.)
         let mut cache = CodeCache::new(1 << 12).unwrap();
         while cache.alloc(32).is_some() {}
         let mut pics = PicTable::new();

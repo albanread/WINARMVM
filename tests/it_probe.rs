@@ -5,6 +5,20 @@
 //! section shape, never the bare exit code: exit(70) is shared with heap
 //! exhaustion and process-stack overflow.
 
+// WINARM (P0 D3): every test in this file drives the VM into a real fault —
+// a `brk` assert trap, a SIGSEGV inside the code cache, a foreign fault — and
+// then reads the dossier PROBE prints on the way down. On Windows none of
+// those paths exist until P2 builds the Vectored Exception Handler
+// (MIGRATION.md §3.2), and the file's own `signal()` plumbing is POSIX-only
+// besides. This is a harnessed test target, so unlike the two `harness =
+// false` Cocoa binaries it needs no `main` and one file-level gate suffices:
+// on Windows it compiles to an empty test binary.
+//
+// UN-GATE THIS IN P2 — it is the acceptance evidence that the dossier works
+// on ARM64 Windows, and `tests_p02.md` lists `assert_trap_prints_dossier`
+// among its gate items.
+#![cfg(target_os = "macos")]
+
 use std::process::Command;
 
 fn run_selftest(flag: &str, extra_env: &[(&str, &str)]) -> (Option<i32>, Option<i32>, String) {
