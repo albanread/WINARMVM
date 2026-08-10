@@ -93,4 +93,11 @@ tier1.mst
 ../91_winui_shell.mst
 60_winui_probe_tests.mst
 61_winui_shell_tests.mst
+# WINARM (WG2, docs/sprints/sprint_wg2_detail.md): the WndProc door's
+# in-language half — the dispatcher's two-sided allowlist, its LRESULT
+# contract, and the address channel (primitive 272). No third layer file:
+# WG2 extended 91 rather than adding 92, so `winui.list` is unchanged and
+# WG1's Δ 13 (a gate recipe that named one layer file directly) cannot fire
+# again from here.
+62_winui_door_tests.mst
 99_run_all.mst

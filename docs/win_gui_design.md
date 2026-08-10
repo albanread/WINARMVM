@@ -171,6 +171,25 @@ accidentally block WG.
 > handle layer that builds a struct or names a flag goes through those.
 > See `docs/sprints/sprint_wg0_detail.md`'s Δ.
 
+> **Addendum (WG2, built).** That channel exists: **primitive 272**,
+> `WinApi class>>primWndProcAddress`, answering
+> `runtime::win_wndproc::macvm_wndproc`'s address as an Integer — policy-free,
+> exactly like the four winkb rows, and the guest writes it into `lpfnWndProc`
+> itself. The door is in the **core crate**, not in `win_gui`, for the reason
+> the sprint's Δ 1 gives (a downstream crate cannot add a `PRIMITIVES` row, and
+> a door that existed only under one binary would make the world layer's
+> behaviour depend on which `main` linked it) and for the symmetry that
+> `runtime::objc_delegate` is core while `cocoa_gui` is thin. The classifier
+> row this section worried about — a callback pointer as an argument — needed
+> nothing: `RegisterClassW`'s wndproc is a `g`-class integer end to end, as
+> predicted, and `winkb`'s `delegate`-kind modelling passed it first try.
+>
+> One thing this section could not have known and WG2 measured: the door needs
+> a **second** re-entrancy guard beyond D3's depth counter, because
+> `CreateWindowExW` and `SetWindowPos` SEND messages synchronously and window
+> creation runs inside `vm.eval`. See the WG2 Δ, items 2 and 3 — they constrain
+> how WG3's layout can be driven and tested.
+
 ### 2.4 COM from Smalltalk — the vtable path
 
 The flat API alone cannot reach modern Windows: the file dialogs

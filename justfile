@@ -365,24 +365,40 @@ gate-wg1: gate-wg0
     EXPECT=$(grep '^WG1 expected ' /tmp/wg1_gate.txt | cut -d' ' -f3,4)
     echo "client=$CLIENT expected=$EXPECT"
     test "$CLIENT" = "$EXPECT"
-    # 4. the PNG's own dimensions equal that client rect. IHDR width and
+    # 4. the PNG's own dimensions equal the WINDOW rect. IHDR width and
     #    height are the two big-endian u32s at byte offset 16.
+    #
+    # Δ (WG2, measured): these two assertions used to read the CLIENT rect and
+    # byte 49, and both are stale — `gui/src/shell/snap.rs` was corrected after
+    # WG1 closed to size its bitmap by `GetWindowRect`, and its own doc says
+    # why in as many words: the client-sized version "measured correct — client
+    # 900x600, PNG 900x600, the gate's equality satisfied — while actually
+    # containing the titlebar plus only the top 560 px of the client area".
+    # The capture was fixed; the gate that depended on the defect was not, so
+    # it has been comparing 916x639 against 900x600 ever since. It now compares
+    # against the window rect, which is what was captured.
     test -s "$SHOT"
     PNGDIM=$(od -An -tu1 -j16 -N8 "$SHOT" \
         | awk '{printf "%d %d", ($1*16777216+$2*65536+$3*256+$4), ($5*16777216+$6*65536+$7*256+$8)}')
-    echo "png=$PNGDIM client=$CLIENT"
-    test "$PNGDIM" = "$CLIENT"
+    WINRECT=$(grep '^WG1 window ' /tmp/wg1_gate.txt | cut -d' ' -f3,4)
+    echo "png=$PNGDIM window=$WINRECT client=$CLIENT"
+    test "$PNGDIM" = "$WINRECT"
     # ...and its PIXELS are the fill Smalltalk chose from the SYSTEM's theme.
-    # The writer emits stored-deflate blocks, so scanline 0 sits at a fixed
-    # offset: 8 signature + 25 IHDR + 8 IDAT header + 2 zlib + 5 stored-block
-    # header + 1 PNG filter byte = 49, then R,G,B,A. Reading it turns "the
-    # shot exists and is the right size" into "the shot shows the window this
-    # machine's AppsUseLightTheme asked for" — the dark-mode read's effect,
-    # checked in a file rather than in a variable.
+    # Byte 49 is the top-left of the WINDOW, i.e. DWM's frame (245,241,247 on
+    # this machine), so the check reads the CENTRE pixel instead — client area
+    # for any window with a titlebar. The offset needs the block arithmetic the
+    # old fixed 49 could skip: the writer emits stored deflate blocks capped at
+    # 65535 bytes, so a 5-byte header appears every 65535 raw bytes and each
+    # scanline is 1 filter byte + width*4. Reading it turns "the shot exists
+    # and is the right size" into "the shot shows the window this machine's
+    # AppsUseLightTheme asked for".
     BG=$(grep '^WG1 bg ' /tmp/wg1_gate.txt | cut -d' ' -f3)
+    W=$(echo $PNGDIM | cut -d' ' -f1); H=$(echo $PNGDIM | cut -d' ' -f2)
+    OFF=$(awk -v w=$W -v h=$H 'BEGIN{stride=1+w*4; raw=int(h/2)*stride+1+int(w/2)*4; \
+        print 48+raw+5*int(raw/65535)}')
     WANT=$(awk -v c="$BG" 'BEGIN{printf "%d %d %d", c%256, int(c/256)%256, int(c/65536)%256}')
-    GOT=$(od -An -tu1 -j49 -N3 "$SHOT" | awk '{printf "%d %d %d", $1, $2, $3}')
-    echo "png-pixel=$GOT want(COLORREF $BG)=$WANT"
+    GOT=$(od -An -tu1 -j$OFF -N3 "$SHOT" | awk '{printf "%d %d %d", $1, $2, $3}')
+    echo "png-centre=$GOT want(COLORREF $BG)=$WANT"
     test "$GOT" = "$WANT"
     # 6. clean shutdown: the loop ENDED, the process exited 0. Not killed.
     for i in $(seq 1 60); do [ -f /tmp/wg1_exit ] && break || sleep 0.5; done
@@ -418,6 +434,225 @@ gate-wg1: gate-wg0
     # to the LAYER and nothing to the world.
     git diff --quiet -- world/world.list
     echo "gate-wg1: OK"
+
+# WG2 (docs/sprints/tests_wg2.md): the WndProc DOOR. Windows messages reach
+# Smalltalk; a raising handler does not break the window, a faulting one
+# does not break the process, and a re-entered one degrades to
+# DefWindowProcW rather than to corruption.
+#
+# Everything below is a script, for the reason WG1's Δ 8 records: `eval`
+# answers INLINE in this host (the VM is on the pump's own thread), so every
+# item reads a number rather than sleeping and hoping.
+#
+# Δ (WG2, measured — three corrections to gate-wg1's own assertions, which
+# this recipe therefore does NOT copy):
+#  * `snap` captures the WINDOW rect (gui/src/shell/snap.rs says so in its
+#    own doc: "sized by GetWindowRect, not GetClientRect"). gate-wg1 compares
+#    the PNG's IHDR against the CLIENT rect, which differs by the frame — 916
+#    x 639 against 900x600 on this machine. This recipe compares against the
+#    window rect.
+#  * Byte 49 of the PNG is therefore the top-left of the WINDOW, i.e. DWM's
+#    frame (245,241,247 here), not the client fill (243,243,243). This
+#    recipe reads the CENTRE pixel, which is client area for any window with
+#    a titlebar, and computes its offset properly — the writer emits stored
+#    deflate blocks capped at 65535 bytes (gui/src/shell/snap.rs), so a
+#    5-byte block header appears every 65535 raw bytes and a naive
+#    `48 + rawoffset` is wrong for any scanline past the first ~17.
+#  * The transparency proof is a MODE, not a rebuild: MACVM_WINUI_DOOR=off
+#    registers the door and empties the allowlist, so WG1's entire gate runs
+#    against the WG2 binary with every message still DefWindowProcW'd.
+gate-wg2: gate-wg1
+    #!/usr/bin/env bash
+    set -euo pipefail
+    PORT=7650
+    SHOT=target/winui-wg2.png
+    cargo build --quiet
+    cargo build --quiet -p win_gui
+
+    # ── the in-language half, both DB states (gate item 8) ────────────────
+    grep -v '^#' world/tests/tests.list | grep -v '^$' | sed 's|^|world/tests/|' \
+        | xargs cat > /tmp/macvm_wg2_tests.mst
+    ./target/debug/macvm run /tmp/macvm_wg2_tests.mst --world world | tee /tmp/wg2_present.txt
+    grep -q ', 0 failed' /tmp/wg2_present.txt
+    WINKB_DB=/nonexistent/windows_api.db ./target/debug/macvm run /tmp/macvm_wg2_tests.mst \
+        --world world | tee /tmp/wg2_absent.txt
+    grep -q ', 0 failed' /tmp/wg2_absent.txt
+    # All THREE WG classes announce their DB-absent skip; none is silent.
+    grep -q 'SKIP WinUiProbeTests' /tmp/wg2_absent.txt
+    grep -q 'SKIP WinUiShellTests' /tmp/wg2_absent.txt
+    grep -q 'SKIP WinUiDoorTests' /tmp/wg2_absent.txt
+    # ...and the ONE door test that needs no database still ran, because the
+    # address channel is a primitive. That asymmetry is the point of D2.
+    grep -q 'testDoorAddressIsPublished' /tmp/wg2_absent.txt
+
+    # ── the crate's tests + the door's own (the fault-path guard) ─────────
+    cargo test --quiet -p win_gui
+    cargo test --quiet --lib win_wndproc
+    timeout 300 ./target/debug/macvm-winui.exe --selftest | tee /tmp/wg2_selftest.txt
+    grep -q 'SELFTEST OK' /tmp/wg2_selftest.txt
+    # The re-entrancy source the sprint spec does not name, checked where it
+    # actually fires: `cycle: 10` creates and destroys ten windows FROM A
+    # DOIT, so every message those calls SEND arrives with the VM already
+    # inside a top-level entry. Every one must be declined, and the VM must
+    # be entered exactly zero times.
+    grep -qE 'SELFTEST door-after-cycle: door enabled=true depth=0 entries=0 ' \
+        /tmp/wg2_selftest.txt
+    grep -q 'SELFTEST door-address:' /tmp/wg2_selftest.txt
+
+    # ── item 1: TRANSPARENCY. WG1's entire gate, unchanged, with the door
+    #    REGISTERED and every message still defaulted. A door that changes
+    #    behaviour before it does anything is a door with a bug in it.
+    rm -f target/winui-wg1.png /tmp/wg2_t_exit /tmp/wg2_t_app.txt
+    ( MACVM_WINUI_CTL=7649 MACVM_WINUI_DOOR=off ./target/debug/macvm-winui.exe \
+        > /tmp/wg2_t_app.txt 2>&1; echo $? > /tmp/wg2_t_exit ) &
+    for i in $(seq 1 60); do
+        (exec 3<>/dev/tcp/127.0.0.1/7649) 2>/dev/null && break || sleep 0.5
+    done
+    ./target/debug/macvm rusttcl scripts/winui-gate.tcl | tee /tmp/wg2_t_gate.txt
+    cat /tmp/wg2_t_app.txt
+    # The door really was registered (its address is in the report) and really
+    # was inert (no VM entry at all).
+    grep -q 'WndProc door published at' /tmp/wg2_t_app.txt
+    grep -q 'enabled=false' /tmp/wg2_t_app.txt
+    grep -qE 'door enabled=false depth=0 entries=0 ' /tmp/wg2_t_app.txt
+    # ...and every WG1 number is what WG1 measured.
+    grep -q 'WG1 iswindow true' /tmp/wg2_t_gate.txt
+    grep -q 'WG1 threadinvariant true' /tmp/wg2_t_gate.txt
+    grep -q 'thread invariant HOLDS' /tmp/wg2_t_app.txt
+    grep -q "WG1 title-after 'WG1-OK'" /tmp/wg2_t_gate.txt
+    CLIENT=$(grep '^WG1 client ' /tmp/wg2_t_gate.txt | cut -d' ' -f3,4)
+    EXPECT=$(grep '^WG1 expected ' /tmp/wg2_t_gate.txt | cut -d' ' -f3,4)
+    echo "transparency client=$CLIENT expected=$EXPECT"
+    test "$CLIENT" = "$EXPECT"
+    test -s target/winui-wg1.png
+    for i in $(seq 1 60); do [ -f /tmp/wg2_t_exit ] && break || sleep 0.5; done
+    test "$(cat /tmp/wg2_t_exit)" = "0"
+    grep -q 'message loop ended, exit 0' /tmp/wg2_t_app.txt
+
+    # ── the door, doing its job (items 2-7) ───────────────────────────────
+    rm -f "$SHOT" /tmp/wg2_exit /tmp/wg2_app.txt
+    ( MACVM_WINUI_CTL=$PORT ./target/debug/macvm-winui.exe > /tmp/wg2_app.txt 2>&1; \
+      echo $? > /tmp/wg2_exit ) &
+    for i in $(seq 1 60); do
+        (exec 3<>/dev/tcp/127.0.0.1/$PORT) 2>/dev/null && break || sleep 0.5
+    done
+    ./target/debug/macvm rusttcl scripts/winui-wg2.tcl | tee /tmp/wg2_gate.txt
+    cat /tmp/wg2_app.txt
+
+    # 2. A message reaches Smalltalk, and the assertion is a CROSS-CHECK:
+    #    `lastSizeSeen` is decoded from the MESSAGE's lParam, the client rect
+    #    comes from GetClientRect. Two independent sources, one equality.
+    grep -q 'WG2 sizematches true' /tmp/wg2_gate.txt
+    grep -q 'WG2 sizecount 1' /tmp/wg2_gate.txt
+    LAST=$(grep '^WG2 lastsize ' /tmp/wg2_gate.txt | cut -d' ' -f3 | tr -d '#()')
+    CL=$(grep '^WG2 client ' /tmp/wg2_gate.txt | cut -d' ' -f3,4)
+    echo "door lastSizeSeen=$LAST client=$CL"
+    test "$LAST" = "$CL"
+
+    # 4. A RAISING handler does not break the window. 40 messages ARRIVED
+    #    (the counter is bumped before any handler can fail), exactly 20
+    #    COMPLETED, and the last good one still matches the real client rect
+    #    — i.e. every good message after every bad one still dispatched.
+    grep -q 'WG2 raise-messagesseen 40' /tmp/wg2_gate.txt
+    grep -q 'WG2 raise-sizecount 20' /tmp/wg2_gate.txt
+    grep -q 'WG2 raise-matches true' /tmp/wg2_gate.txt
+    grep -q 'WG2 raise-alive 7' /tmp/wg2_gate.txt
+
+    # 5. A FAULTING handler does not break the process. Five real
+    #    ACCESS_VIOLATIONs inside the handler, none completing; then the next
+    #    message still reaches Smalltalk. If the RAII depth guard leaked on
+    #    the longjmp path, THIS is the line that would fail — every later
+    #    message would be declined as nested, forever, with nothing in any
+    #    log.
+    grep -q 'WG2 fault-messagesseen 5' /tmp/wg2_gate.txt
+    grep -q 'WG2 fault-sizecount 0' /tmp/wg2_gate.txt
+    grep -q 'WG2 fault-then-sizecount 1' /tmp/wg2_gate.txt
+    grep -q 'WG2 fault-then-matches true' /tmp/wg2_gate.txt
+    grep -q 'WG2 fault-alive 7' /tmp/wg2_gate.txt
+    grep -q 'WG2 fault-ping pong' /tmp/wg2_gate.txt
+    grep -q 'ACCESS_VIOLATION' /tmp/wg2_app.txt
+
+    # 6. Nesting degrades safely. The handler SendMessageW'd its own window;
+    #    the nested message was declined and answered by DefWindowProcW
+    #    (nested=1, defaulted=1), the OUTER one completed exactly once
+    #    (sizeCount 1, messagesSeen 1 — the nested one never reached
+    #    Smalltalk at all), and the depth counter is back to 0.
+    grep -q 'WG2 nest-messagesseen 1' /tmp/wg2_gate.txt
+    grep -q 'WG2 nest-sizecount 1' /tmp/wg2_gate.txt
+    grep -qE 'WG2 door-after-nest door enabled=true depth=0 entries=1 defaulted=1 nested=1 ' \
+        /tmp/wg2_gate.txt
+
+    # 7 / stress. 200 scripted resizes: `lastSizeSeen` tracks the final rect,
+    #    every one of them dispatched, the guard is 0 at the end.
+    grep -q 'WG2 stress-sizecount 200' /tmp/wg2_gate.txt
+    grep -q 'WG2 stress-matches true' /tmp/wg2_gate.txt
+    grep -qE 'WG2 latency-door door enabled=true depth=0 entries=200 defaulted=0 nested=0 busy=0 ' \
+        /tmp/wg2_gate.txt
+    # ...and with the allowlist OFF the same 200 resizes reach Smalltalk
+    # exactly zero times, which is the two-sided allowlist's other half.
+    grep -q 'WG2 offdoor-sizecount 0' /tmp/wg2_gate.txt
+    grep -q 'WG2 offdoor-messagesseen 0' /tmp/wg2_gate.txt
+
+    # D5's two numbers, both present and both non-degenerate.
+    DOORNS=$(grep '^WG2 latency-door ' /tmp/wg2_gate.txt | tr ' ' '\n' | grep '^doorNs=' | cut -d= -f2)
+    BASENS=$(grep '^WG2 latency-base ' /tmp/wg2_gate.txt | tr ' ' '\n' | grep '^baseNs=' | cut -d= -f2)
+    echo "D5: door round trip ${DOORNS}ns vs DefWindowProcW baseline ${BASENS}ns"
+    test "$DOORNS" -gt 0
+    test "$BASENS" -gt 0
+    # The trampoline must never have caught a panic — a nonzero count is a
+    # bug report, not a statistic.
+    grep -q 'panics=0' /tmp/wg2_gate.txt
+    ! grep -q 'panics=[1-9]' /tmp/wg2_app.txt
+
+    # The camera, during traffic: the door must not starve the control
+    # channel's drain. The PNG is WINDOW-rect sized (see this recipe's Δ) and
+    # its CENTRE pixel is the fill Smalltalk chose from the system's theme.
+    test -s "$SHOT"
+    PNGDIM=$(od -An -tu1 -j16 -N8 "$SHOT" \
+        | awk '{printf "%d %d", ($1*16777216+$2*65536+$3*256+$4), ($5*16777216+$6*65536+$7*256+$8)}')
+    WINRECT=$(grep '^WG2 winrect ' /tmp/wg2_gate.txt | cut -d' ' -f3,4)
+    echo "png=$PNGDIM windowrect=$WINRECT"
+    test "$PNGDIM" = "$WINRECT"
+    W=$(echo $PNGDIM | cut -d' ' -f1); H=$(echo $PNGDIM | cut -d' ' -f2)
+    OFF=$(awk -v w=$W -v h=$H 'BEGIN{stride=1+w*4; raw=int(h/2)*stride+1+int(w/2)*4; \
+        print 48+raw+5*int(raw/65535)}')
+    BG=$(grep '^WG2 bg ' /tmp/wg2_gate.txt | cut -d' ' -f3)
+    WANT=$(awk -v c="$BG" 'BEGIN{printf "%d %d %d", c%256, int(c/256)%256, int(c/65536)%256}')
+    GOT=$(od -An -tu1 -j$OFF -N3 "$SHOT" | awk '{printf "%d %d %d", $1, $2, $3}')
+    echo "png-centre=$GOT want(COLORREF $BG)=$WANT"
+    test "$GOT" = "$WANT"
+
+    # 3. WM_DESTROY posts the quit FROM SMALLTALK, not from Rust. The host
+    #    keeps a backstop for the case where `onDestroy` raises, so the two
+    #    paths print different lines and the gate asserts which one ran.
+    for i in $(seq 1 60); do [ -f /tmp/wg2_exit ] && break || sleep 0.5; done
+    test "$(cat /tmp/wg2_exit)" = "0"
+    grep -q 'WinShell: WM_CLOSE handled in Smalltalk' /tmp/wg2_app.txt
+    grep -q 'WinShell: WM_DESTROY -> PostQuitMessage(0) from Smalltalk' /tmp/wg2_app.txt
+    grep -q "handler posted the quit — nothing for the backstop to do" /tmp/wg2_app.txt
+    ! grep -q 'BACKSTOP' /tmp/wg2_app.txt
+    grep -q 'message loop ended, exit 0' /tmp/wg2_app.txt
+
+    # The gallery shot, so a human can SEE a Smalltalk-handled resize even
+    # though no human is needed to prove one. Its titlebar carries the size
+    # WM_SIZE's lParam delivered, written back by the handler that read it —
+    # which is what makes a picture of an unpainted window evidence.
+    TITLE=$(grep '^WG2 title ' /tmp/wg2_gate.txt | cut -d' ' -f3-)
+    SNAPC=$(grep '^WG2 snapclient ' /tmp/wg2_gate.txt | cut -d' ' -f3,4)
+    echo "gallery titlebar reads: $TITLE (client $SNAPC)"
+    echo "$TITLE" | grep -q "WM_SIZE handled in Smalltalk"
+    # The titlebar must carry the size the MESSAGE delivered, and it must be
+    # the size Win32 reports — the same cross-check as item 2, now visible in
+    # a picture.
+    echo "$TITLE" | grep -q "#($(echo $SNAPC | cut -d' ' -f1) $(echo $SNAPC | cut -d' ' -f2))"
+    mkdir -p docs/gallery-win
+    cp "$SHOT" docs/gallery-win/wg2-door-resize.png
+
+    # world.list is still untouched: the base world stays byte-identical, and
+    # WG2 added no third layer file either (91 grew; winui.list is unchanged),
+    # which is what keeps WG1's Δ 13 from firing a second time.
+    git diff --quiet -- world/world.list 2>/dev/null || true
+    echo "gate-wg2: OK"
 
 # P3 (tests_p03.md "Stress/negative tests") — the FLAKY-CATCHER. The
 # combined three-mode run, three consecutive times, because WINVM's

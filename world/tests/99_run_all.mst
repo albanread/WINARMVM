@@ -74,6 +74,14 @@ TestRunner run: ObjectProtocolGapsTests.
    Δ 11 measured that several VMs share one process here, in parallel
    threads, and a visible window with a message loop does not belong in a
    parallel test harness.
+ - WinUiDoorTests: `== #windows` — WG2's headless half (the dispatcher's
+   two-sided allowlist, the LRESULT contract, and the address channel WG0's
+   Δ 8 said the door would have to build). Same layer, same two skip
+   levels, and the same line drawn one sprint further: a RAISING handler, a
+   FAULTING handler and a RE-ENTERED door are all claims about what happens
+   when Windows calls the trampoline, so they live in `just gate-wg2` and in
+   the door's own Rust tests, where there is one process, one thread and one
+   real window.
 
  Guarded here rather than by dropping files from tests.list, because the
  files LOAD fine everywhere — only running them touches FFI — and the
@@ -100,6 +108,7 @@ Smalltalk platformName ~~ #windows ifTrue: [ TestRunner run: PosixIoTests ].
 Smalltalk platformName == #windows ifTrue: [ TestRunner run: WinIoTests ].
 Smalltalk platformName == #windows ifTrue: [ TestRunner run: WinUiProbeTests ].
 Smalltalk platformName == #windows ifTrue: [ TestRunner run: WinUiShellTests ].
+Smalltalk platformName == #windows ifTrue: [ TestRunner run: WinUiDoorTests ].
 TestRunner run: IoStreamTests.
 TestRunner run: ScaledDecimalTests.
 Smalltalk platformName ~~ #windows ifTrue: [ TestRunner run: SocketTests ].

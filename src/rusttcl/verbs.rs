@@ -101,7 +101,7 @@ const TABLE: &[VerbDoc] = &[
     },
     VerbDoc {
         name: "gui",
-        usage: "gui connect ?port? | ping | eval <src> | doit <src> | view <name> | snap <path> | sleep <ms> | quit",
+        usage: "gui connect ?port? | ping | eval <src> | doit <src> | view <name> | snap <path> | door ?on|off|reset? | resize \"<w> <h>\" | sleep <ms> | quit",
         help: "Drive a running macvm-cocoa over its MACVM_COCOA_CTL control channel: run doits on its UI worker, switch views, capture window PNGs.",
     },
     VerbDoc {
@@ -511,8 +511,38 @@ fn verb_gui(_vm: &mut Vm<'_>, args: &[Value]) -> TclResult<Value> {
             let ms = arg.ok_or_else(|| TclError::runtime("usage: gui sleep <ms>"))?;
             gui_request(ctx, &format!("sleep {ms}")).map(Value::new)
         }
+        // WINARM (WG2): the WndProc door's two script-facing controls.
+        //
+        // `gui door` reports what the door has done — how many messages
+        // crossed into Smalltalk, how many were declined as nested or as
+        // sent-from-inside-a-doit, and D5's two latency means. `gui door
+        // on|off` is the allowlist master switch, which is both the
+        // transparency proof (register the door, route nothing, show WG1's
+        // gate passing unchanged) and the D5 baseline. `gui door reset`
+        // zeroes the tallies so a measurement describes steady state.
+        //
+        // `gui resize <w> <h>` moves the window's frame FROM THE HOST'S
+        // control drain — deliberately, and it is the sprint's most
+        // consequential correction. `tests_wg2.md` says to drive the resize
+        // with SetWindowPos "via FFI from a doit", and that cannot reach
+        // Smalltalk: SetWindowPos SENDS WM_SIZE synchronously, so from a doit
+        // the wndproc runs inside `vm.exec` and the door correctly refuses a
+        // second top-level entry on a thread that already has one. A WM_SIZE
+        // that reaches Smalltalk must originate outside every VM entry, which
+        // is where every real one does.
+        //
+        // Both are answered by `macvm-winui`; the other two hosts report them
+        // unknown, which is the honest reply rather than a silent no-op.
+        "door" => {
+            let sub = arg.unwrap_or_default();
+            gui_request(ctx, format!("door {sub}").trim()).map(Value::new)
+        }
+        "resize" => {
+            let wh = arg.ok_or_else(|| TclError::runtime("usage: gui resize \"<w> <h>\""))?;
+            gui_request(ctx, &format!("resize {wh}")).map(Value::new)
+        }
         other => Err(TclError::runtime(format!(
-            "gui: unknown subcommand '{other}' (connect/ping/rebuild/game/stopgame/gameclose/eval/doit/view/snap/sleep/quit)"
+            "gui: unknown subcommand '{other}' (connect/ping/rebuild/game/stopgame/gameclose/eval/doit/view/snap/door/resize/sleep/quit)"
         ))),
     }
 }

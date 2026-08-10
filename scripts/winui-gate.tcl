@@ -25,6 +25,13 @@ puts "WG1 iswindow [gui eval {WinShell isOpen}]"
 puts "WG1 dpi [gui eval {WinShell dpi}]"
 puts "WG1 client [gui eval {WinShell clientWidth}] [gui eval {WinShell clientHeight}]"
 puts "WG1 expected [gui eval {WinShell expectedClientWidth}] [gui eval {WinShell expectedClientHeight}]"
+# The WINDOW rect, added by WG2: `snap` is `PrintWindow` of the whole window and
+# sizes its bitmap with GetWindowRect (gui/src/shell/snap.rs, whose own doc
+# records that the older client-sized version satisfied the gate's equality
+# while silently cropping the bottom of the client area). The gate compares the
+# PNG against THIS line now, because a capture's size is evidence only when it
+# is checked against the thing that was captured.
+puts "WG1 window [gui eval {(WinShell windowRect at: 3) - (WinShell windowRect at: 1)}] [gui eval {(WinShell windowRect at: 4) - (WinShell windowRect at: 2)}]"
 puts "WG1 threadinvariant [gui eval {WinShell threadInvariantHolds}]"
 puts "WG1 mica [gui eval {WinShell micaHResult}] took [gui eval {WinShell micaTook}]"
 puts "WG1 dark [gui eval {WinShell darkHResult}] took [gui eval {WinShell darkTitlebarTook}]"

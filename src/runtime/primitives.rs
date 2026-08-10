@@ -1532,6 +1532,20 @@ pub static PRIMITIVES: &[PrimDesc] = &[
         can_allocate: false,
         can_fail: true,
     },
+    // WINARM (WG2 D2): the ADDRESS channel. WG0's Δ 8 measured that nothing in
+    // this port publishes a Rust function's address to Smalltalk — the FFI
+    // resolves by NAME — so the WndProc door had no way to become a window
+    // class's `lpfnWndProc`. This is that one integer, and it is as policy-free
+    // as the four winkb rows above it: it answers an address and knows nothing
+    // about windows.
+    PrimDesc {
+        id: 272,
+        name: "WinApi class>>primWndProcAddress",
+        f: prim_wndproc_address,
+        argc: 0,
+        can_allocate: false,
+        can_fail: false,
+    },
 ];
 
 pub fn prim_by_id(id: u16) -> Option<&'static PrimDesc> {
@@ -4035,6 +4049,39 @@ fn prim_winkb_struct_size(vm: &mut VmState, args: &[Oop]) -> PrimResult {
     })
 }
 
+/// `primWndProcAddress` — the WG2 door trampoline's address, as an Integer, or
+/// `nil` off Windows.
+///
+/// **WG0's Δ 8 in one row.** A guest can learn a DLL export's address the
+/// ordinary way (`GetModuleHandleW` + `GetProcAddress`, which is exactly how
+/// WG1 filled `lpfnWndProc` with `DefWindowProcW`), because the FFI resolves by
+/// NAME and never hands the guest an address of its own. No path published a
+/// *Rust* function's address at all, so the door owed itself this channel — and
+/// the sprint spec flagged it a sprint early precisely so it would be planned
+/// rather than discovered.
+///
+/// Deliberately as policy-free as the four winkb rows above it: it answers an
+/// address; it knows nothing about windows, classes or messages, and the guest
+/// owns every decision about what to do with it. The rejected alternative was
+/// having Rust register the window class, which would have moved window
+/// creation out of Smalltalk and broken `win_gui_design.md` §2.2 commitment 4
+/// for the sake of one integer.
+///
+/// The address always fits a `SmallInteger` on the platforms that have one at
+/// all: Windows user-mode code sits in the low 47 bits and SmallInt carries 61,
+/// so the `try_new` below cannot fail in practice — but a `nil` is a guest
+/// error the world can name, and a panic inside the VM is not.
+fn prim_wndproc_address(vm: &mut VmState, _args: &[Oop]) -> PrimResult {
+    #[cfg(windows)]
+    let addr = Some(crate::runtime::win_wndproc::door_address());
+    #[cfg(not(windows))]
+    let addr: Option<i64> = None;
+    PrimResult::Ok(match addr.and_then(SmallInt::try_new) {
+        Some(a) => a.oop(),
+        None => vm.universe.nil_obj,
+    })
+}
+
 /// `Smalltalk microsecondClock` — the monotonic elapsed-since-VM-start clock
 /// (same `start_instant` source as `millisecondClock`, prim 92), in
 /// MICROSECONDS. Added for the Cog-comparison harness (`docs/cog_bench.md`):
@@ -5558,6 +5605,9 @@ mod tests {
             (269, "WinProbe class>>primWinkbConstant:"),
             (270, "WinProbe class>>primWinkbStructField:field:"),
             (271, "WinProbe class>>primWinkbStructSize:"),
+            // WINARM (WG2): the WndProc door's address — WG0 Δ 8's missing
+            // channel, so a Smalltalk-built WNDCLASSW can name a Rust function.
+            (272, "WinApi class>>primWndProcAddress"),
         ];
         assert_eq!(
             PRIMITIVES.len(),

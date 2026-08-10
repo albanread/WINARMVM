@@ -1,5 +1,6 @@
-"91_winui_shell.mst — WG1, the window and the materials
- (docs/win_gui_design.md §2.1/§2.2, docs/sprints/sprint_wg1_detail.md).
+"91_winui_shell.mst — WG1, the window and the materials; WG2, the door
+ (docs/win_gui_design.md §2.1/§2.2, docs/sprints/sprint_wg1_detail.md and
+ sprint_wg2_detail.md).
  Loaded via world/winui.list, AFTER 90_winui_probe.mst, which forward-
  declares the two classes promoted here (see that file's header).
 
@@ -342,6 +343,33 @@ Object subclass: WinApi [
         ^nil
     ]
 
+    "── the ADDRESS channel (WG2 D2, WG0's Δ 8) ──────────────────────────"
+
+    WinApi class >> primWndProcAddress ^ <Object> [
+        "The WG2 door trampoline's address. WG0 measured that nothing in this
+         port publishes a RUST function's address to Smalltalk — the FFI
+         resolves by NAME, and `GetProcAddress` only reaches DLL exports — so
+         the door owed itself this one primitive. It is as policy-free as the
+         four winkb rows above it: it answers an address and knows nothing
+         about windows. nil off Windows."
+        <primitive: 272>
+        ^nil
+    ]
+
+    WinApi class >> wndProcAddress ^ <Integer> [
+        "The address to put in WNDCLASSW's lpfnWndProc. Raising rather than
+         answering 0 is deliberate: a NULL wndproc registers a class whose
+         every message is undefined, and the failure would appear as a window
+         that does not respond rather than as an error anyone could read."
+        | a |
+        a := self primWndProcAddress.
+        (a isNil or: [ a = 0 ]) ifTrue: [
+            ^self error: 'WinApi: the WndProc door published no address ' ,
+                '(primitive 272 answered ' , a printString ,
+                ') — this VM was not built for Windows, or WG2''s door is missing' ].
+        ^a
+    ]
+
     WinApi class >> winkbAvailable ^ <Boolean> [
         "Is windows_api.db on this machine? A ~90 MB machine-local artifact,
          never a build input — absence is not an error, it is a reason to
@@ -476,12 +504,16 @@ Object subclass: WinApi [
     ]
 
     WinApi class >> defWindowProcAddress ^ <Integer> [
-        "DefWindowProcW's own address, for the lpfnWndProc member — the
-         SYSTEM's default handler. WG1 hands Win32 this and nothing else:
-         there is no door, no dispatch into Smalltalk, no Rust trampoline.
-         WG2 owns that, and it will need a channel this port does not have —
-         the FFI resolves by NAME and never publishes a Rust function's
-         address to the guest (WG0's Δ 8)."
+        "DefWindowProcW's own address, for an lpfnWndProc that wants the
+         SYSTEM's default handler and nothing else. WG1's window registered
+         with this; WG0's probe still does, deliberately — its hidden,
+         loop-less window has no use for a door and registering one would put
+         a VM entry inside a `cargo test` worker thread.
+
+         WG1 recorded that WG2 would need a channel this port did not have,
+         because the FFI resolves by NAME and GetProcAddress only reaches DLL
+         EXPORTS — a Rust `fn` is neither. That channel is `wndProcAddress`
+         above (primitive 272, WG0's Δ 8 answered)."
         | a |
         DefWindowProcAddr isNil ifTrue: [
             a := self procAddressIn: self user32Handle
@@ -591,6 +623,50 @@ Object subclass: WinApi [
     WinApi class >> postMessage: hwnd <Integer> message: m <Integer> wParam: w <Integer> lParam: l <Integer> ^ <Integer> [
         <primitive: FFI function: #PostMessageW ret: #g args: #(g g g g)>
     ]
+
+    "── WG2: the three calls a message HANDLER needs ─────────────────────"
+
+    WinApi class >> sendMessage: hwnd <Integer> message: m <Integer> wParam: w <Integer> lParam: l <Integer> ^ <Integer> [
+        "SYNCHRONOUS, and on this thread that means the window proc is called
+         DIRECTLY — no queue, no pump. Sent from inside a handler it is
+         therefore a NESTED wndproc call, which is exactly what D3's depth
+         guard exists to make safe: the nested message is answered by
+         DefWindowProcW and never reaches the VM a second time."
+        <primitive: FFI function: #SendMessageW ret: #g args: #(g g g g)>
+    ]
+
+    WinApi class >> postQuitMessage: exitCode <Integer> [
+        "The other half of 'closing is two events'. WG1's host noticed its
+         window had gone and posted this itself, and recorded that the proper
+         wiring — WM_DESTROY, in Smalltalk — lands with WG2. This is it.
+         `void`, so `ret: #v`: reading x0 after a void callee would answer
+         whatever happened to be in it."
+        <primitive: FFI function: #PostQuitMessage ret: #v args: #(g)>
+    ]
+
+    WinApi class >> defWindowProc: hwnd <Integer> message: m <Integer> wParam: w <Integer> lParam: l <Integer> ^ <Integer> [
+        "The system default, callable from the guest. The door does not need
+         this — a handler answers the Symbol #defwindowproc and Rust makes the
+         call, which keeps the default on the same side of the boundary as the
+         message that provoked it — but a handler that wants to do something
+         AND THEN default (a WG3 pattern: adjust state, let Windows draw) needs
+         to be able to say so, and it is one binding."
+        <primitive: FFI function: #DefWindowProcW ret: #g args: #(g g g g)>
+    ]
+
+    "── little-endian word halves, for the messages that pack two ────────"
+
+    WinApi class >> loWord: n <Integer> ^ <Integer> [
+        "The low 16 bits, unsigned. WM_SIZE's lParam is the new client WIDTH
+         here and its height above; the same split reads WM_COMMAND's control
+         id. Written once because a hand-inlined `bitAnd: 16rFFFF` at four call
+         sites is four chances to write `16rFFF`."
+        ^n bitAnd: 16rFFFF
+    ]
+
+    WinApi class >> hiWord: n <Integer> ^ <Integer> [
+        ^(n bitShift: -16) bitAnd: 16rFFFF
+    ]
     WinApi class >> windowThread: hwnd <Integer> processId: pidPtr <Integer> ^ <Integer> [
         <primitive: FFI function: #GetWindowThreadProcessId ret: #g args: #(g g)>
     ]
@@ -664,8 +740,13 @@ Object subclass: WinApi [
  recovers the VM, not a loop), and GetMessageW blocks in a way a Smalltalk
  `[true] whileTrue:` could not interleave the control channel with.
 
- I also do not answer messages. DefWindowProcW does, unchanged, for all of
- them. WG2 opens that door and owns the whole of its risk.
+ WG2 CHANGES ONE THING: I now answer messages. My window class's
+ lpfnWndProc is the Rust trampoline (runtime::win_wndproc, address by
+ primitive 272), and for the six messages on its allowlist it calls
+ `window:message:wParam:lParam:` below as a top-level VM entry. Everything
+ else is still DefWindowProcW's, and so is every message I decline. See the
+ 'WG2: THE DOOR' section for the contract in both directions and for the
+ two things a handler must not do.
 
  ── The order in `openMain` is load-bearing ──────────────────────────────
    1  SetProcessDpiAwarenessContext   before ANY window exists, or the
@@ -680,7 +761,10 @@ Object subclass: WinApi [
    7  ShowWindow / UpdateWindow"
 Object subclass: WinShell [
     <classVars: Hwnd ClassName Brush CreatingThreadId Dpi DarkMode
-                MicaHResult DarkHResult FaultMode RectScratch TextScratch DwmCell>
+                MicaHResult DarkHResult FaultMode RectScratch TextScratch DwmCell
+                MessagesSeen LastMessage LastSizeSeen SizeCount CloseCount
+                DestroyCount QuitPosted HandlerMode NestedSendResult LastKey
+                LastCommand>
 
     "── the window's own opinions ────────────────────────────────────────"
 
@@ -836,7 +920,7 @@ Object subclass: WinShell [
         | atom |
         atom := WinApi registerClass: (WinApi
             wndClassStyle: ((WinApi constant: 'CS_HREDRAW') bitOr: (WinApi constant: 'CS_VREDRAW'))
-            proc: WinApi defWindowProcAddress
+            proc: WinApi wndProcAddress
             instance: WinApi moduleHandle
             cursor: (WinApi loadCursor: 0 name: (WinApi constant: 'IDC_ARROW'))
             brush: self backgroundBrush
@@ -1057,9 +1141,12 @@ Object subclass: WinShell [
 
          Closing is TWO events, not one: WM_CLOSE destroys the window,
          WM_DESTROY should PostQuitMessage so the pump's GetMessageW returns
-         0. The second half needs the door WG2 builds, so for WG1 the host's
-         pump notices its window has gone and posts the quit itself — see
-         win_gui's `pump`, which records the same thing from the other side."
+         0. WG1 had no door and so had the host's pump notice its window had
+         gone; WG2 wires it where it belongs — `onClose` answers
+         #defwindowproc, the destruction happens outside the depth guard, and
+         `onDestroy` posts the quit from Smalltalk. The host keeps its
+         liveness check as a BACKSTOP only, and says so in a different line of
+         output, so the gate can tell which of the two ended the loop."
         self ensureOpen: 'close'.
         ^WinApi asBool: (WinApi postMessage: Hwnd
                                 message: (WinApi constant: 'WM_CLOSE')
@@ -1083,6 +1170,243 @@ Object subclass: WinShell [
          has just watched its window disappear and wants this class to agree."
         Hwnd := nil.
         ^self
+    ]
+
+    "── WG2: THE DOOR ────────────────────────────────────────────────────
+     Win32 calls Smalltalk. A Rust trampoline (runtime::win_wndproc) is this
+     class's window class's lpfnWndProc; for the six messages on D1's
+     allowlist it forwards (hwnd, msg, wParam, lParam) here as a TOP-LEVEL VM
+     entry, and I answer either an LRESULT (an Integer) or #defwindowproc.
+
+     THE CONTRACT, both directions:
+       * Rust asks only for allowlisted messages. Everything else — the
+         WM_MOUSEMOVE / WM_NCHITTEST / WM_SETCURSOR storms, WM_PAINT, and
+         every message nobody has thought about yet — never arrives here at
+         all and costs six integer compares.
+       * I answer #defwindowproc for anything I do not myself handle. That is
+         what makes the allowlist TWO-SIDED and safe: the halves may disagree,
+         but only ever in the direction of doing LESS. A message Rust forwards
+         that I have no opinion about behaves exactly as it did in WG1.
+       * ANYTHING that is not an Integer means #defwindowproc. A handler that
+         raises, faults, or answers nil is a handler whose message gets the
+         system default — never a window that stops responding.
+
+     WHAT I MUST NOT DO IN HERE. Two rules, both learnt from the measurement
+     rather than from the plan:
+       * Do not call DestroyWindow (directly or through a nested Win32 call
+         that would). WM_DESTROY would then arrive INSIDE this entry, where
+         the depth guard correctly declines it, and PostQuitMessage would
+         never happen. Answer #defwindowproc for WM_CLOSE instead and let the
+         destruction happen on the far side of the guard, which is where the
+         Rust door releases it. See runtime/win_wndproc.rs's module doc.
+       * Do not assume a nested SendMessageW reaches me. It does not; it
+         reaches DefWindowProcW. That is the correct trade for v1 — true
+         re-entrant dispatch needs a QUEUE, not a deeper counter."
+
+    WinShell class >> window: hwnd <Integer> message: msg <Integer> wParam: wp <Integer> lParam: lp <Integer> ^ <Object> [
+        "The whole door, guest side. Answers an Integer LRESULT or the Symbol
+         #defwindowproc.
+
+         The counter is bumped FIRST, before any handler can raise, because
+         'did the message arrive' and 'did the handler succeed' are different
+         questions and the gate asks both. A class-variable write survives a
+         raise: P2's recovery rewinds the activation stack and the handle
+         arena to the entry's clean baseline, not the heap."
+        MessagesSeen := (MessagesSeen isNil ifTrue: [ 0 ] ifFalse: [ MessagesSeen ]) + 1.
+        LastMessage := msg.
+
+        msg = (WinApi constant: 'WM_SIZE') ifTrue: [ ^self onSize: wp lParam: lp ].
+        msg = (WinApi constant: 'WM_CLOSE') ifTrue: [ ^self onClose ].
+        msg = (WinApi constant: 'WM_DESTROY') ifTrue: [ ^self onDestroy ].
+        msg = (WinApi constant: 'WM_COMMAND') ifTrue: [ ^self onCommand: wp lParam: lp ].
+        msg = (WinApi constant: 'WM_KEYDOWN') ifTrue: [ ^self onKeyDown: wp lParam: lp ].
+        msg = (WinApi constant: 'WM_CHAR') ifTrue: [ ^self onChar: wp lParam: lp ].
+
+        "The safe half of the two-sided allowlist. Rust forwarded something I
+         do not handle — a legitimate state of the world while the two lists
+         are being changed — so it behaves exactly as WG1's window did."
+        ^#defwindowproc
+    ]
+
+    WinShell class >> onSize: wp <Integer> lParam: lp <Integer> ^ <Object> [
+        "The first message whose MEANING is Smalltalk's. lParam packs the new
+         CLIENT size — width in the low word, height in the high — so this is
+         a value the guest COMPUTES from the message rather than one it asks
+         Win32 for afterwards, and the gate's assertion (`lastSizeSeen` equals
+         the client rect GetClientRect reports) is therefore a real
+         cross-check of two independent sources and not a tautology.
+
+         Answers 0: handled. WG3 puts layout here."
+        self applyHandlerMode: #size.
+        LastSizeSeen := Array with: (WinApi loWord: lp) with: (WinApi hiWord: lp).
+        SizeCount := (SizeCount isNil ifTrue: [ 0 ] ifFalse: [ SizeCount ]) + 1.
+        ^0
+    ]
+
+    WinShell class >> onClose ^ <Object> [
+        "'The app decides whether to close' — and in WG2 it decides yes. The
+         decision is the deliverable; a veto is a WG3 dialog.
+
+         Answering #defwindowproc rather than calling DestroyWindow myself is
+         the load-bearing half: the destruction then happens OUTSIDE the depth
+         guard, so the WM_DESTROY it provokes is a fresh top-level entry and
+         reaches `onDestroy` below. Calling DestroyWindow here would nest it,
+         the guard would decline it, PostQuitMessage would never run and the
+         process would pump an empty queue forever — WG1's Δ 2 hang, arrived
+         at from a new direction."
+        CloseCount := (CloseCount isNil ifTrue: [ 0 ] ifFalse: [ CloseCount ]) + 1.
+        Transcript showCr: 'WinShell: WM_CLOSE handled in Smalltalk (letting DefWindowProcW destroy)'.
+        ^#defwindowproc
+    ]
+
+    WinShell class >> onDestroy ^ <Object> [
+        "WG1 deferred exactly this here. The window is gone; the pump has
+         nothing left to pump for, so tell it: PostQuitMessage makes the next
+         GetMessageW answer 0, which is the loop's designed exit and the only
+         one that is a success.
+
+         The Transcript line is not decoration — it is how `just gate-wg2`
+         tells 'Smalltalk posted the quit' from 'Rust's backstop noticed the
+         window had gone', which are the same exit code and different
+         sprints."
+        DestroyCount := (DestroyCount isNil ifTrue: [ 0 ] ifFalse: [ DestroyCount ]) + 1.
+        QuitPosted := true.
+        Hwnd := nil.
+        WinApi postQuitMessage: 0.
+        Transcript showCr: 'WinShell: WM_DESTROY -> PostQuitMessage(0) from Smalltalk'.
+        ^0
+    ]
+
+    WinShell class >> onCommand: wp <Integer> lParam: lp <Integer> ^ <Object> [
+        "Menus and controls are WG3's. Recording the id and defaulting is the
+         whole of WG2's opinion about them — and it proves the route exists
+         before there is anything on the other end of it."
+        LastCommand := WinApi loWord: wp.
+        ^#defwindowproc
+    ]
+
+    WinShell class >> onKeyDown: wp <Integer> lParam: lp <Integer> ^ <Object> [
+        "The editor and the shortcuts are WG5's. Defaulting is deliberate:
+         swallowing keys here would break Alt-F4, the system menu and every
+         accelerator Windows handles for free."
+        LastKey := wp.
+        ^#defwindowproc
+    ]
+
+    WinShell class >> onChar: wp <Integer> lParam: lp <Integer> ^ <Object> [
+        LastKey := wp.
+        ^#defwindowproc
+    ]
+
+    "── what the door recorded ───────────────────────────────────────────"
+
+    WinShell class >> messagesSeen ^ <Integer> [ ^MessagesSeen isNil ifTrue: [ 0 ] ifFalse: [ MessagesSeen ] ]
+    WinShell class >> lastMessage ^ <Object> [ ^LastMessage ]
+    WinShell class >> lastSizeSeen ^ <Object> [ ^LastSizeSeen ]
+    WinShell class >> sizeCount ^ <Integer> [ ^SizeCount isNil ifTrue: [ 0 ] ifFalse: [ SizeCount ] ]
+    WinShell class >> closeCount ^ <Integer> [ ^CloseCount isNil ifTrue: [ 0 ] ifFalse: [ CloseCount ] ]
+    WinShell class >> destroyCount ^ <Integer> [ ^DestroyCount isNil ifTrue: [ 0 ] ifFalse: [ DestroyCount ] ]
+    WinShell class >> quitPosted ^ <Boolean> [ ^QuitPosted == true ]
+    WinShell class >> lastKey ^ <Object> [ ^LastKey ]
+    WinShell class >> lastCommand ^ <Object> [ ^LastCommand ]
+    WinShell class >> nestedSendResult ^ <Object> [ ^NestedSendResult ]
+
+    WinShell class >> lastSizeMatchesClientRect ^ <Boolean> [
+        "The gate's item 2, written here so the script and the assertion cannot
+         drift: what the MESSAGE said the client size became, against what
+         GetClientRect says it is. Two independent sources, one equality."
+        LastSizeSeen isNil ifTrue: [ ^false ].
+        self isOpen ifFalse: [ ^false ].
+        ^(LastSizeSeen at: 1) = self clientWidth
+            and: [ (LastSizeSeen at: 2) = self clientHeight ]
+    ]
+
+    WinShell class >> resetDoorCounters [
+        MessagesSeen := 0. LastMessage := nil. LastSizeSeen := nil.
+        SizeCount := 0. CloseCount := 0. DestroyCount := 0.
+        QuitPosted := nil. NestedSendResult := nil.
+        LastKey := nil. LastCommand := nil.
+        ^self
+    ]
+
+    "── D4: the three failure modes, armed from a script ─────────────────
+     Not a debugging leftover. tests_wg2.md items 4-6 need a handler that
+     raises, one that faults and one that nests, ON THE REAL WINDOW, with the
+     real pump running — none of which can be arranged from outside this
+     class, and all three of which have to be provably survivable before WG3
+     puts anything a user cares about behind this door."
+
+    WinShell class >> handlerMode: aSymbolOrNil <Object> [
+        "#raise  — the handler raises a guest error before it does its work
+         #fault  — the handler dereferences address 1: a real ACCESS_VIOLATION
+         #nest   — the handler SendMessageW's its own window, re-entering the
+                   wndproc on this thread while the door is already open
+         nil     — behave"
+        HandlerMode := aSymbolOrNil.
+        ^self
+    ]
+
+    WinShell class >> handlerMode ^ <Object> [ ^HandlerMode ]
+
+    WinShell class >> applyHandlerMode: aTag <Symbol> [
+        "Run whatever failure the script armed, at the TOP of the handler, so
+         the handler's own work is what does not happen. One-shot modes would
+         hide the interesting question — 'does the NEXT message still get
+         through' — so the mode persists until a script clears it."
+        HandlerMode isNil ifTrue: [ ^self ].
+        HandlerMode == #raise ifTrue: [
+            ^self error: 'WinShell: deliberate raise inside the ' , aTag printString ,
+                ' handler (tests_wg2.md item 4)' ].
+        HandlerMode == #fault ifTrue: [
+            "A wild dereference — P2's VEH catches it, its non-unwinding
+             longjmp lands inside dispatch_callback, and the door's RAII depth
+             guard is released on the way through. That last clause is the one
+             this whole sprint is nervous about."
+            ^(Alien forAddress: 1 size: 8) signedLongAt: 1 ].
+        HandlerMode == #nest ifTrue: [
+            "Re-enter the window proc from inside the door. Rust's depth guard
+             is non-zero here, so the nested message is answered by
+             DefWindowProcW and never reaches this class a second time — which
+             is what `nestedSendResult` and the door's `nested` counter
+             together prove."
+            HandlerMode := nil.
+            NestedSendResult := WinApi
+                sendMessage: Hwnd
+                message: (WinApi constant: 'WM_SIZE')
+                wParam: 0
+                lParam: 0.
+            ^self ].
+        ^self
+    ]
+
+    "── driving a resize from the guest ──────────────────────────────────"
+
+    WinShell class >> resizeWindowTo: w <Integer> by: h <Integer> ^ <Boolean> [
+        "Set the WINDOW rect (frame included) and let Win32 work out the
+         client size, which is the number the WM_SIZE it provokes will carry.
+
+         Δ (WG2, measured): calling this from a `gui doit` does NOT get the
+         resize to Smalltalk, and tests_wg2.md item 2 says to do exactly that.
+         SetWindowPos sends WM_SIZE SYNCHRONOUSLY, so from a doit the wndproc
+         runs INSIDE `vm.exec` — a second top-level VM entry on a thread that
+         already has one, sharing the one per-thread sigsetjmp slot. The door
+         refuses it (`WinApi doorBusy`), which is correct and which means the
+         message is DefWindowProcW's (the host marks the VM busy across every
+         eval/exec and the door reads that before it reads anything else). The
+         gate drives its resizes from the host's control drain instead, which
+         is outside every VM entry — the
+         same place Windows' own modal move/size loop calls SetWindowPos from
+         when a user drags the frame. Kept here because it is the right home
+         for the call and because WG3's layout code will want it."
+        self ensureOpen: 'resizeWindowTo:by:'.
+        ^WinApi asBool: (WinApi
+            setWindowPos: Hwnd
+            after: 0
+            x: 0
+            y: 0
+            width: w
+            height: h
+            flags: ((WinApi constant: 'SWP_NOMOVE') bitOr: (WinApi constant: 'SWP_NOZORDER')))
     ]
 
     "── fault injection, for the gate's 'the loop outlives a fault' item ─"
@@ -1137,6 +1461,12 @@ Object subclass: WinShell [
         Transcript showCr: '  owned by tid   ' , (self isOpen
             ifTrue: [ self windowThreadId printString ] ifFalse: [ '<none>' ]).
         Transcript showCr: '  this tid       ' , WinApi currentThreadId printString.
+        Transcript showCr: '  door address   16r' , (WinApi wndProcAddress printString: 16).
+        Transcript showCr: '  messages seen  ' , self messagesSeen printString ,
+            ' (size ' , self sizeCount printString ,
+            ', close ' , self closeCount printString ,
+            ', destroy ' , self destroyCount printString , ')'.
+        Transcript showCr: '  last size seen ' , self lastSizeSeen printString.
         ^self
     ]
 

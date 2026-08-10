@@ -20,10 +20,31 @@
 //! |---|---|
 //! | window class, creation, styles, title, DPI, Mica/dark-mode | **Smalltalk** (`WinShell`) |
 //! | the pump (`GetMessageW`/`TranslateMessage`/`DispatchMessageW`) | **here** |
-//! | what each message *means* | **Smalltalk — but not until WG2** |
+//! | what each message *means* | **Smalltalk** — from WG2, through the door |
+//! | the door itself (trampoline, allowlist, depth guard) | `macvm::runtime::win_wndproc` |
 //!
-//! WG1 does not open the WndProc door. `DefWindowProcW` answers every
-//! message; dispatch into Smalltalk is WG2's entire risk budget.
+//! ## WG2 — what changed here, and what deliberately did not
+//!
+//! The door is `macvm`'s (`runtime::win_wndproc`), not this crate's, for the
+//! reason its module doc gives: the address channel is a **primitive**, and a
+//! downstream crate cannot add a row to the `PRIMITIVES` table. This host's
+//! WG2 job is therefore three small things and no Win32 at all beyond what it
+//! already had:
+//!
+//! 1. **Publish the UI VM** (`embed::publish_ui_vm`) so the trampoline can find
+//!    it. That is the CG3 mechanism, thread-local and pointer-shaped, and it is
+//!    NOT `register_hosted_worker` — WG1's Δ 1 is explicit that the latter
+//!    mints an entry in a *primary's* registry and there is still no primary.
+//! 2. **Bracket every `eval`/`exec` with a [`macvm::runtime::win_wndproc::BusyGuard`]**,
+//!    because `CreateWindowExW` and `SetWindowPos` SEND messages synchronously
+//!    and `openMain` runs inside `vm.eval` — without the bracket the door
+//!    re-enters the VM on the very first run. See that function's doc.
+//! 3. **Stop holding a `&mut VmHandle` across `DispatchMessageW`.** The
+//!    trampoline re-borrows the same `VmHandle` from the published raw pointer;
+//!    a `&mut` held by the pump across the dispatch would alias it. The pump
+//!    now carries the raw pointer and re-borrows only where the door cannot be
+//!    running — which is the same discipline `cocoa_gui` follows around
+//!    `[NSApp run]`.
 //!
 //! ## D4 — why Rust holds the pump
 //!
@@ -101,15 +122,17 @@ mod app {
     use std::sync::mpsc::Receiver;
     use std::sync::Arc;
 
-    use macvm::embed::{set_fatal_mode, VmHandle};
+    use macvm::embed::{publish_ui_vm, set_fatal_mode, VmHandle};
     use macvm::runtime::vm_state::FatalMode;
+    use macvm::runtime::win_wndproc;
     use macvm::runtime::VmOptions;
 
     use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
     use windows::Win32::System::Threading::GetCurrentThreadId;
     use windows::Win32::UI::WindowsAndMessaging::{
         DispatchMessageW, GetMessageW, GetWindowThreadProcessId, IsWindow, PeekMessageW,
-        PostQuitMessage, PostThreadMessageW, TranslateMessage, MSG, PM_NOREMOVE, WM_APP,
+        PostQuitMessage, PostThreadMessageW, SetWindowPos, TranslateMessage, HWND_TOP, MSG,
+        PM_NOREMOVE, SWP_NOMOVE, SWP_NOZORDER, WM_APP,
     };
 
     use crate::control::CtlReq;
@@ -170,6 +193,32 @@ mod app {
         VmOptions::from_env()
     }
 
+    // ── WG2: every top-level VM entry this host makes goes through these ─────
+    //
+    // `win_wndproc::BusyGuard` marks the thread as "a host-initiated top-level
+    // VM entry is live", and the door declines while one is. It is not
+    // optional and it is not belt-and-braces: `openMain` calls
+    // `CreateWindowExW`, which SENDS `WM_CREATE`/`WM_SIZE` synchronously to the
+    // window proc — which is now the door — from inside this very `eval`. The
+    // depth guard is legitimately 0 there, so without the bracket the first
+    // message of the first run is a re-entrant VM entry sharing the one
+    // per-thread `sigsetjmp` slot.
+    //
+    // These two functions are the ONLY place this crate calls `eval`/`exec`,
+    // and `every_vm_entry_is_bracketed` (below) fails if a bare one appears.
+
+    /// `vm.eval`, with the door held shut for the duration.
+    fn guarded_eval(vm: &mut VmHandle, src: &str) -> Result<String, macvm::embed::GuestError> {
+        let _busy = win_wndproc::BusyGuard::enter();
+        vm.eval(src)
+    }
+
+    /// `vm.exec`, with the door held shut for the duration.
+    fn guarded_exec(vm: &mut VmHandle, src: &str) -> Result<(), macvm::embed::GuestError> {
+        let _busy = win_wndproc::BusyGuard::enter();
+        vm.exec(src)
+    }
+
     /// Boot the UI VM **on the current thread**, then layer `winui.list`.
     fn boot_ui_vm() -> Result<VmHandle, String> {
         let world = world_dir();
@@ -193,7 +242,7 @@ mod app {
     /// is a thing the control channel can do. `0` is the ordinary "not yet"
     /// answer and `snap_hwnd` already knows what to say about it.
     fn shell_hwnd(vm: &mut VmHandle) -> HWND {
-        let raw = match vm.eval("WinShell hwndValue.") {
+        let raw = match guarded_eval(vm, "WinShell hwndValue.") {
             Ok(s) => s.trim().parse::<u64>().unwrap_or(0),
             Err(_) => 0,
         };
@@ -217,14 +266,14 @@ mod app {
                     let _ = req.reply.send("OK pong".into());
                 }
                 "eval" => {
-                    let reply = match vm.eval(arg) {
+                    let reply = match guarded_eval(vm, arg) {
                         Ok(s) => format!("OK {s}"),
                         Err(e) => format!("ERR {e}"),
                     };
                     let _ = req.reply.send(reply);
                 }
                 "doit" => {
-                    let reply = match vm.exec(arg) {
+                    let reply = match guarded_exec(vm, arg) {
                         Ok(()) => "OK".to_string(),
                         Err(e) => format!("ERR {e}"),
                     };
@@ -233,6 +282,60 @@ mod app {
                 "snap" => {
                     let h = shell_hwnd(vm);
                     snap::snap_hwnd(h, arg, req.reply);
+                }
+                // ── WG2's three door verbs ───────────────────────────────
+                //
+                // `door` reports what the door has done (counters + D5's two
+                // latency numbers), `doorreset` zeroes them so a measurement
+                // describes steady state rather than the first-ever entry's
+                // tier-1 compilation, and `door on|off` is the allowlist
+                // master switch — implementation-order step 1's transparency
+                // proof and D5's baseline in one lever.
+                //
+                // Read here rather than through a primitive because these are
+                // facts about the HOST's door, not about the guest's world:
+                // WG1's Δ 3 rule pointed the other way for the same reason.
+                "door" => {
+                    let reply = match arg {
+                        "on" => {
+                            win_wndproc::set_door_enabled(true);
+                            format!("OK {}", win_wndproc::stats_line())
+                        }
+                        "off" => {
+                            win_wndproc::set_door_enabled(false);
+                            format!("OK {}", win_wndproc::stats_line())
+                        }
+                        "reset" => {
+                            win_wndproc::reset_stats();
+                            format!("OK {}", win_wndproc::stats_line())
+                        }
+                        "" => format!("OK {}", win_wndproc::stats_line()),
+                        other => format!("ERR unknown door subcommand '{other}'"),
+                    };
+                    let _ = req.reply.send(reply);
+                }
+                // The scripted resize, and the ONE place this host calls a
+                // Win32 geometry function.
+                //
+                // `tests_wg2.md` item 2 says to drive it with "SetWindowPos via
+                // FFI from a doit", and that cannot work: SetWindowPos SENDS
+                // `WM_SIZE` synchronously, so from a doit the wndproc runs
+                // inside `vm.exec` and the door correctly refuses it (see
+                // `win_wndproc::vm_busy`). A `WM_SIZE` that reaches Smalltalk
+                // must originate OUTSIDE every VM entry — which is where every
+                // real one does: the pump, or the modal move/size loop Windows
+                // runs while a user drags the frame, both of which call
+                // SetWindowPos with the VM at rest. This drain is that same
+                // place, so this verb is the user's mouse, in a script.
+                //
+                // D1 is not bent by it: the host still creates, styles and
+                // measures nothing. `WinShell resizeWindowTo:by:` is the
+                // guest's own version of the same call, kept for WG3's layout
+                // code, and it is the WINDOW rect that moves here — the client
+                // size the message carries is Win32's arithmetic, not ours.
+                "resize" => {
+                    let reply = resize_window(vm, arg);
+                    let _ = req.reply.send(reply);
                 }
                 // The control channel's own exit path. `sprint_wg1_detail.md`
                 // records why it exists: closing is TWO events — `WM_CLOSE`
@@ -253,6 +356,46 @@ mod app {
         }
     }
 
+    /// `resize <w> <h>`: move the window's frame and let Win32 send the
+    /// `WM_SIZE` that follows — from here, on the pump's thread, with no VM
+    /// entry live.
+    ///
+    /// The HWND is asked of Smalltalk (which gates it with `IsWindow`, WG1's
+    /// Δ 2) and then re-checked here, because between the `eval` returning and
+    /// the `SetWindowPos` there is a doit-shaped hole a script could close the
+    /// window through. A remembered HWND is not a window.
+    fn resize_window(vm: &mut VmHandle, arg: &str) -> String {
+        let mut it = arg.split_whitespace();
+        let (Some(w), Some(h)) = (it.next(), it.next()) else {
+            return "ERR resize wants <width> <height>".into();
+        };
+        let (Ok(w), Ok(h)) = (w.parse::<i32>(), h.parse::<i32>()) else {
+            return "ERR resize wants two integers".into();
+        };
+        let hwnd = shell_hwnd(vm);
+        if hwnd.0.is_null() || !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
+            return "ERR no window yet".into();
+        }
+        // SetWindowPos dispatches WM_SIZE into the door SYNCHRONOUSLY from
+        // here — which is exactly the point: no `eval` is live, no door entry
+        // is live, so the depth guard is 0 and the message crosses.
+        let ok = unsafe {
+            SetWindowPos(
+                hwnd,
+                Some(HWND_TOP),
+                0,
+                0,
+                w,
+                h,
+                SWP_NOMOVE | SWP_NOZORDER,
+            )
+        };
+        match ok {
+            Ok(()) => format!("OK resized to {w}x{h}"),
+            Err(e) => format!("ERR SetWindowPos: {e}"),
+        }
+    }
+
     /// The pump. D4's loop, with the −1 arm the naive form drops.
     ///
     /// `window` is read from Smalltalk ONCE, before the loop, and its liveness
@@ -264,14 +407,31 @@ mod app {
     /// cheaply; the VM's answer is needed only when the window CHANGES, which
     /// in WG1 it cannot.
     ///
-    /// The liveness check is the WG1 stand-in for `WM_DESTROY` →
-    /// `PostQuitMessage`: once Smalltalk's window has existed and stopped
-    /// existing, this loop has nothing left to pump for, so it quits. That is
-    /// a decision about the LOOP's lifetime, which D1 gives to Rust — not
-    /// about what a message MEANS, which stays Smalltalk's and stays WG2's.
-    /// When the door lands, `WM_DESTROY` dispatches into `WinShell` and this
-    /// branch becomes dead code to delete.
-    pub fn pump(vm: &mut VmHandle, rx: Option<&Receiver<CtlReq>>, window: HWND) -> i32 {
+    /// ## WG2: the VM crosses this function as a RAW POINTER, deliberately
+    ///
+    /// `DispatchMessageW` calls the door, which re-borrows the same `VmHandle`
+    /// from the pointer `publish_ui_vm` published. A `&mut VmHandle` held by
+    /// this loop across the dispatch would alias that re-borrow. So the pump
+    /// carries `*mut VmHandle` and materialises a `&mut` only where the door
+    /// provably is not running — inside `drain_control_requests`, which is
+    /// itself bracketed by a `BusyGuard`.
+    ///
+    /// ## The liveness check is now a BACKSTOP, and says so
+    ///
+    /// WG1 used it as its stand-in for `WM_DESTROY` → `PostQuitMessage`, and
+    /// `sprint_wg2_detail.md` says to delete it once the door lands. It is kept
+    /// — with a DIFFERENT message — for one reason: if `WinShell>>onDestroy`
+    /// ever fails to post the quit (a raise inside it, a `winui.list` that
+    /// loaded a broken version), the alternative to this branch is a process
+    /// pumping an empty queue forever with a window that no longer exists,
+    /// which is precisely the WG1 Δ 2 hang this port has already paid for once.
+    ///
+    /// Keeping it costs nothing and would make gate item 3 ("`WM_DESTROY` posts
+    /// the quit from **Smalltalk**, not from Rust") unprovable — so the two
+    /// paths print different lines and `just gate-wg2` asserts it saw the
+    /// Smalltalk one and did NOT see this one. Safety and provability, rather
+    /// than a choice between them.
+    pub fn pump(vmp: *mut VmHandle, rx: Option<&Receiver<CtlReq>>, window: HWND) -> i32 {
         let mut msg = MSG::default();
         let mut had_window = !window.0.is_null();
         loop {
@@ -286,20 +446,41 @@ mod app {
                 }
                 Step::Quit => return 0,
                 Step::Dispatch => {
+                    // The door may run inside here. No `&mut VmHandle` is live
+                    // across it.
                     unsafe {
                         let _ = TranslateMessage(&msg);
                         DispatchMessageW(&msg);
                     }
                     if let Some(rx) = rx {
+                        // SAFETY: the handle is boxed, published on this
+                        // thread, and outlives the loop; the door is not
+                        // running here (we are between dispatches on the one
+                        // thread that dispatches), so this `&mut` is unique.
+                        let vm: &mut VmHandle = unsafe { &mut *vmp };
                         drain_control_requests(vm, rx);
                     }
                     if had_window && !unsafe { IsWindow(Some(window)) }.as_bool() {
-                        println!(
-                            "macvm-winui: the window is gone — posting WM_QUIT (WG2 moves this \
-                             to WM_DESTROY, where it belongs)"
-                        );
-                        unsafe { PostQuitMessage(0) };
+                        // WG1's Δ 2 rule, still: a remembered HWND is not a
+                        // window, so this asks Win32 rather than the VM. What
+                        // is new is the second clause — if the door handled
+                        // `WM_DESTROY`, Smalltalk has already posted the quit
+                        // and this branch would be a second one, plus a log
+                        // line saying the opposite of what happened. The
+                        // backstop is for the case where `onDestroy` RAISED.
                         had_window = false;
+                        if win_wndproc::guest_handled_destroy() {
+                            println!(
+                                "macvm-winui: the window is gone and Smalltalk's WM_DESTROY \
+                                 handler posted the quit — nothing for the backstop to do"
+                            );
+                        } else {
+                            println!(
+                                "macvm-winui: BACKSTOP — the window is gone and Smalltalk's \
+                                 WM_DESTROY handler did not post the quit; posting WM_QUIT here"
+                            );
+                            unsafe { PostQuitMessage(0) };
+                        }
                     }
                 }
             }
@@ -365,12 +546,34 @@ mod app {
     pub fn run() -> i32 {
         ensure_message_queue();
         let mut vm = match boot_ui_vm() {
-            Ok(vm) => vm,
+            Ok(vm) => Box::new(vm),
             Err(e) => {
                 eprintln!("macvm-winui: {e}");
                 return 2;
             }
         };
+        // WG2: the door's half of the arrangement. `publish_ui_vm` is the CG3
+        // mechanism — a thread-local `*mut VmHandle` a trampoline can read with
+        // no Rust lifetime to borrow against — and it is NOT
+        // `register_hosted_worker`, which WG1's Δ 1 measured to be incoherent
+        // without a primary and which WG2 was told not to reach for either.
+        //
+        // `Box` because the pointer must stay valid for the life of the process
+        // while the pump also borrows the same handle: a stack local's address
+        // is stable in practice, but a boxed one is stable by contract, and
+        // "in practice" is not a thing to write under a raw pointer that Win32
+        // dereferences.
+        //
+        // Published BEFORE `openMain`, because `CreateWindowExW` calls the door
+        // before it returns the HWND.
+        let vmp: *mut VmHandle = &mut *vm;
+        publish_ui_vm(vmp);
+        println!(
+            "macvm-winui: WndProc door published at 16r{:X} (allowlist {} messages, enabled={})",
+            macvm::runtime::win_wndproc::door_address(),
+            macvm::runtime::win_wndproc::ALLOWLIST.len(),
+            macvm::runtime::win_wndproc::door_enabled(),
+        );
 
         // Armed BEFORE the window exists, deliberately: requests that land
         // early just queue, and the thread-message wake needs no window. That
@@ -384,19 +587,27 @@ mod app {
         // learns it happened, which is the whole point of D4's second reason.
         match std::env::var("MACVM_WINUI_FAULT").as_deref() {
             Ok("guest") => {
-                let _ = vm.exec("WinShell faultMode: #guest.");
+                let _ = guarded_exec(&mut vm, "WinShell faultMode: #guest.");
             }
             Ok("native") => {
-                let _ = vm.exec("WinShell faultMode: #native.");
+                let _ = guarded_exec(&mut vm, "WinShell faultMode: #native.");
             }
             _ => {}
         }
 
-        match vm.eval("WinShell openMain.") {
+        match guarded_eval(&mut vm, "WinShell openMain.") {
             Ok(s) => println!("macvm-winui: WinShell openMain -> {s}"),
             Err(e) => eprintln!("macvm-winui: WinShell openMain raised: {e} (the pump continues)"),
         }
-        let _ = vm.exec("WinShell report.");
+        let _ = guarded_exec(&mut vm, "WinShell report.");
+        // The window's own creation sent messages to the door from inside the
+        // `eval` above; the busy guard declined every one of them, which is
+        // correct and which is why this line exists — a nonzero `busy` here is
+        // the arrangement working, not a fault.
+        println!("macvm-winui: {}", win_wndproc::stats_line());
+        // Everything before this point was setup. D5's numbers describe steady
+        // state, so the door starts counting from a live, shown window.
+        win_wndproc::reset_stats();
         let window = shell_hwnd(&mut vm);
         // A window owned by another thread would never receive a dispatched
         // message and the app would look hung with nothing in any log, so
@@ -409,8 +620,13 @@ mod app {
             return 3;
         }
 
-        let code = pump(&mut vm, rx.as_ref(), window);
+        let code = pump(vmp, rx.as_ref(), window);
+        println!("macvm-winui: {}", win_wndproc::stats_line());
         println!("macvm-winui: message loop ended, exit {code}");
+        // The door outlives nothing: unpublish before the box drops, so a late
+        // message (Windows can deliver one during teardown) finds a null door
+        // and answers `DefWindowProcW` rather than dereferencing a freed VM.
+        publish_ui_vm(std::ptr::null_mut());
         code
     }
 
@@ -423,12 +639,16 @@ mod app {
     pub fn selftest() -> i32 {
         ensure_message_queue();
         let mut vm = match boot_ui_vm() {
-            Ok(vm) => vm,
+            Ok(vm) => Box::new(vm),
             Err(e) => {
                 eprintln!("macvm-winui: {e}");
                 return 2;
             }
         };
+        // The door is published here too, so `cycle: 10` really does register
+        // the door's class and really does create and destroy ten windows with
+        // it — the selftest would otherwise prove WG1's arrangement, not WG2's.
+        publish_ui_vm(&mut *vm);
         let mut ok = true;
 
         // 1. snap with no window — a named error, not a hang and not a
@@ -447,7 +667,7 @@ mod app {
 
         // 2. Open and close a real window ten times in one process: no
         //    class-registration leak, no HWND handed back twice.
-        match vm.eval("WinShell cycle: 10.") {
+        match guarded_eval(&mut vm, "WinShell cycle: 10.") {
             Ok(s) => {
                 println!("SELFTEST cycle: {s}");
                 if !s.contains("'classUsableEveryTime'->true") || !s.contains("'opened'->10") {
@@ -460,6 +680,49 @@ mod app {
             }
         }
 
+        // 2b. WG2. Ten windows were just created and destroyed with the DOOR
+        //     as their wndproc, from inside a doit — so every message those
+        //     `CreateWindowExW`/`DestroyWindow` calls sent arrived with the VM
+        //     already inside a top-level entry. Every one must have been
+        //     declined by the busy guard, the depth counter must be 0, and the
+        //     VM must have been entered exactly zero times. That is the
+        //     re-entrancy hazard `sprint_wg2_detail.md` does not name, checked
+        //     where it actually fires rather than argued about.
+        println!("SELFTEST door-after-cycle: {}", win_wndproc::stats_line());
+        if win_wndproc::depth() != 0 {
+            eprintln!("SELFTEST the depth guard leaked across cycle: 10");
+            ok = false;
+        }
+        if win_wndproc::vm_entries() != 0 {
+            eprintln!(
+                "SELFTEST the door entered the VM re-entrantly from inside a doit \
+                 ({} times) — the busy guard is not doing its job",
+                win_wndproc::vm_entries()
+            );
+            ok = false;
+        }
+        if win_wndproc::busy_declined() == 0 {
+            eprintln!(
+                "SELFTEST no message reached the door at all during cycle: 10 — \
+                 the class was probably registered with the system default handler, not the door"
+            );
+            ok = false;
+        }
+        if win_wndproc::panics_caught() != 0 {
+            eprintln!("SELFTEST the trampoline caught a panic, which must never happen");
+            ok = false;
+        }
+        // The address channel (D2) answers the same non-zero number twice, and
+        // it is the one Smalltalk actually registered.
+        let addr = guarded_eval(&mut vm, "WinApi wndProcAddress.").unwrap_or_default();
+        let addr2 = guarded_eval(&mut vm, "WinApi wndProcAddress.").unwrap_or_default();
+        let want = format!("{}", win_wndproc::door_address());
+        println!("SELFTEST door-address: {addr} (rust says {want})");
+        if addr.trim() != want || addr2.trim() != want || want == "0" {
+            eprintln!("SELFTEST primitive 272 does not answer the door's address");
+            ok = false;
+        }
+
         // 3. `GetMessageW` = −1, forced rather than reasoned about: ask for
         //    messages belonging to a DESTROYED window. Run on a scratch thread
         //    with its own queue so a wrong guess about whether the call blocks
@@ -468,8 +731,8 @@ mod app {
 
         // 4. A recovered guest fault leaves the VM usable — the property D4's
         //    second reason depends on, checked without a loop in the way.
-        let faulted = vm.exec("WinShell error: 'selftest deliberate fault'.");
-        let alive = vm.eval("3 + 4.").unwrap_or_else(|e| format!("<{e}>"));
+        let faulted = guarded_exec(&mut vm, "WinShell error: 'selftest deliberate fault'.");
+        let alive = guarded_eval(&mut vm, "3 + 4.").unwrap_or_else(|e| format!("<{e}>"));
         println!(
             "SELFTEST fault-then-alive: faulted={} alive={alive}",
             faulted.is_err()
@@ -478,6 +741,7 @@ mod app {
             ok = false;
         }
 
+        publish_ui_vm(std::ptr::null_mut());
         if ok {
             println!("SELFTEST OK");
             0
@@ -567,6 +831,13 @@ mod app {
         /// D1's line, made checkable: this crate pumps and captures, and does
         /// not create, register, style or measure a window. Every one of those
         /// belongs to `world/91_winui_shell.mst`.
+        ///
+        /// WG2 added exactly one Win32 call to this file — `SetWindowPos`, in
+        /// the `resize` control verb — and it is deliberately NOT on this list.
+        /// See `resize_window`'s doc: a `WM_SIZE` that reaches Smalltalk has to
+        /// originate outside every VM entry, so the scripted resize has to live
+        /// where the pump lives. It creates nothing, styles nothing and decides
+        /// nothing; it is the user's mouse in a script.
         #[test]
         fn rust_owns_the_pump_and_nothing_else() {
             let src = include_str!("main.rs");
@@ -583,6 +854,112 @@ mod app {
                     "{forbidden} is Smalltalk's call to make (D1), not this host's"
                 );
             }
+        }
+
+        /// WG2's own D1 line: the DOOR is `macvm::runtime::win_wndproc`'s, not
+        /// this crate's. A trampoline, an allowlist or a depth counter
+        /// re-implemented here would be a second door — the same category of
+        /// regression a second PNG writer would be, and this is the same shape
+        /// of test §3.1 already earns.
+        #[test]
+        fn the_door_is_the_shared_one_not_a_local_copy() {
+            let src = include_str!("main.rs");
+            assert!(
+                !src.contains(concat!("extern ", "\"system\" fn")),
+                "the wndproc trampoline lives in macvm::runtime::win_wndproc, not here"
+            );
+            // Comments talk about `DefWindowProcW` constantly — that is the
+            // whole subject — so this reads CODE lines only. Same reason
+            // `capture_and_control_are_included_not_copied` splits its needles:
+            // a file that is its own haystack needs the distinction.
+            let needle = concat!("DefWindow", "ProcW");
+            for (i, l) in code_lines(src) {
+                assert!(
+                    !l.contains(needle),
+                    "line {i}: this host never answers a message itself; the door does — {l}"
+                );
+            }
+            assert!(
+                src.contains(concat!("BusyGuard", "::enter();")),
+                "every host-side VM entry must be bracketed (win_wndproc::vm_busy)"
+            );
+        }
+
+        /// Numbered, non-comment, non-empty lines — the haystack for the two
+        /// tests below, which are about what this file DOES and not about what
+        /// it says.
+        fn code_lines(src: &str) -> impl Iterator<Item = (usize, &str)> {
+            src.lines().enumerate().filter_map(|(i, line)| {
+                let l = line.trim();
+                if l.is_empty() || l.starts_with("//") {
+                    None
+                } else {
+                    Some((i + 1, l))
+                }
+            })
+        }
+
+        /// The bracket, enforced rather than remembered. `CreateWindowExW` and
+        /// `SetWindowPos` send messages synchronously, so a bare `vm.eval` /
+        /// `vm.exec` anywhere in this file is a re-entrant VM entry waiting for
+        /// the right doit — the failure mode being a clobbered `sigsetjmp` slot
+        /// and a `longjmp` into a returned frame, which has no symptom until it
+        /// has a catastrophic one.
+        #[test]
+        fn every_vm_entry_is_bracketed() {
+            let src = include_str!("main.rs");
+            // Exactly two raw entries exist in this file — the bodies of
+            // `guarded_eval` and `guarded_exec` — and exactly two brackets.
+            // Counting is the enforceable form: a third `vm.eval(` anywhere,
+            // however well-intentioned, fails here.
+            // The needles are split so this line is not itself a match — the
+            // file is its own haystack, and a literal here would fail the
+            // assertion it makes.
+            let eval = concat!("vm.", "eval(");
+            let exec = concat!("vm.", "exec(");
+            let raw: Vec<_> = code_lines(src)
+                .filter(|(_, l)| l.contains(eval) || l.contains(exec))
+                .collect();
+            assert_eq!(
+                raw.len(),
+                2,
+                "every VM entry must go through guarded_eval/guarded_exec so the \
+                 WG2 door cannot re-enter the VM; found {raw:?}"
+            );
+            let bracket = concat!("BusyGuard", "::enter()");
+            let sites: Vec<_> = code_lines(src)
+                .filter(|(_, l)| l.contains(bracket) && !l.contains("concat!"))
+                .collect();
+            assert_eq!(
+                sites.len(),
+                2,
+                "exactly two bracket sites: guarded_eval and guarded_exec; found {sites:?}"
+            );
+        }
+
+        /// The allowlist is six messages and `WM_PAINT` is not one of them.
+        /// Asserted from THIS side of the crate boundary as well, because the
+        /// number six is the design decision — "do not route every message" —
+        /// and a seventh appearing silently is how that decision gets lost.
+        #[test]
+        fn the_allowlist_is_the_six_messages_d1_names() {
+            use macvm::runtime::win_wndproc as door;
+            assert_eq!(door::ALLOWLIST.len(), 6);
+            for m in [
+                door::WM_CLOSE,
+                door::WM_DESTROY,
+                door::WM_SIZE,
+                door::WM_COMMAND,
+                door::WM_KEYDOWN,
+                door::WM_CHAR,
+            ] {
+                assert!(door::ALLOWLIST.contains(&m));
+            }
+            assert!(!door::ALLOWLIST.contains(&0x000F), "WM_PAINT is WG3/WG4's");
+            assert!(
+                !door::ALLOWLIST.contains(&0x0200),
+                "WM_MOUSEMOVE arrives in storms and must never cross"
+            );
         }
     }
 }

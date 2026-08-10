@@ -1,0 +1,231 @@
+"62_winui_door_tests.mst — WinUiDoorTests, the headless half of WG2's
+ acceptance gate (docs/sprints/tests_wg2.md, 'In-language tests').
+ Exercises the guest side of the WndProc door in world/91_winui_shell.mst:
+ the dispatcher's two-sided allowlist, its LRESULT contract, and the fact
+ that a handler really runs in the real VM.
+
+ WHAT IS DELIBERATELY NOT HERE: anything that needs a WINDOW, a message
+ PUMP, or a nested Win32 SEND. Every one of D4's three failure modes — a
+ raising handler, a faulting handler, a re-entered door — is a claim about
+ what happens when Windows calls the trampoline, and Windows will not call
+ a trampoline in a `cargo test` worker thread with no window and no loop.
+ Those live in `just gate-wg2`, driven through MACVM_WINUI_CTL against one
+ process with one thread and one real window, and in the door's own Rust
+ unit tests (src/runtime/win_wndproc.rs), which drive a real guest fault and
+ a real ACCESS_VIOLATION through the real trampoline. Drawing that line is
+ the same decision 61_winui_shell_tests.mst made about windows, for the same
+ reason (WG0's Δ 11).
+
+ WHAT REMAINS, and it is the half worth having in-language: the dispatcher
+ is ORDINARY SMALLTALK. `window:message:wParam:lParam:` can be SENT — no
+ window, no HWND, no Win32 at all for the four messages that only record —
+ so its contract is testable as a method rather than as a system.
+
+ THE SAME TWO SKIP LEVELS as 61, both announced:
+   * NOT WINDOWS — the runner never calls us (99_run_all.mst's guard).
+   * NO DATABASE — the dispatcher asks winkb for every message number it
+     compares against, so without windows_api.db it cannot run at all. The
+     one test that needs neither winkb nor Win32 — the address channel,
+     which is a primitive — still runs.
+
+ LOADING: `WinShell` and `WinApi` live in the conditional winui layer, so
+ world/tests/tests.list names ../90 and ../91 above this file. An
+ unresolved capitalised name in a method body is a COMPILE error in this
+ dialect, so a layered world's test file cannot guard itself at run time
+ (WG0's Δ 6, inherited, not re-litigated)."
+
+TestCase subclass: WinUiDoorTests [
+
+    runAll [
+        "The address channel is a primitive and needs nothing else — not
+         winkb, not Win32, not a window — so it runs whenever this file
+         runs at all. It is also the one thing WG2 could not have done
+         without new Rust (WG0's Δ 8), which makes it the first thing to
+         check."
+        self runTest: #testDoorAddressIsPublished do: [ self testDoorAddressIsPublished ].
+
+        WinApi winkbAvailable ifFalse: [
+            Transcript showCr:
+                '  SKIP WinUiDoorTests (4 of 5) — windows_api.db absent on this machine.'.
+            Transcript showCr:
+                '       The dispatcher compares every message against a winkb-queried'.
+            Transcript showCr:
+                '       number (it transcribes none), so testUnhandledMessageAnswersDefault,'.
+            Transcript showCr:
+                '       testHandlerReturnsLResult, testHandlerStateSurvives and'.
+            Transcript showCr:
+                '       testAllowlistMatchesWinkb cannot run. The database is a'.
+            Transcript showCr:
+                '       machine-local artifact, not a build input; nothing here is broken.'.
+            ^self ].
+
+        self runTest: #testUnhandledMessageAnswersDefault
+             do: [ self testUnhandledMessageAnswersDefault ].
+        self runTest: #testHandlerReturnsLResult do: [ self testHandlerReturnsLResult ].
+        self runTest: #testHandlerStateSurvives do: [ self testHandlerStateSurvives ].
+        self runTest: #testAllowlistMatchesWinkb do: [ self testAllowlistMatchesWinkb ].
+    ]
+
+    "── D2: the address channel ──────────────────────────────────────────"
+
+    testDoorAddressIsPublished [
+        "WG0's Δ 8 answered. Nothing in this port published a RUST function's
+         address to Smalltalk — the FFI resolves by NAME and GetProcAddress
+         only reaches DLL exports — so without primitive 272 a Smalltalk-built
+         WNDCLASSW could name DefWindowProcW and nothing else.
+
+         Stable, because an address that changed between two asks would mean
+         somebody made this mint a trampoline per call; and a SmallInteger,
+         because an address the guest cannot hold is not a channel. It must
+         also be DIFFERENT from DefWindowProcW's — a door that turned out to
+         be the system default would pass every behavioural test in this file
+         while doing nothing at all."
+        | a b |
+        a := WinApi primWndProcAddress.
+        self assert: a notNil.
+        self deny: a = 0.
+        b := WinApi primWndProcAddress.
+        self assert: b equals: a.
+        self assert: WinApi wndProcAddress equals: a.
+        self assert: (a isKindOf: Integer).
+        "The comparison against DefWindowProcW is inside a database guard and
+         nothing else in this test is, which is worth a sentence: learning the
+         SYSTEM handler's address goes through GetProcAddress, whose symbol
+         name lives in the arena, whose VirtualAlloc needs MEM_COMMIT — a
+         winkb constant. So the one assertion that needs the database is the
+         one about the address this port could already reach, and the new
+         channel needs nothing at all. That asymmetry is the point of D2."
+        WinApi winkbAvailable ifTrue: [
+            self deny: a = WinApi defWindowProcAddress ]
+    ]
+
+    "── D1: the allowlist, from the guest's side ─────────────────────────"
+
+    testUnhandledMessageAnswersDefault [
+        "The two-sided allowlist agreeing in the SAFE direction. Rust asks
+         only for six messages; this class answers #defwindowproc for
+         anything it does not itself handle. The halves may therefore
+         disagree — a message added to one list before the other — and the
+         result is always 'behaves as it did in WG1', never 'a window that
+         stops responding'.
+
+         WM_MOUSEMOVE and WM_NCHITTEST are the two the Rust half will never
+         forward, so this is belt AND braces: they are asserted here because
+         a future sprint that adds one to the Rust allowlist without adding a
+         handler must still get a working window."
+        self assert: (WinShell window: 0 message: 16r0200 wParam: 0 lParam: 0)
+             equals: #defwindowproc.
+        self assert: (WinShell window: 0 message: 16r0084 wParam: 0 lParam: 0)
+             equals: #defwindowproc.
+        self assert: (WinShell window: 0 message: (WinApi constant: 'WM_PAINT') wParam: 0 lParam: 0)
+             equals: #defwindowproc.
+        "And the three ALLOWLISTED messages whose meaning is still WG3/WG5's
+         answer the same way — recorded, then defaulted. Swallowing a key
+         here would break Alt-F4 and every accelerator Windows handles free."
+        self assert: (WinShell window: 0 message: (WinApi constant: 'WM_KEYDOWN')
+                               wParam: 65 lParam: 0)
+             equals: #defwindowproc.
+        self assert: (WinShell window: 0 message: (WinApi constant: 'WM_CHAR')
+                               wParam: 65 lParam: 0)
+             equals: #defwindowproc.
+        self assert: (WinShell window: 0 message: (WinApi constant: 'WM_COMMAND')
+                               wParam: 7 lParam: 0)
+             equals: #defwindowproc.
+        "...but they were RECORDED on the way through, which is what makes
+         them handled-but-defaulted rather than ignored."
+        self assert: WinShell lastKey equals: 65.
+        self assert: WinShell lastCommand equals: 7
+    ]
+
+    testHandlerReturnsLResult [
+        "A handled message answers an Integer, which is the door's whole
+         return contract: Rust reads a SmallInteger as the LRESULT and treats
+         EVERY other answer — a Symbol, nil, a String, a raise — as
+         'DefWindowProcW's'. So the type is the contract, and 0 for a
+         processed WM_SIZE is what Windows documents."
+        | r |
+        WinShell resetDoorCounters.
+        r := WinShell window: 0 message: (WinApi constant: 'WM_SIZE')
+                      wParam: 0 lParam: 0.
+        self assert: (r isKindOf: Integer).
+        self assert: r equals: 0.
+        "WM_CLOSE is the deliberate exception, and the reason is structural
+         rather than stylistic: answering #defwindowproc puts the
+         DestroyWindow that follows on the far side of the depth guard, so
+         the WM_DESTROY it provokes is a fresh top-level entry and reaches
+         Smalltalk. Calling DestroyWindow from inside this method would nest
+         it, the guard would decline it, and PostQuitMessage would never run."
+        self assert: (WinShell window: 0 message: (WinApi constant: 'WM_CLOSE')
+                               wParam: 0 lParam: 0)
+             equals: #defwindowproc.
+        self assert: WinShell closeCount equals: 1
+    ]
+
+    testHandlerStateSurvives [
+        "The handler ran in THIS VM and left its marks here — which is what
+         separates a door from a mock. WM_SIZE's lParam packs the new client
+         size, low word width and high word height, so a handler that decoded
+         it correctly has computed 400x600 out of one integer.
+
+         Also the counter discipline the gate depends on: `messagesSeen`
+         counts ARRIVALS (bumped before any handler can fail) and `sizeCount`
+         counts SUCCESSES. Two different questions, and the raise tests in
+         `just gate-wg2` need to tell them apart."
+        | before |
+        WinShell resetDoorCounters.
+        before := WinShell messagesSeen.
+        WinShell window: 0 message: (WinApi constant: 'WM_SIZE')
+                 wParam: 0 lParam: 16r02580190.
+        self assert: WinShell messagesSeen equals: before + 1.
+        self assert: WinShell sizeCount equals: 1.
+        self assert: WinShell lastMessage equals: (WinApi constant: 'WM_SIZE').
+        self assert: (WinShell lastSizeSeen at: 1) equals: 400.
+        self assert: (WinShell lastSizeSeen at: 2) equals: 600.
+        "A second, different size overwrites — `lastSizeSeen` is the LATEST,
+         which is what a coalescing layout in WG3 will read."
+        WinShell window: 0 message: (WinApi constant: 'WM_SIZE')
+                 wParam: 0 lParam: 16r012C00C8.
+        self assert: (WinShell lastSizeSeen at: 1) equals: 200.
+        self assert: (WinShell lastSizeSeen at: 2) equals: 300.
+        self assert: WinShell sizeCount equals: 2.
+        WinShell resetDoorCounters.
+        self assert: WinShell sizeCount equals: 0.
+        self assert: WinShell lastSizeSeen equals: nil
+    ]
+
+    testAllowlistMatchesWinkb [
+        "The one place in this layer where Rust TRANSCRIBES Win32 numbers,
+         checked against the database rather than trusted to care.
+
+         `runtime::win_wndproc::ALLOWLIST` has to be a compile-time `const`
+         (a `match` arm cannot query SQLite, and the core crate must build on
+         a machine with no windows_api.db at all), so its six message numbers
+         are written out in Rust — the exact thing D2 forbids everywhere
+         else. This is the compensating control: the SAME six numbers, asked
+         of winkb by name, must be the ones this file's dispatcher compares
+         against. If a future sprint adds a seventh to the Rust list and gets
+         the number wrong, the guest side will never match it and this test
+         says so.
+
+         The values are asserted literally as well, because 'both sides agree'
+         and 'both sides are right' are different claims and only the second
+         one keeps the window working."
+        self assert: (WinApi constant: 'WM_CLOSE') equals: 16r0010.
+        self assert: (WinApi constant: 'WM_DESTROY') equals: 16r0002.
+        self assert: (WinApi constant: 'WM_SIZE') equals: 16r0005.
+        self assert: (WinApi constant: 'WM_COMMAND') equals: 16r0111.
+        self assert: (WinApi constant: 'WM_KEYDOWN') equals: 16r0100.
+        self assert: (WinApi constant: 'WM_CHAR') equals: 16r0102.
+        "WM_PAINT is deliberately NOT on the list — WG2 keeps
+         DefWindowProcW's erase and painting is WG3/WG4's — so the number is
+         pinned here to make its absence a decision rather than an oversight."
+        self assert: (WinApi constant: 'WM_PAINT') equals: 16r000F.
+
+        "loWord:/hiWord: are how every packed message is read, and getting
+         either wrong produces a plausible number rather than an error."
+        self assert: (WinApi loWord: 16rFFFF0001) equals: 1.
+        self assert: (WinApi hiWord: 16rFFFF0001) equals: 65535.
+        self assert: (WinApi loWord: 0) equals: 0.
+        self assert: (WinApi hiWord: 0) equals: 0
+    ]
+]
