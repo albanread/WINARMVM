@@ -1751,6 +1751,18 @@ fn golden_abs_diff() {
     check_golden_lst("s10_absDiff", &listing);
 }
 
+// Golden re-blessed for the P4 S2 stale-resident fix
+// (`emit::s2_demote_stale_resident_extras` — see the depth3 test's comment
+// for the full mechanism): `bitsOf:`'s chained bit-op intermediates are
+// dead by the later guards' traps but named by those traps' reexecute
+// stacks via `extra_oop_live` exact facts, and their resident registers are
+// re-shared by later intervals — the corrected demotion predicate now
+// catches them. The delta IS the fix, visible: write-through `str`s return
+// at the two defs, and the trap blocks LOSE their pre-brk stores — the old
+// golden had frozen stores of x23/x22 taken AFTER both registers were
+// redefined (the `=lit9` reload, the `orr`), i.e. the stale-value pattern
+// itself. Latent here (these guard traps are unreachable for the profiled
+// smi types), live in the depth3 test's shape.
 #[test]
 fn golden_bits_of() {
     let (mut vm, klass) = golden_vm();
@@ -6052,62 +6064,53 @@ fn blockarg_guard_cold_materializes_closure() {
 //     checkout (`C:\projects\MACVM`, diffed ignoring line endings). The same
 //     nmethod and the same recorded `ValueLoc`s are therefore produced on both
 //     hosts, which is why this is filed as mainline rather than as a port bug.
-// P4 UPDATE — the "not a port gap" arbitration above is WITHDRAWN. The
-// arbitration it asked for has now been run: this test is un-ignored in the
-// MACVM checkout and PASSES there, so identical sources are behaving
-// differently on the two hosts and this is Windows-ARM64-divergent until
-// proven otherwise. Two facts narrow where that divergence can live:
-//   * `ValueLoc` has NO `Reg` variant (`compiler::scopes`: ConstPool,
-//     ConstSmi, FrameSlot, Nil, ElidedClosure, DoubleSlot). Deopt reads
-//     FRAME SLOTS, never the trap-time register file — spill-all is
-//     enforced in release by `regalloc::verify_spill_all`. So a VEH/
-//     trampoline register-save divergence cannot by itself produce a wrong
-//     `ValueLoc`; the register state that DOES matter (fp, pc/site_off) was
-//     measured sane by P2 above.
-//   * It is NOT the S24 A1 pin defect fixed in P4
-//     (`regalloc::pin_end_bound`): that fix leaves this test failing
-//     identically, and this compile is a METHOD (`block_closure_vreg` is
-//     `None`), so that pin never applies to it.
-// Measured failure mode here after the P4 fix: the smi `+` primitive Fails
-// and trips `interpreter::send.rs`'s `prim_fails` debug_assert — i.e. `+`
-// received a non-smi, consistent with the wrong-operand diagnosis above.
+// **FIXED (P4).** Root cause: the S2 smi fast path's stale-resident
+// demotion (`emit::s2_demote_stale_resident_extras`, formerly an inline
+// loop). The full mechanism, measured with per-site metadata + deopt-read
+// dumps on the failing compile (`sumUp:` v0 — the trap is in v0 itself: the
+// block's `+` IC is Empty, so `cold_splice_traps` lowers the whole spliced
+// loop body to a terminating trap; no recompile is involved):
+//   * The block parameter `e` ALIASES the inlined loop counter `i` (the
+//     `value:`-send's argument vreg, v5) — one vreg, one slot, recorded at
+//     the depth-3 site via an `extra_oop_live` exact fact because v5's
+//     natural interval [7,11] ends before the trap position (18).
+//   * v5's resident register x23 was ALSO assigned to v9 (the fused loop
+//     condition's boolean, interval [11,12]) — legal, the windows are
+//     disjoint. At position 18, x23 physically holds v9's boolean.
+//   * `emit_s2_spill_stores` at the trap fires via the `s2_extra` disjunct
+//     and stores x23 into v5's slot — writing the `true` OBJECT over the
+//     loop counter. The demotion guard that exists for exactly this case
+//     demoted only when the conflicting window SPANS the fact position
+//     (`iv.end > p`); v9's window had already ENDED by 18, so no demotion,
+//     and nothing ever reloads v5 after v9's window closes. The deopt then
+//     rebuilt the block frame with `e = true` and the re-executed
+//     `sum + e` failed the smi `+`: the P2 debug abort here, and P2's
+//     release-mode `DNU #+ (receiver class True)` — the "fused
+//     comparison's boolean where `i` should be" was measured exactly right;
+//     the closure-oop reading of slot -40 was the one wrong guess.
+//   * This also explains why `MACVM_S2_POISON=1` never named the reader:
+//     the trap-site store OVERWRITES the commit-time canary with the stale
+//     register, so the canary was gone before any read.
+// The A/B that located it (decisive both directions, deterministic):
+// `MACVM_S2=0` passes, S2 on aborts, poison still aborts.
 //
-// P4 ROOT CAUSE (decisive A/B, both directions, deterministic): this is the
-// **S2 smi fast path** (`emit.rs`, `MACVM_S2`), NOT the trap-delivery seam
-// and NOT the deopt metadata.
-//     MACVM_S2=0        -> PASSES
-//     (default, S2 on)  -> aborts, as above
-//     MACVM_S2_POISON=1 -> still aborts, so the slot being read is one whose
-//                          write-through store S2 SKIPPED (the canary lands
-//                          in it and `+` fails on the canary instead).
-// `emit::commit` emits no `str` for an `s2_smi` vreg; the slot is brought
-// current only by `emit_s2_spill_stores`, whose coverage filter is an
-// interval-span test (`iv.start <= pos && iv.end > pos`, plus the exact
-// `s2_extra` fact). The block parameter's vreg has a DEGENERATE interval
-// (`[def, def]`) because its only consumer is the deopt record, which is not
-// an `Ir::uses` — so the slot the site names is read before any store makes
-// it current, and it holds whatever the native stack left there.
+// The fix corrects the conflict predicate to "the sharing window overlaps
+// `(own.start, p]`" (`iv.end > own.start`), demoting v5 back to
+// write-through commits. Pure-logic regression:
+// `emit::tests::s2_demotes_stale_resident_for_post_interval_deopt_fact`,
+// which fails under the old predicate. Same FAMILY as P4's
+// `regalloc::pin_end_bound` fix — a deopt-only consumer invisible to
+// bytecode liveness breaking an interval-arithmetic assumption — but a
+// different component.
 //
-// Why only this test: every PASSING depth-2 in-body-trap test through the
-// linear `translate_spliced_block_body` passes a CONSTANT block argument, so
-// the parameter resolves via `f3_const` to `ValueLoc::ConstSmi` and no frame
-// slot is ever read. "Linear spliced block body + a parameter that actually
-// lives in a spill slot" is exercised here and nowhere else.
-//
-// Same FAMILY as the P4 `pin_end_bound` fix — a deopt-only consumer not
-// counted as a use, so an interval-span test under-covers the trap — but a
-// DIFFERENT root cause in a different component; the P4 fix does not touch
-// it. Left unfixed here: the fix belongs to S2's coverage filter.
-//
-// Still ignored on Windows only because the abort is non-unwinding and
-// would take the other 104 tests' results with it.
-#[cfg_attr(
-    windows,
-    ignore = "UNFIXED, Windows-divergent (MACVM passes this un-ignored): the depth-3 \
-              spliced-block deopt site records the block parameter at the CLOSURE's \
-              spill slot; aborts the binary via a non-unwinding debug_assert in \
-              rt_uncommon_trap. See the comment above."
-)]
+// Mainline bug, host-dependent trigger: MACVM's `emit.rs` carries the
+// identical predicate over the identical intervals (byte-identical modulo
+// one lint shim), and the demotion arithmetic has no platform input — the
+// pure regression test fails on any host under the old predicate. An
+// earlier P4 note here declared this "Windows-divergent (MACVM passes
+// un-ignored)"; whatever that Mac run exercised, divergence of the LOGIC is
+// ruled out by the diff — per the project's revised thesis the fix is made
+// here and cherry-picks to MACVM as-is.
 #[test]
 fn depth3_deopt_in_block_in_callee_rebuilds_all_frames() {
     let mut vm = VmState::with_options(VmOptions {

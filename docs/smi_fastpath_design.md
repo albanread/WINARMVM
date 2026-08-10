@@ -194,3 +194,38 @@ A/B vs S1+S3-only: **arith −11.3% total for the S2 family** (S2b was
 debug lib 839/0, release tier1 104/0, 5-mode battery, GUI GC_VERIFY.
 `MACVM_S2_COUNT=1` now also prints per-candidate S2c verdicts (obs
 positions + dominance results).
+
+## S2d (2026-08-10): the second stale-slot reader — the trap-site store itself
+
+The falsification list gains an entry, and it answers the question the
+attempt record left open ("some slot reader survives outside the nine
+covered sites"): there was a reader poison could NEVER name, because the
+corrupting write happens AFTER the canary. At an `extra_oop_live` exact
+fact `(v, p)` with `p` PAST v's interval end (a deopt-only consumer — an
+uncommon-trap site naming a bytecode-dead vreg's slot),
+`emit_s2_spill_stores` copies `v.resident_reg` into v's slot — but v is
+dead there, so nothing has reloaded the register since v's window closed,
+and any LATER interval that time-shared the same resident register has
+left ITS value in it. The store is present and the store is the
+corruption; a commit-time canary is simply overwritten by it.
+
+Found end-to-end by `it_tier1::depth3_deopt_in_block_in_callee_rebuilds_
+all_frames` (`MACVM_S2=0` passes / S2-on aborts / poison STILL aborts —
+the tell that the writer runs after the canary): `sumUp:` v0's inlined
+loop counter `i` (interval [7,11], resident x23) is named at the depth-3
+trap (position 18) via an exact fact; the fused loop-condition boolean
+(interval [11,12], SAME x23) refreshed the register in between; the
+trap-site store wrote the `true` object into `i`'s slot, and the deopt
+rebuilt the spliced block frame with `e = true` — `sum + e` then failed
+the smi `+` (P2's release-mode `DNU #+ (receiver class True)`, exactly).
+
+The demotion guard for shared-resident extras existed but tested "the
+other window SPANS p" — blind to a window that ENDED before p while the
+register still holds its value. Corrected to "overlaps `(own.start, p]`"
+(`emit::s2_demote_stale_resident_extras`, extracted pure + unit-tested:
+`s2_demotes_stale_resident_for_post_interval_deopt_fact`, which fails
+under the old predicate on any host). In-window facts stay exempt
+(`assign_residents` exclusivity); pre-def facts stay exempt (nil-fill
+serves them). Demotion, not a cleverer store, is the only sound response:
+the vreg is dead at p, so no register holds it — write-through is what
+makes the slot current.

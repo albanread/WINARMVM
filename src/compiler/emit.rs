@@ -364,8 +364,12 @@ struct Emitter<'a> {
     /// store; slots are brought current only on safepoint-reaching paths
     /// (`emit_s2_spill_stores`). Under MACVM_S2_POISON=1 the skip becomes a
     /// CANARY write instead — a tagged-smi poison encoding the slot index —
-    /// so the still-unidentified stale-slot reader (the S2 attempt record's
-    /// open question) names itself in whatever failure it causes.
+    /// so a stale-slot reader names itself in whatever failure it causes.
+    /// (The S2 attempt record's open question — a reader poison could NOT
+    /// name — is answered, P4: the deopt materializer reading a slot whose
+    /// `s2_extra` trap-site store copied a STALE resident register; that
+    /// store overwrites the canary, which is why poison stayed silent. See
+    /// `s2_demote_stale_resident_extras`.)
     s2_smi: Vec<bool>,
     /// The S2 store set as `(vreg, start, end, reg, slot)` (GPR only).
     s2_spill_stores: Vec<(u32, u32, u32, u8, crate::compiler::regalloc::SpillSlot)>,
@@ -672,6 +676,87 @@ fn r1a_profitable_positions(
 /// decodable back to the exact slot.
 fn s2_poison_for(slot: crate::compiler::regalloc::SpillSlot) -> u64 {
     0xC0DE_0000_0000u64 | ((slot.0 as u64) << 4)
+}
+
+/// Smi fast path S2 — demote any S2 vreg whose `extra_oop_live` fact would
+/// make `emit_s2_spill_stores` copy a resident register that may no longer
+/// hold the vreg's value.
+///
+/// An exact fact `(v, p)` with `p >= v's interval end` is a DEOPT-ONLY
+/// consumer: `v` is bytecode-dead at `p` (its last real use is behind it),
+/// but an uncommon-trap site there still names `v`'s slot
+/// (`resolve_frame_loc`'s second disjunct), so the S2 store at `p` is the
+/// only thing that makes the slot current — and it stores from
+/// `v.resident_reg`, whose value is only `v`'s if NO OTHER interval was
+/// assigned the same resident register since `v`'s last def.
+///
+/// **P4 fix (the depth-3 spliced-block deopt abort,
+/// `it_tier1::depth3_deopt_in_block_in_callee_rebuilds_all_frames`).** The
+/// original predicate demoted only when a conflicting window SPANS `p`
+/// (`iv.start <= p && iv.end > p`), which misses a window that has already
+/// ENDED by `p` while the register still physically holds its value —
+/// nothing ever reloads `v` after the other window closes, because `v` has
+/// no defs there to write it back. Measured in the failing compile
+/// (`sumUp:` v0, cold spliced block): the loop counter `i` (v5, interval
+/// [7,11], resident x23) is named by the depth-3 trap at position 18 via an
+/// exact fact; the fused loop condition's boolean (v9, interval [11,12],
+/// SAME resident x23) refreshed x23 in between; v9's window does not span
+/// 18, so no demotion fired, and the trap-site store wrote the `true` OBJECT
+/// into `i`'s slot. The deopt then rebuilt the block frame with `e = true`
+/// and the re-executed `sum + e` failed the smi `+` — a non-unwinding abort
+/// out of `rt_uncommon_trap` in debug, `DNU #+ (receiver class True)` in
+/// release (P2's exact wild observation). This is also why
+/// `MACVM_S2_POISON=1` never named the reader: the trap-site store
+/// OVERWRITES the commit-time canary with the stale register, so the canary
+/// is gone by the time anything reads the slot.
+///
+/// The sound predicate: conflict iff the other resident-sharing window
+/// OVERLAPS `(own.start, p]` — i.e. it began by `p` (`iv.start <= p`, its
+/// def has run before the store) and it did not end before `v`'s own window
+/// began (`iv.end > own.start`, so `v`'s own defs cannot have overwritten
+/// it afterwards; windows are half-open, hence strict `>`). Windows
+/// entirely before `v`'s are harmless (`v`'s defs rewrite the register);
+/// windows entirely after `p` are harmless (their defs run after the
+/// store); in-window overlap cannot exist (`assign_residents` hands one
+/// register to disjoint windows only). Demotion (not a smarter store) is
+/// the right response: `v` is dead at `p`, so there is no register that
+/// still holds it — only restoring `commit`'s write-through makes the slot
+/// current.
+///
+/// Mainline logic, no platform input anywhere (pure interval/window
+/// arithmetic over shared code — this file is byte-identical to MACVM
+/// modulo one lint shim); whether a given compile TRIGGERS it depends on
+/// the resident-sharing layout regalloc happens to produce, which is why it
+/// surfaced only under this test's shape. Cherry-picks to MACVM as-is.
+/// Free function (not an `Emitter` method) so the regression test below can
+/// drive it over hand-built intervals with no assembler in the loop.
+fn s2_demote_stale_resident_extras(
+    s2_smi: &mut [bool],
+    intervals: &[crate::compiler::regalloc::LiveInterval],
+    extra_oop_live: &[(VReg, u32)],
+) {
+    for &(v, p) in extra_oop_live {
+        if !s2_smi[v.0 as usize] {
+            continue;
+        }
+        let own = intervals
+            .iter()
+            .find(|iv| iv.vreg == v)
+            .expect("an extra_oop_live vreg always has an interval");
+        if own.start <= p && own.end > p {
+            continue; // in-window: `assign_residents` guarantees exclusivity
+        }
+        if p < own.start {
+            continue; // pre-def: no store emits there (value bytecode-dead)
+        }
+        let rr = own.resident_reg.expect("s2 implies resident");
+        let conflict = intervals.iter().any(|iv| {
+            iv.vreg != v && iv.resident_reg == Some(rr) && iv.start <= p && iv.end > own.start
+        });
+        if conflict {
+            s2_smi[v.0 as usize] = false;
+        }
+    }
 }
 
 impl<'a> Emitter<'a> {
@@ -2905,29 +2990,7 @@ pub fn emit(
             }
         }
     }
-    for &(v, p) in &regalloc.extra_oop_live {
-        if !s2_smi[v.0 as usize] {
-            continue;
-        }
-        let own = regalloc
-            .intervals
-            .iter()
-            .find(|iv| iv.vreg == v)
-            .expect("an extra_oop_live vreg always has an interval");
-        if own.start <= p && own.end > p {
-            continue;
-        }
-        if p < own.start {
-            continue; // pre-def: no store emits there (value bytecode-dead)
-        }
-        let rr = own.resident_reg.expect("s2 implies resident");
-        let conflict = regalloc.intervals.iter().any(|iv| {
-            iv.vreg != v && iv.resident_reg == Some(rr) && iv.start <= p && iv.end > p
-        });
-        if conflict {
-            s2_smi[v.0 as usize] = false;
-        }
-    }
+    s2_demote_stale_resident_extras(&mut s2_smi, &regalloc.intervals, &regalloc.extra_oop_live);
     let s2_spill_stores: Vec<(u32, u32, u32, u8, crate::compiler::regalloc::SpillSlot)> = regalloc
         .intervals
         .iter()
@@ -3623,6 +3686,73 @@ mod tests {
     use crate::compiler::regalloc;
     use crate::runtime::vm_state::{VmOptions, VmState};
     use crate::runtime::JitMode;
+
+    /// REGRESSION (P4, the depth-3 spliced-block deopt abort): the S2
+    /// stale-resident demotion must catch a conflicting resident window
+    /// that ENDED before the extra fact's position, not only one that spans
+    /// it — see `s2_demote_stale_resident_extras`' own doc for the measured
+    /// failure this encodes. Pure and host-free by construction: the inputs
+    /// are hand-built `LiveInterval`s (no IR, no assembler, no VM), the
+    /// exact layout regalloc produced in the failing compile — the bug is
+    /// interval/window arithmetic and reproduces identically on any host.
+    #[test]
+    fn s2_demotes_stale_resident_for_post_interval_deopt_fact() {
+        use crate::compiler::regalloc::{Assignment, LiveInterval, SpillSlot};
+        let iv = |vreg: u32, start: u32, end: u32, slot: u16, rr: Option<u8>| LiveInterval {
+            vreg: VReg(vreg),
+            start,
+            end,
+            is_oop: true,
+            is_fp: false,
+            crosses_safepoint: true,
+            crosses_call: false,
+            assignment: Some(Assignment::Spill(SpillSlot(slot))),
+            resident_reg: rr,
+        };
+
+        // The measured failing layout (`sumUp:` v0): v5 = the loop counter
+        // `i`, interval [7,11], resident x23; v9 = the fused loop
+        // condition's boolean, interval [11,12], SAME resident x23; the
+        // depth-3 trap at position 18 names v5 via an exact fact. v9's
+        // window is over by 18 — the old spans-p predicate saw no conflict,
+        // and the trap-site store copied v9's `true` into v5's slot.
+        let intervals = vec![
+            iv(5, 7, 11, 4, Some(23)),
+            iv(9, 11, 12, 5, Some(23)),
+        ];
+        let mut s2 = vec![false, false, false, false, false, true, false, false, false, false];
+        s2_demote_stale_resident_extras(&mut s2, &intervals, &[(VReg(5), 18)]);
+        assert!(
+            !s2[5],
+            "a resident-sharing window that closed BEFORE the fact position still \
+             leaves the register stale — v5 must be demoted (the old spans-p \
+             predicate missed exactly this, and the S2 trap-site store then wrote \
+             the boolean into the loop counter's slot)"
+        );
+
+        // Must NOT demote — each case exercises one arm of the predicate.
+        // (a) In-window fact: `assign_residents` exclusivity covers it.
+        let mut s2a = vec![false, false, false, false, false, true, false, false, false, false];
+        s2_demote_stale_resident_extras(&mut s2a, &intervals, &[(VReg(5), 9)]);
+        assert!(s2a[5], "an in-interval fact needs no demotion");
+        // (b) Sharing window entirely BEFORE v's own: v's defs rewrite the
+        // register afterwards, so the register is v's again at any p.
+        let before = vec![iv(9, 1, 6, 5, Some(23)), iv(5, 7, 11, 4, Some(23))];
+        let mut s2b = vec![false, false, false, false, false, true, false, false, false, false];
+        s2_demote_stale_resident_extras(&mut s2b, &before, &[(VReg(5), 18)]);
+        assert!(s2b[5], "a window that closed before v's own defs is harmless");
+        // (c) Sharing window entirely AFTER the fact: its defs run after
+        // the store, so the store still reads v's value.
+        let after = vec![iv(5, 7, 11, 4, Some(23)), iv(9, 20, 25, 5, Some(23))];
+        let mut s2c = vec![false, false, false, false, false, true, false, false, false, false];
+        s2_demote_stale_resident_extras(&mut s2c, &after, &[(VReg(5), 18)]);
+        assert!(s2c[5], "a window that opens after the fact position is harmless");
+        // (d) A different register: no interaction at all.
+        let other_reg = vec![iv(5, 7, 11, 4, Some(23)), iv(9, 11, 12, 5, Some(22))];
+        let mut s2d = vec![false, false, false, false, false, true, false, false, false, false];
+        s2_demote_stale_resident_extras(&mut s2d, &other_reg, &[(VReg(5), 18)]);
+        assert!(s2d[5], "a window on a different resident register is harmless");
+    }
 
     /// Listing format: "<pc_off>  <hex_word>  <mnemonic> [<operands>]".
     fn mnemonic(l: &str) -> &str {
