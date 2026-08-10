@@ -1,4 +1,102 @@
-# MACVM inspired by Strongtalk
+# WINARMVM — Smalltalk, native on Windows ARM64
+
+A Strongtalk-lineage Smalltalk VM — two-tier engine: bytecode interpreter
+plus an adaptive optimizing JIT with type feedback, speculative inlining,
+and deoptimization — running **natively on Windows 11 ARM64**
+(`aarch64-pc-windows-msvc`). Created from [MACVM](https://github.com/albanread/MACVM),
+the macOS/Apple-Silicon original, on the premise its author set for this
+repo: *the Mac compiler is the seed, not the ceiling — different OS,
+different chip; we are using it to create the Windows compiler.* The
+AArch64 backend carried over; the OS layer (VirtualAlloc'd code cache with
+real icache maintenance, a Vectored Exception Handler decoding A64 `brk`,
+a hand-written non-unwinding AArch64 setjmp/longjmp, Win32 + WebView2 GUI
+shell) is this repo's own, and the compiler diverges where this system
+needs it to — each divergence marked and explained in place.
+
+**Status:** the suite runs **1069 passed / 0 failed / 13 ignored** (the 13
+are FFI, sprint P5 — the one unfinished port phase). JIT, uncommon traps,
+deopt, guest-fatal recovery, moving GC under compiled frames, and the
+live-HTML programming environment all work, all native — VM, JIT, and the
+WebView2 engine hosting the GUI are each PE-verified ARM64. The
+port-defect ledger is closed: no test is gated on a Windows-divergence
+claim.
+
+### Measured, on this machine (Snapdragon X / Oryon)
+
+Against **native Cog** — OpenSmalltalk's `win64ARMv8` Cog[Spur], the only
+other native-ARM64 Smalltalk VM Windows has — same checksummed workloads,
+same protocol (µs clock, 30 warm-ups, median of 41 samples), interleaved,
+no emulation term on either side:
+
+| bench | WINARMVM | Cog | margin |
+|---|---:|---:|---|
+| arith | 2,031 µs | 10,821 µs | 5.3× |
+| fib | 15,300 µs | 30,186 µs | 2.0× |
+| sieve | 304 µs | 573 µs | 1.9× |
+| dict | 426 µs | 730 µs | 1.7× |
+| alloc | 557 µs | 4,165 µs | 7.5× (2.2× vs Cog's best) |
+| **richards** | **1,932 µs** | **3,271 µs** | **1.69×** |
+| **deltablue** | **211 µs** | **357 µs** | **1.69×** |
+
+Seven for seven; the macro rows are the meaningful ones and the closest.
+Reproduce with [`scripts/cog-bench-squeak.st`](scripts/cog-bench-squeak.st)
+(the harness in Squeak dialect) — full tables, the same-protocol M4
+comparison (the M4 leads six rows at 1.4–1.8×; Oryon takes alloc, and the
+GUI's NEON Mandelbrot tile), and every measurement caveat live in
+[`docs/PERF.md`](docs/PERF.md).
+
+### Building & running on Windows
+
+Requirements: Windows 11 ARM64; Visual Studio ARM64 C++ build tools +
+Windows SDK; Rust via rustup (the toolchain is pinned by
+`rust-toolchain.toml`); Git for Windows (its bash also runs the `justfile`
+gates — `set windows-shell` is already configured); WebView2 Evergreen
+runtime (in-box on Win11-ARM).
+
+```sh
+cargo build --release
+target/release/macvm run world/bench/fib.mst --world world
+cargo run --release -p macvm-gui          # the Strongtalk-style environment (Win32 + WebView2)
+```
+
+Env flags are unchanged from MACVM (`MACVM_JIT=off|threshold=N` — the
+threshold never goes below 20, rule 1; `MACVM_TRACE=…`, `MACVM_GC_STRESS=…`).
+Gates: `just gate-p00` … `gate-p03` are the port ladder; `just diff-p03` is
+the JIT-vs-interpreter differential (zero differences, stdout and exit
+status, across three JIT modes).
+
+### The three repos
+
+| repo | platform | role |
+|---|---|---|
+| [MACVM](https://github.com/albanread/MACVM) | macOS / Apple Silicon | the original; `upstream` remote — portable fixes cherry-pick both ways (two compiler fixes found here already flow back) |
+| [WINVM](https://github.com/albanread/WINVM) | Windows / x86-64 | the first Windows port; its `MIGRATION.md` playbook seeded this one's OS layer |
+| **WINARMVM** (this repo) | **Windows / ARM64** | the Windows compiler grown from the MACVM seed |
+
+### Not ported (yet), by design
+
+FFI is sprint **P5** (the `winkb` Windows-API knowledge base replaces
+`cocoa_data`; the ARM64 argument classifier is scoped work), and with it
+the POSIX-backed world files (dns, sockets, posix_io) — `IoWorker` needs
+an IOCP/WSAPoll backend, since `kqueue` has no Windows twin. Permanently
+macOS-only and cleanly gated: the Cocoa bridge and AppKit GUI
+(`cocoa_gui`), Accelerate bindings, AVFoundation (`abc_player`), and the
+Metal game pane.
+
+The design of record — component disposition, the five OS seams, every
+measured correction (`Δ` entries), and the status log — is
+[`MIGRATION.md`](MIGRATION.md); the sprint ladder is Phase P in
+[`docs/SPRINTS.md`](docs/SPRINTS.md).
+
+---
+
+# The MACVM story — the seed this repo grew from
+
+*Everything below is the original macOS README, kept whole because it
+still describes ~95 % of this VM — the object model, the compiler, the
+world, the philosophy — in its author's own words. Read "macOS/Apple
+Silicon" as this repo's birthplace; the Windows deltas live in
+[`MIGRATION.md`](MIGRATION.md).*
 
 ## Motivation
 
@@ -538,6 +636,12 @@ specifically to avoid that trap):
 ./run-gui.sh      # the WKWebView Strongtalk-style environment (macvm-gui)
 ./run-cocoa.sh    # the native AppKit environment, written in Smalltalk (macvm-cocoa)
 ```
+
+> **Windows note:** on this repo the same `macvm-gui` crate builds the
+> Win32 + WebView2 shell — `cargo run --release -p macvm-gui` (release
+> matters; the dev-profile trap described above applies with full force).
+> `run-cocoa.sh`, the AppKit environment, and the Demos' game pane are
+> macOS-only and stay behind their gates.
 
 Both share the **Demos** menu (Breakout and the three Mandelbrots, including
 the 4-worker parallel dive); `./run-mandelvm.sh` runs the standalone
