@@ -98,7 +98,40 @@ The nine views, their order, the two verbs, the metrics, the docked
 Transcript: **identical to the Mac**. A screenshot of either should be
 recognisable as the same system wearing its host's clothes.
 
-### 2.2 Architecture — Smalltalk drives Win32 through the FFI
+### 2.2 The architecture, stated
+
+*The author's own formulation, 2026-08-10, and the sentence every later
+decision in this document answers to:*
+
+> **UI VM on the UI thread, messaging to a Smalltalk independent GUI
+> layer. All in Smalltalk, with COM and API.**
+
+Unpacked into its four commitments:
+
+1. **UI VM on the UI thread.** A second VM owns the main thread — the
+   thread Windows demands for window creation, the message loop, and every
+   `SendMessage`. It is a terminal, not an application: it holds handles
+   and pumps messages.
+2. **Messaging to the GUI layer.** The primary VM (the user's world, the
+   long-lived one) never touches a handle. It *messages* the UI VM —
+   copy-passed, asynchronous, the `#uiReq`/`#uiReply` protocol the workers
+   already carry. The two heaps stay strictly separate.
+3. **An INDEPENDENT GUI layer.** The GUI is its own body of Smalltalk in
+   its own world layer (`winui.list`), not a set of hooks bolted onto
+   application classes. It can be loaded, browsed, edited, and reasoned
+   about on its own terms — and a user can rewrite the Browser from inside
+   the Browser.
+4. **All in Smalltalk, with COM and API.** Both native surfaces are
+   first-class from Smalltalk: flat Win32 exports (§2.3) *and* COM
+   interfaces dispatched through vtables (§2.4). No Rust UI code beyond
+   the door trampoline and the loader that already exists.
+
+The consequence worth stating plainly: **Rust owns no widget, no layout,
+no view logic.** It owns the code cache, the GC, the JIT, one wndproc
+trampoline, and the FFI marshalling. Everything a user would call "the
+environment" is Smalltalk they can open and change while it runs.
+
+### 2.3 Architecture — Smalltalk drives Win32 through the FFI
 
 The Cocoa shell's architecture ports because it was designed around a
 seam, not around AppKit:
@@ -125,7 +158,65 @@ marshalling — so the classifier only needs to pass a `g`-class pointer,
 which it already models. Recorded here so P5's refusal list doesn't
 accidentally block WG.
 
-### 2.3 What is deliberately different from the Mac
+### 2.4 COM from Smalltalk — the vtable path
+
+The flat API alone cannot reach modern Windows: the file dialogs
+(`IFileOpenDialog`), taskbar progress (`ITaskbarList3`), shell items, DWM's
+richer surfaces, WIC imaging, and — should the Canvas ever want it —
+Direct2D/DirectWrite are all COM. The author's "with COM and API" says
+both surfaces are in scope, and **winkb makes COM the cheaper of the two**:
+46,250 interface methods, each with its **vtable index**, plus 79,208
+typed parameters and every IID. That is exactly and only what vtable
+dispatch needs.
+
+**COM is simpler from a VM than Objective-C was**, and worth spelling out
+because the Cocoa bridge's difficulty set a false expectation:
+
+| | Objective-C (cocoa_gui) | COM (here) |
+|---|---|---|
+| dispatch | `objc_msgSend`, selector→IMP at runtime, ABI varies by return shape | read vtable ptr at `[this+0]`, entry at `[vtable + 8*index]`, call it with `this` as the first argument. **One shape, always.** |
+| how the shape is known | live runtime introspection | winkb's `interface_methods.vtable_index` — static, already local |
+| exceptions | `NSException` unwinding through JIT frames — needed a whole `@try` shim in C | **none.** COM returns `HRESULT`. A failure is a number, not an unwind. The entire objc_shim problem does not exist. |
+| identity | `isa` pointers | `IUnknown` at slots 0/1/2 of every interface, universally |
+
+So `ComRef` is a small class:
+
+```smalltalk
+ComRef>>invoke: slot args: anArray retClass: aSymbol
+    "this-call: the interface pointer is argument 0; the target address is
+     read from the vtable at 8*slot. Both are plain integers by the time
+     the FFI trampoline sees them, so this needs no new marshalling."
+```
+
+with `doesNotUnderstand:` resolving a selector → (IID, vtable index,
+param classes) through winkb and caching it — **reusing S11's PIC
+machinery exactly as the Cocoa tier-2 bridge does** (`docs/FFI.md`'s Tier
+2 pattern; the design is already written, only its data source changes).
+An `HRESULT` < 0 raises a Smalltalk error carrying the code and the
+interface/method names; success answers the out-parameter.
+
+Three obligations this creates, named now rather than discovered:
+
+- **Apartment threading.** The UI VM's thread calls
+  `CoInitializeEx(NULL, COINIT_APARTMENTTHREADED)` at startup — STA,
+  because it owns windows — and `CoUninitialize` on the way down. The
+  primary VM never calls COM at all (commitment 2 above), which is what
+  keeps the apartment rules trivially satisfiable.
+- **Lifetime.** `AddRef`/`Release` are manual, and this VM has no
+  finalization yet (weak refs are the S22 stretch). The answer is the one
+  the Cocoa bridge already ships: a **scope/pool discipline** draining at
+  doit boundaries, plus explicit `release` for long-lived references. Not
+  a new mechanism — the same one, pointed at `IUnknown::Release` (slot 2).
+- **`HRESULT` is the error channel, everywhere.** No call site may ignore
+  it; the `invoke:` wrapper checks centrally so no individual binding can
+  forget.
+
+**COM enters at WG3 at the earliest** (the common controls are flat API;
+`ITaskbarList3` and the file dialogs are polish), so WG0–WG2 need none of
+it. But the classifier work is P5's and the shape is fixed now, so nothing
+about it is a surprise later.
+
+### 2.5 What is deliberately different from the Mac
 
 - **Labels under toolbar glyphs** (weakness #1). The Mac may adopt it back.
 - **No separate Outliner icon mystery**: the label says Outliner.
@@ -162,7 +253,7 @@ same reasoning that put CG3 early. Views arrive in usefulness order:
 Workspace+Browser make the environment *usable*, Debugger+Monitor make it
 *trustworthy*, Docs+Canvas make it *whole*. The gallery README's five
 "Notes for a port" map: shared Transcript → WG4; lazy views → WG4; two-VM
-split → architecture (§2.2), proven at WG1; live metrics → WG4; separate
+split → architecture (§2.2/§2.3), proven at WG1; live metrics → WG4; separate
 game windows → out of scope, greyed honestly.
 
 **What could sink it, named now:** (1) door latency — if a
@@ -186,5 +277,5 @@ not later; every custom-drawn element takes a DPI scale from day one.
 - **MacGamePane/D3D11/XAudio2** remain the recorded stretch; nothing in
   WG blocks on them.
 - The Mac may cherry-pick back: toolbar labels, the Workspace ghost line,
-  Monitor column priority, the visible Transcript grab bar — §2.3's
+  Monitor column priority, the visible Transcript grab bar — §2.5's
   fixes are platform-free ideas wearing Windows clothes first.
