@@ -12,9 +12,25 @@ so "is there a window and does it look right" stops being a human question.
    thread pumping the loop — asserted once at startup with
    `GetCurrentThreadId` / `GetWindowThreadProcessId`, not assumed.
 3. `MACVM_WINUI_CTL=<port>` + `gui connect` → `ping` → `pong`.
-4. `gui snap out.png` writes a PNG whose **dimensions equal the client
-   rect** (`GetClientRect` read through the FFI in the same session). A
-   file that merely exists is not evidence; the size is.
+4. `gui snap out.png` writes a PNG of the **window rect** — dimensions
+   equal to `GetWindowRect` read through the FFI in the same session, and
+   therefore *larger* than the client rect by exactly the frame
+   (measured here: client 900×600, window 916×639).
+
+   > **Corrected 2026-08-10, by looking at a shot rather than at its
+   > numbers.** This item originally demanded the PNG equal the CLIENT
+   > rect, and the first implementation satisfied it — client 900×600, PNG
+   > 900×600, gate green — while the image actually held the titlebar plus
+   > only the top 560 px of client, the rest silently cropped, because
+   > `PrintWindow` renders the whole window at (0,0) regardless of the
+   > bitmap's size. A dimensions-only assertion could never have caught
+   > it. The gate now checks the window rect (which is what
+   > `PrintWindow` produces) **and** a pixel: see item 4a.
+
+4a. The PNG's client-area origin pixel — at (frame-left, frame-top) —
+   equals `WinShell backgroundColorRef` (here `0xF3F3F3`, itself chosen
+   from the system theme, not hardcoded). Dimensions prove framing;
+   a pixel proves *content*, and only the pair is evidence.
 5. `gui doit "WinShell setTitle: 'WG1-OK'."` → `sleep` → the titlebar
    really changed, read back via `GetWindowTextW`.
 6. Clean shutdown: a doit posts `WM_CLOSE`; the window goes away, the loop

@@ -280,13 +280,144 @@ gate-wg0: gate-p05
     # gate item 5: the DB-absent skip is ANNOUNCED, never silent.
     grep -q 'SKIP WinUiProbeTests' /tmp/wg0_absent.txt
     # gate items 1-2: the ladder itself, rung by rung, from a doit.
-    cat world/90_winui_probe.mst > /tmp/macvm_wg0_probe.mst
+    #
+    # Read from winui.list rather than naming 90_winui_probe.mst, and that is
+    # not tidiness: WG1 promoted the arena and the FFI façade out of WinProbe
+    # into 91_winui_shell.mst, so the probe file ALONE compiles (90
+    # forward-declares WinArena/WinApi with empty bodies) and then fails at
+    # run time with `does not understand winkbAvailable`. The layer is two
+    # files now and this gate loads the layer, in the list's own order, so a
+    # third file cannot break it again.
+    grep -v '^#' world/winui.list | grep -v '^$' | sed 's|^|world/|' \
+        | xargs cat > /tmp/macvm_wg0_probe.mst
     echo 'WinProbe report.' >> /tmp/macvm_wg0_probe.mst
     ./target/debug/macvm run /tmp/macvm_wg0_probe.mst --world world | tee /tmp/wg0_ladder.txt
     grep -q 'IsWindow = false' /tmp/wg0_ladder.txt
     # gate item 4: world.list is untouched — the base world stays
     # byte-identical, which is what "winui.list is additive" means.
     git diff --quiet -- world/world.list
+
+# WG1 (docs/sprints/tests_wg1.md): a VISIBLE, Windows-11-styled window,
+# created by Smalltalk, owned by a VM on the process's real main thread,
+# pumped by Rust, closed cleanly — and every item of that proven by a
+# SCRIPT, because §3.1's capture channel exists precisely so "is there a
+# window and does it look right" stops being a human question.
+#
+# Nothing below asks anyone to look at anything. The window's dimensions
+# come back through the FFI in the same session that captures it, and the
+# PNG's own IHDR is compared against them: a file that merely exists is not
+# evidence, its size is.
+gate-wg1: gate-wg0
+    #!/usr/bin/env bash
+    set -euo pipefail
+    PORT=7649
+    SHOT=target/winui-wg1.png
+    cargo build --quiet
+    cargo build --quiet -p win_gui
+
+    # ── the in-language half, both DB states ──────────────────────────────
+    # Same concatenating shape gate-wg0 uses; the layer is loaded by
+    # tests.list (see its comment for the compile-time reason a layered
+    # world's tests cannot self-guard).
+    grep -v '^#' world/tests/tests.list | grep -v '^$' | sed 's|^|world/tests/|' \
+        | xargs cat > /tmp/macvm_wg1_tests.mst
+    ./target/debug/macvm run /tmp/macvm_wg1_tests.mst --world world | tee /tmp/wg1_present.txt
+    grep -q ', 0 failed' /tmp/wg1_present.txt
+    WINKB_DB=/nonexistent/windows_api.db ./target/debug/macvm run /tmp/macvm_wg1_tests.mst \
+        --world world | tee /tmp/wg1_absent.txt
+    grep -q ', 0 failed' /tmp/wg1_absent.txt
+    # The DB-absent skip is ANNOUNCED, never silent — for BOTH WG classes.
+    grep -q 'SKIP WinUiProbeTests' /tmp/wg1_absent.txt
+    grep -q 'SKIP WinUiShellTests' /tmp/wg1_absent.txt
+
+    # ── the crate's own tests + the headless stress items ─────────────────
+    # tests_wg1.md's stress rows that need a PROCESS rather than a slot in
+    # it_world (WG0's Δ 11: several VMs share one process there, in parallel
+    # threads, and a visible window with a message loop does not belong in a
+    # parallel harness). Open/close x10, snap-before-window, GetMessageW=-1
+    # forced for real, and a recovered guest fault leaving the VM usable.
+    cargo test --quiet -p win_gui
+    timeout 300 ./target/debug/macvm-winui.exe --selftest | tee /tmp/wg1_selftest.txt
+    grep -q 'SELFTEST OK' /tmp/wg1_selftest.txt
+    grep -q 'snap-before-window: ERR no window yet' /tmp/wg1_selftest.txt
+    grep -q "getmessage-minus-one: rc=-1 classify=Failed" /tmp/wg1_selftest.txt
+
+    # ── the window itself (gate items 1-7) ────────────────────────────────
+    rm -f "$SHOT" target/winui-wg1-titled.png /tmp/wg1_exit /tmp/wg1_app.txt
+    ( MACVM_WINUI_CTL=$PORT ./target/debug/macvm-winui.exe > /tmp/wg1_app.txt 2>&1; \
+      echo $? > /tmp/wg1_exit ) &
+    for i in $(seq 1 60); do
+        (exec 3<>/dev/tcp/127.0.0.1/$PORT) 2>/dev/null && break || sleep 0.5
+    done
+    ./target/debug/macvm rusttcl scripts/winui-gate.tcl | tee /tmp/wg1_gate.txt
+    cat /tmp/wg1_app.txt
+
+    # 1. a visible window exists and Win32 agrees.
+    grep -q 'WG1 ping pong' /tmp/wg1_gate.txt
+    grep -q 'WG1 iswindow true' /tmp/wg1_gate.txt
+    # 2. the same-thread invariant, asked of Win32 from BOTH ends.
+    grep -q 'WG1 threadinvariant true' /tmp/wg1_gate.txt
+    grep -q 'thread invariant HOLDS' /tmp/wg1_app.txt
+    # 5. the doit changed the REAL titlebar, read back with GetWindowTextW.
+    grep -q "WG1 title-after 'WG1-OK'" /tmp/wg1_gate.txt
+    # 7. DPI: the client rect IS the DIP size scaled by GetDpiForWindow/96.
+    CLIENT=$(grep '^WG1 client ' /tmp/wg1_gate.txt | cut -d' ' -f3,4)
+    EXPECT=$(grep '^WG1 expected ' /tmp/wg1_gate.txt | cut -d' ' -f3,4)
+    echo "client=$CLIENT expected=$EXPECT"
+    test "$CLIENT" = "$EXPECT"
+    # 4. the PNG's own dimensions equal that client rect. IHDR width and
+    #    height are the two big-endian u32s at byte offset 16.
+    test -s "$SHOT"
+    PNGDIM=$(od -An -tu1 -j16 -N8 "$SHOT" \
+        | awk '{printf "%d %d", ($1*16777216+$2*65536+$3*256+$4), ($5*16777216+$6*65536+$7*256+$8)}')
+    echo "png=$PNGDIM client=$CLIENT"
+    test "$PNGDIM" = "$CLIENT"
+    # ...and its PIXELS are the fill Smalltalk chose from the SYSTEM's theme.
+    # The writer emits stored-deflate blocks, so scanline 0 sits at a fixed
+    # offset: 8 signature + 25 IHDR + 8 IDAT header + 2 zlib + 5 stored-block
+    # header + 1 PNG filter byte = 49, then R,G,B,A. Reading it turns "the
+    # shot exists and is the right size" into "the shot shows the window this
+    # machine's AppsUseLightTheme asked for" — the dark-mode read's effect,
+    # checked in a file rather than in a variable.
+    BG=$(grep '^WG1 bg ' /tmp/wg1_gate.txt | cut -d' ' -f3)
+    WANT=$(awk -v c="$BG" 'BEGIN{printf "%d %d %d", c%256, int(c/256)%256, int(c/65536)%256}')
+    GOT=$(od -An -tu1 -j49 -N3 "$SHOT" | awk '{printf "%d %d %d", $1, $2, $3}')
+    echo "png-pixel=$GOT want(COLORREF $BG)=$WANT"
+    test "$GOT" = "$WANT"
+    # 6. clean shutdown: the loop ENDED, the process exited 0. Not killed.
+    for i in $(seq 1 60); do [ -f /tmp/wg1_exit ] && break || sleep 0.5; done
+    test "$(cat /tmp/wg1_exit)" = "0"
+    grep -q 'message loop ended, exit 0' /tmp/wg1_app.txt
+
+    # ── the loop outlives a VM fault (tests_wg1.md stress row 4) ──────────
+    # A fault injected at the END of openMain, so the window is fully real
+    # and fully shown when the VM falls over. P2 recovers, Rust's pump never
+    # learns it happened, and the control channel still brings the process
+    # down through exit 0 — which is D4's second reason, made a test.
+    for MODE in guest native; do
+        rm -f /tmp/wg1_fault_exit /tmp/wg1_fault.txt
+        ( MACVM_WINUI_CTL=$PORT MACVM_WINUI_FAULT=$MODE \
+            ./target/debug/macvm-winui.exe > /tmp/wg1_fault.txt 2>&1; \
+          echo $? > /tmp/wg1_fault_exit ) &
+        for i in $(seq 1 60); do
+            (exec 3<>/dev/tcp/127.0.0.1/$PORT) 2>/dev/null && break || sleep 0.5
+        done
+        printf 'gui connect %s\nputs "FAULT ping [gui ping]"\nputs "FAULT live [gui eval {WinShell isOpen}]"\ngui quit\n' \
+            "$PORT" > /tmp/wg1_fault.tcl
+        ./target/debug/macvm rusttcl /tmp/wg1_fault.tcl | tee /tmp/wg1_fault_gate.txt
+        cat /tmp/wg1_fault.txt
+        grep -q 'FAULT ping pong' /tmp/wg1_fault_gate.txt
+        grep -q 'FAULT live true' /tmp/wg1_fault_gate.txt
+        grep -q 'openMain raised' /tmp/wg1_fault.txt
+        for i in $(seq 1 60); do [ -f /tmp/wg1_fault_exit ] && break || sleep 0.5; done
+        test "$(cat /tmp/wg1_fault_exit)" = "0"
+    done
+
+    # world.list is still untouched: the base world stays byte-identical,
+    # which is what "winui.list is additive" means — WG1 added a second file
+    # to the LAYER and nothing to the world.
+    git diff --quiet -- world/world.list
+    echo "gate-wg1: OK"
 
 # P3 (tests_p03.md "Stress/negative tests") — the FLAKY-CATCHER. The
 # combined three-mode run, three consecutive times, because WINVM's

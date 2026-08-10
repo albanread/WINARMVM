@@ -2243,7 +2243,11 @@ fn main() {
     // Requests that land early simply queue — the listener wakes the UI
     // thread, and `waker()` resolves its target at notify time (the P4 bug
     // whose fix makes this safe), so nothing is lost to the startup race.
-    if let Some(rx) = control::start() {
+    if let Some(rx) = control::start(
+        "MACVM_GUI_CTL",
+        "macvm-gui",
+        std::sync::Arc::new(|| shell::waker().notify()),
+    ) {
         CTL.set(std::sync::Mutex::new(rx)).ok();
     }
 

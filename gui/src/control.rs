@@ -7,12 +7,25 @@
 //! read the PNG. This is that channel, ported to the shell seam so it serves
 //! both hosts from one implementation.
 //!
-//! Opt-in (`MACVM_GUI_CTL=<port>`), **loopback only**: a listener thread
+//! Opt-in (an env var naming a port), **loopback only**: a listener thread
 //! accepts one connection at a time from `macvm rusttcl`'s `gui` verb and
-//! forwards each request to the UI thread through the shell's existing wake
+//! forwards each request to the UI thread through the host's existing wake
 //! (`PostMessageW` on Windows, `performSelectorOnMainThread:` on macOS),
 //! where it runs alongside any other main-thread work. The listener thread
 //! never touches the window or the VM — it queues, wakes, and relays.
+//!
+//! **WINARM (WG1): this file is SHARED, not copied.** `win_gui`
+//! (`macvm-winui`, the Smalltalk-authored native shell) includes this exact
+//! source with `#[path]` rather than carrying a second listener, because two
+//! implementations of one wire protocol drift and the drift shows up as a
+//! script that works against one app and not the other. What WG1 changed to
+//! make that possible is the whole of the difference: the env var, the log
+//! prefix and the UI-thread wake are now PARAMETERS instead of
+//! `MACVM_GUI_CTL`, `"macvm-gui"` and `crate::shell::waker()`. The protocol,
+//! the framing, the `sleep`-answered-on-the-listener trick and the 20-second
+//! reply bound are untouched. `macvm-gui` keeps `MACVM_GUI_CTL` and
+//! `macvm-winui` takes `MACVM_WINUI_CTL`, so both stay independently
+//! drivable in one session.
 //!
 //! Protocol (both directions): `<len>\n<len bytes>`, one request in flight per
 //! connection — byte-identical to the Cocoa channel's, so the SAME rusttcl
@@ -94,15 +107,26 @@ fn write_frame(s: &mut TcpStream, body: &str) -> std::io::Result<()> {
     s.flush()
 }
 
-/// Start the listener if `MACVM_GUI_CTL` is set; answer the receiver the
-/// UI thread drains. `None` when the channel is off, which is the default —
+/// Start the listener if `env_var` names a port; answer the receiver the UI
+/// thread drains. `None` when the channel is off, which is the default —
 /// this is a debugging surface, not a feature, and it opens a socket.
-pub fn start() -> Option<Receiver<CtlReq>> {
-    let port: u16 = match std::env::var("MACVM_GUI_CTL") {
+///
+/// `app` prefixes the diagnostics so a session running both hosts can tell
+/// which one spoke. `wake` is the host's UI-thread poke, fired after every
+/// queued request; it must be safe to call from a foreign thread and safe to
+/// call before the window exists (`macvm-gui` reads its HWND at notify time
+/// for exactly that reason; `macvm-winui` posts a THREAD message, which needs
+/// no window at all).
+pub fn start(
+    env_var: &str,
+    app: &str,
+    wake: std::sync::Arc<dyn Fn() + Send + Sync>,
+) -> Option<Receiver<CtlReq>> {
+    let port: u16 = match std::env::var(env_var) {
         Ok(s) => match s.trim().parse() {
             Ok(p) => p,
             Err(_) => {
-                eprintln!("macvm-gui: MACVM_GUI_CTL={s} is not a port — control channel off");
+                eprintln!("{app}: {env_var}={s} is not a port — control channel off");
                 return None;
             }
         },
@@ -115,11 +139,11 @@ pub fn start() -> Option<Receiver<CtlReq>> {
     let listener = match TcpListener::bind(("127.0.0.1", port)) {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("macvm-gui: control channel could not bind 127.0.0.1:{port}: {e}");
+            eprintln!("{app}: control channel could not bind 127.0.0.1:{port}: {e}");
             return None;
         }
     };
-    eprintln!("macvm-gui: control channel on 127.0.0.1:{port} (rusttcl `gui connect {port}`)");
+    eprintln!("{app}: control channel on 127.0.0.1:{port} (rusttcl `gui connect {port}`)");
 
     let (tx, rx) = sync_channel::<CtlReq>(8);
     std::thread::spawn(move || {
@@ -155,7 +179,7 @@ pub fn start() -> Option<Receiver<CtlReq>> {
                     let _ = write_frame(&mut conn, "ERR gui is shutting down");
                     break;
                 }
-                crate::shell::waker().notify();
+                wake();
 
                 // Generous, but bounded: a capture of a large page can take a
                 // moment, and a hung UI thread must not hang the script

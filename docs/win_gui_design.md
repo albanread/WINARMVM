@@ -307,6 +307,26 @@ verbatim. The only WG1-specific decision is the env var's name, and
 `MACVM_WINUI_CTL` keeps the two apps independently drivable in one
 session.
 
+> **Addendum (WG1, measured).** The `snap` half of that paragraph is exactly
+> right and the `control.rs` half is not. `PrintWindow` +
+> `PW_RENDERFULLCONTENT` captured the Smalltalk-authored window on the first
+> attempt, in a process with no WebView2 in it — correct size, correct
+> pixels, no change to a line of it. `control.rs`, however, was **not**
+> shell-agnostic: it read `MACVM_GUI_CTL` by name and called
+> `crate::shell::waker()`. Both are now parameters (env var, log prefix, wake
+> closure), and with that done **neither file was copied**: `win_gui`
+> `#[path]`-includes `gui/src/control.rs` and `gui/src/shell/snap.rs`, so
+> there is one listener and one PNG writer serving both hosts, with a test in
+> `win_gui` that fails if either is ever re-implemented locally. Two
+> WG1-specific facts worth carrying forward: the wake is a **thread**
+> message (`PostThreadMessageW`), because this channel is armed before there
+> is a window and must survive an `openMain` that never returns — which needs
+> one `PeekMessageW` at startup, since a thread with no message queue silently
+> drops the first post; and `eval` answers **inline** with the real
+> `printString`, because unlike `macvm-gui` this host's VM is on the pump's
+> own thread. That last one is what turns "does it look right" into a script
+> that reads numbers instead of one that sleeps and hopes.
+
 **This is also how WG's on-screen gates get tested at all.** Every later
 sprint's "does it look right" question becomes a script: switch view,
 sleep, snap, read the PNG — the same loop that produced this design's

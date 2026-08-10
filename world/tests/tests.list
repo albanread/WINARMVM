@@ -84,5 +84,13 @@ tier1.mst
 # (FFI pragmas resolve at CALL time) and its tests are platformName-guarded
 # in 99_run_all.mst.
 ../90_winui_probe.mst
+# WINARM (WG1, docs/sprints/sprint_wg1_detail.md): the second half of the
+# same layer — WinArena, WinApi, WinShell. Loaded here for the identical
+# compile-time reason and in winui.list's own order (90 forward-declares
+# WinArena/WinApi with empty bodies; 91 reopens them and names WinRef back).
+# Nothing in either file executes at load time, which is what makes that
+# mutual reference safe rather than clever.
+../91_winui_shell.mst
 60_winui_probe_tests.mst
+61_winui_shell_tests.mst
 99_run_all.mst

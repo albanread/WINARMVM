@@ -1,0 +1,42 @@
+[package]
+name = "win_gui"
+version = "0.0.0"
+edition = "2021"
+description = "MACVM's Windows-native Smalltalk UI host — the message pump, and nothing else (docs/win_gui_design.md, sprint WG1)."
+license = "BSD-2-Clause"
+publish = false
+
+# `macvm-winui`, the name docs/win_gui_design.md §2 fixed before WG0 started.
+# The crate is `win_gui` and the binary is not; that asymmetry is the design's,
+# and matching `cocoa_gui`/`macvm-cocoa` exactly.
+[[bin]]
+name = "macvm-winui"
+path = "src/main.rs"
+
+[dependencies]
+# The VM itself. This binary boots ONE VM, on the process's real main thread,
+# and asks it to open a window — every Win32 call that makes a window is
+# Smalltalk's (world/91_winui_shell.mst), reached through the P5 FFI resolver.
+macvm = { path = ".." }
+
+# ── The Win32 surface Rust keeps ───────────────────────────────────────────
+# Deliberately tiny, and the list is the argument: WindowsAndMessaging for the
+# pump (GetMessageW/TranslateMessage/DispatchMessageW) and the two questions
+# the pump has to ask about its own window; Gdi + Xps only because the
+# INHERITED capture (`gui/src/shell/snap.rs`, included by `#[path]`) needs
+# them. There is no window creation, no class registration, no DWM, no DPI
+# call anywhere in this crate — D1 draws that line and this dependency list is
+# where it becomes checkable.
+#
+# `windows` 0.62 matches what `gui` already pins, so a workspace build shares
+# one copy of the crate rather than resolving two.
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.62"
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Storage_Xps",
+    # GetCurrentThreadId — the pump's half of the same-thread invariant.
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+]

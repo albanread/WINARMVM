@@ -101,7 +101,7 @@ const TABLE: &[VerbDoc] = &[
     },
     VerbDoc {
         name: "gui",
-        usage: "gui connect ?port? | ping | eval <src> | doit <src> | view <name> | snap <path> | sleep <ms>",
+        usage: "gui connect ?port? | ping | eval <src> | doit <src> | view <name> | snap <path> | sleep <ms> | quit",
         help: "Drive a running macvm-cocoa over its MACVM_COCOA_CTL control channel: run doits on its UI worker, switch views, capture window PNGs.",
     },
     VerbDoc {
@@ -455,6 +455,7 @@ fn verb_help(_vm: &mut Vm<'_>, args: &[Value]) -> TclResult<Value> {
 ///   gui view <name>      — switch the app's content view (sugar for a doit)
 ///   gui snap <path>      — capture the window's client area to a PNG
 ///   gui sleep <ms>       — pause app-side (lets async replies land)
+///   gui quit             — end the app's message loop (macvm-winui, WG1)
 fn verb_gui(_vm: &mut Vm<'_>, args: &[Value]) -> TclResult<Value> {
     let ctx = bridge::active_ctx();
     let sub = args[0].as_str();
@@ -474,6 +475,16 @@ fn verb_gui(_vm: &mut Vm<'_>, args: &[Value]) -> TclResult<Value> {
         }
         "ping" => gui_request(ctx, "ping").map(Value::new),
         "rebuild" => gui_request(ctx, "rebuild").map(Value::new),
+        // WINARM (WG1): the control channel's own exit path. WG1's window is
+        // closed by posting WM_CLOSE from a doit and the host's pump notices
+        // its window has gone — but `WM_DESTROY` -> `PostQuitMessage` is the
+        // wiring that needs the door WG2 builds, so until then a script must
+        // also be able to say "end the loop" directly, including when
+        // `openMain` never produced a window to close (see
+        // `sprint_wg1_detail.md`'s "closing is two events, not one").
+        // Answered by `macvm-winui`; the other two hosts report it unknown,
+        // which is the honest reply rather than a silent no-op.
+        "quit" => gui_request(ctx, "quit").map(Value::new),
         "game" => {
             let entry = arg.ok_or_else(|| TclError::runtime("usage: gui game <entry doit>"))?;
             gui_request(ctx, &format!("game {entry}")).map(Value::new)
@@ -501,7 +512,7 @@ fn verb_gui(_vm: &mut Vm<'_>, args: &[Value]) -> TclResult<Value> {
             gui_request(ctx, &format!("sleep {ms}")).map(Value::new)
         }
         other => Err(TclError::runtime(format!(
-            "gui: unknown subcommand '{other}' (connect/ping/rebuild/game/stopgame/gameclose/eval/doit/view/snap/sleep)"
+            "gui: unknown subcommand '{other}' (connect/ping/rebuild/game/stopgame/gameclose/eval/doit/view/snap/sleep/quit)"
         ))),
     }
 }

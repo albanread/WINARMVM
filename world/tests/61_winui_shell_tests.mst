@@ -1,0 +1,324 @@
+"61_winui_shell_tests.mst — WinUiShellTests, the headless half of WG1's
+ acceptance gate (docs/sprints/tests_wg1.md, 'Unit / in-language tests').
+ Exercises world/91_winui_shell.mst: WinArena's GC-stability contract, the
+ UTF-16 boundary in both directions, WinApi's constants and struct offsets,
+ WinShell's theme read and its no-window error.
+
+ WHAT IS DELIBERATELY NOT HERE: anything that opens a window. WG0's Δ 11
+ measured that several VMs share one process under `cargo test`, in parallel
+ threads, sharing one window-class namespace and one desktop — and a VISIBLE
+ window with a message loop is not a thing to create inside a parallel test
+ harness. Gate items 1-7 (the window, the pump, the thread invariant, the
+ snap, the title round-trip, the clean exit, the DPI arithmetic) live in the
+ `macvm-winui` binary's own gate, where there is exactly one process, one
+ thread and one window. This file is what remains once that line is drawn,
+ and drawing it is a decision, not an omission.
+
+ WHERE THE CLASSES COME FROM. They live in the conditional winui layer
+ (world/winui.list), not in world.list, so the base world stays
+ byte-identical. This file therefore needs BOTH layer files loaded first,
+ and world/tests/tests.list names `../90_winui_probe.mst` and
+ `../91_winui_shell.mst` immediately above this line for exactly that
+ reason: an unresolved capitalised name inside a method body is a COMPILE
+ error in this dialect and the guest has no `Smalltalk at: #WinShell` to
+ reach one dynamically, so a test file for a layered world cannot guard
+ itself at run time (WG0's Δ 6, inherited rather than re-litigated).
+
+ Runs ONLY on Windows (the platformName guard in 99_run_all.mst), loads
+ everywhere — an FFI pragma resolves at CALL time, so on macOS these are
+ inert definitions.
+
+ TWO SKIP LEVELS, both announced, never silent:
+   * NOT WINDOWS — the runner never calls us.
+   * NO DATABASE — windows_api.db is a ~90 MB machine-local artifact, not a
+     build input. Every constant, every struct offset and therefore the
+     arena itself (VirtualAlloc needs MEM_COMMIT) comes from it by design,
+     so without it those skip with a named reason and nothing fails. The one
+     test that needs neither it nor Win32 still runs."
+
+TestCase subclass: WinUiShellTests [
+
+    runAll [
+        "The no-window error path is pure Smalltalk — WinShell answers it
+         before it touches winkb, Win32 or the arena — so it runs whenever
+         this file runs at all."
+        self runTest: #testShellWithoutWindowFailsCleanly do: [ self testShellWithoutWindowFailsCleanly ].
+
+        WinApi winkbAvailable ifFalse: [
+            Transcript showCr:
+                '  SKIP WinUiShellTests (5 of 6) — windows_api.db absent on this machine.'.
+            Transcript showCr:
+                '       WG1 resolves every constant and every struct offset from it, and the'.
+            Transcript showCr:
+                '       arena itself needs MEM_COMMIT/PAGE_READWRITE to exist at all, so'.
+            Transcript showCr:
+                '       testArenaGivesStableAddresses, testUtf16InArena,'.
+            Transcript showCr:
+                '       testApiConstantsResolve, testMsgStructOffsets and'.
+            Transcript showCr:
+                '       testDarkModePreferenceIsReadNotInvented cannot run. The database is'.
+            Transcript showCr:
+                '       a machine-local artifact, not a build input; nothing here is broken.'.
+            ^self ].
+
+        self runTest: #testArenaGivesStableAddresses do: [ self testArenaGivesStableAddresses ].
+        self runTest: #testUtf16InArena do: [ self testUtf16InArena ].
+        self runTest: #testApiConstantsResolve do: [ self testApiConstantsResolve ].
+        self runTest: #testMsgStructOffsets do: [ self testMsgStructOffsets ].
+        self runTest: #testDarkModePreferenceIsReadNotInvented
+             do: [ self testDarkModePreferenceIsReadNotInvented ].
+    ]
+
+    "── WinArena: the rule WG0 remembered, now pinned ────────────────────"
+
+    testArenaGivesStableAddresses [
+        "WG0's Δ 5 as an assertion rather than a comment. A direct `Alien
+         new:` is GC-managed storage that a scavenge RELOCATES; arena memory
+         is VirtualAlloc'd and does not move, and every byte Win32 reads
+         lives there. Forcing a scavenge between the two reads is what makes
+         this a test of the property rather than a test of arithmetic.
+
+         The Alien is deliberately re-made from the address AFTER the
+         scavenge: an Alien wrapping a foreign address is a fixed number in
+         an object that may itself move, and re-deriving it proves the
+         ADDRESS survived, not that the wrapper did."
+        | a b marker |
+        a := WinArena alloc: 32.
+        b := WinArena alloc: 32.
+        self assert: a > 0.
+        self deny: a = b.
+        "Distinct, non-overlapping and 8-aligned — the bump allocator's whole
+         contract, and misalignment would fault a 64-bit struct write on
+         some paths and silently work on others."
+        self assert: b >= (a + 32).
+        self assert: a \\ 8 equals: 0.
+        self assert: b \\ 8 equals: 0.
+
+        marker := 16r123456789ABC.
+        WinArena i64At: a put: marker.
+        WinArena u32At: b put: 4294967295.
+
+        Smalltalk gcScavenge.
+        Smalltalk gcScavenge.
+
+        self assert: (WinArena i64At: a) equals: marker.
+        self assert: (WinArena u32At: b) equals: 4294967295.
+        self assert: (WinArena i32At: b) equals: -1.
+        "And a fresh allocation after a scavenge still lands inside the same
+         region — i.e. the arena's base itself did not move."
+        self assert: (WinArena alloc: 8) > b
+    ]
+
+    testUtf16InArena [
+        "The boundary, both ways. `asUtf16Alien` is pure conversion into
+         movable heap storage that may never cross the FFI; `nativeUtf16:`
+         is the copy into arena memory that may, and answers the ADDRESS
+         because Alien publishes no address accessor to the guest at all.
+         `stringFromUtf16At:units:` is WG1's addition: nothing until now read
+         text back OUT of a foreign buffer, and GetWindowTextW does.
+
+         The astral case is included because a window title is a UTF-8
+         String and U+1F600 is where a naive UTF-16 encoder produces two
+         plausible wrong answers (a lone code unit, or a mojibake pair)."
+        | plain addr back astral aaddr |
+        plain := 'macVM'.
+        addr := WinArena nativeUtf16: plain.
+        self assert: addr > 0.
+        "Little-endian code units, then the two-byte NUL."
+        1 to: 5 do: [ :i |
+            self assert: (WinArena u16At: addr + ((i - 1) * 2)) equals: (plain at: i) asInteger ].
+        self assert: (WinArena u16At: addr + 10) equals: 0.
+        back := WinArena stringFromUtf16At: addr units: 5.
+        self assert: back equals: plain.
+
+        "Memoised by value: the same literal must not consume the arena
+         twice (WinArena's own comment says why that matters more than
+         speed)."
+        self assert: (WinArena nativeUtf16: plain) equals: addr.
+
+        "Astral: U+1F600 is four UTF-8 bytes in, one surrogate PAIR across
+         the boundary, and the same four bytes back."
+        astral := String new: 4.
+        astral at: 1 put: 240 asCharacter.
+        astral at: 2 put: 159 asCharacter.
+        astral at: 3 put: 152 asCharacter.
+        astral at: 4 put: 128 asCharacter.
+        aaddr := WinArena nativeUtf16: astral.
+        self assert: (WinArena u16At: aaddr) equals: 16rD83D.
+        self assert: (WinArena u16At: aaddr + 2) equals: 16rDE00.
+        self assert: (WinArena stringFromUtf16At: aaddr units: 2) equals: astral.
+        self assert: ((WinArena stringFromUtf16At: aaddr units: 2) codePoints at: 1)
+             equals: 16r1F600.
+
+        "The scratch block is REUSED by contract — the second call clobbers
+         the first, which is why a caller keeping the address across calls
+         would be wrong and why titles use it while class names do not."
+        self assert: (WinArena scratchUtf16: 'one') equals: (WinArena scratchUtf16: 'two').
+        self assert: (WinArena stringFromUtf16At: (WinArena scratchUtf16: 'two') units: 3)
+             equals: 'two'
+    ]
+
+    "── WinApi: the numbers come from the database (D2) ──────────────────"
+
+    testApiConstantsResolve [
+        "Every constant WG1 names, asked for BY NAME. None of these is
+         transcribed anywhere in world/91: a hand-copied flag word does not
+         fault, it produces a window with the wrong style and no error
+         anywhere, which is the failure mode D2 exists to prevent.
+
+         The three signed ones are the point of the second half.
+         CW_USEDEFAULT, HKEY_CURRENT_USER and the PER_MONITOR_AWARE_V2
+         context are all C casts of negative ints, and each arrives with C's
+         own signedness — the only form that fits a SmallInt and therefore
+         the only form the FFI can marshal. HKEY_CURRENT_USER in particular
+         marshals sign-extended to 0xFFFFFFFF80000001, which IS the 64-bit
+         predefined key value; a 'helpfully' unsigned 0x80000001 would be a
+         different key and RegGetValueW would simply fail."
+        self assert: (WinApi constant: 'WS_OVERLAPPEDWINDOW') equals: 16rCF0000.
+        self assert: (WinApi constant: 'SW_SHOW') equals: 5.
+        self assert: (WinApi constant: 'DWMWA_USE_IMMERSIVE_DARK_MODE') equals: 20.
+        self assert: (WinApi constant: 'DWMWA_SYSTEMBACKDROP_TYPE') equals: 38.
+        self assert: (WinApi constant: 'DWMSBT_MAINWINDOW') equals: 2.
+        self assert: (WinApi constant: 'USER_DEFAULT_SCREEN_DPI') equals: 96.
+        self assert: (WinApi constant: 'WM_CLOSE') equals: 16.
+        self assert: (WinApi constant: 'WM_QUIT') equals: 18.
+        self assert: (WinApi constant: 'IDC_ARROW') equals: 32512.
+        self assert: (WinApi constant: 'CW_USEDEFAULT') equals: -2147483648.
+        self assert: (WinApi constant: 'HKEY_CURRENT_USER') equals: -2147483647.
+        self assert: (WinApi constant: 'DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2') equals: -4.
+
+        "An unknown name must NAME itself in the error — every time, not
+         once: `constant:` caches hits and must not cache misses, or the
+         second ask would answer a stale nil."
+        self assert: ((self constantErrorFor: 'NO_SUCH_WG1_CONSTANT')
+             includesSubstring: 'NO_SUCH_WG1_CONSTANT').
+        self assert: ((self constantErrorFor: 'NO_SUCH_WG1_CONSTANT')
+             includesSubstring: 'NO_SUCH_WG1_CONSTANT').
+
+        "HRESULT semantics, which every DWM call in WG1 depends on: failure
+         is exactly 'negative once narrowed'. E_INVALIDARG arrives from the
+         FFI zero-extended as 2147942487, and both `= 0` and `< 2^31` would
+         classify it wrongly."
+        self assert: (WinApi hresultOk: 0).
+        self deny: (WinApi hresultOk: 2147942487).
+        self assert: (WinApi i32: 2147942487) equals: -2147024809
+    ]
+
+    constantErrorFor: aName [
+        ^[ WinApi constant: aName. '<<no error>>' ]
+            on: Error do: [ :e | e messageText ]
+    ]
+
+    testMsgStructOffsets [
+        "MSG is the struct WG2's door will live inside, so its layout is
+         pinned here even though WG1's Rust half owns the only MSG that
+         actually exists. No offset is compared against a hardcoded number —
+         that would re-transcribe the header into the test and pin nothing.
+         What is asserted is that every query ANSWERS, that offsets strictly
+         increase in declaration order, and that the recorded SIZE agrees
+         with the recorded OFFSETS (two different database tables —
+         types.size_bits and struct_fields.byte_offset — so their agreement
+         is evidence rather than tautology).
+
+         Δ (WG1, measured): tests_wg1.md asks for `size = last offset + its
+         width`, which is the invariant WG0 found for WNDCLASSW. It does not
+         hold here and should not: MSG's last member is a POINT at offset 36,
+         POINT is 8 bytes, and MSG is 48 — 44 rounded up to the struct's
+         8-byte alignment. TAIL PADDING is exactly what `sizeOf:` exists to
+         report and what deriving a size from offsets would silently drop, so
+         the honest invariant is `lastOffset + width <= size` with the gap
+         smaller than the alignment. WNDCLASSW satisfies the stricter form
+         only because its last member is a pointer already at a multiple of
+         8; that was a coincidence of that struct, not a rule."
+        | names offs previous size last |
+        names := #('hwnd' 'message' 'wParam' 'lParam' 'time' 'pt').
+        offs := OrderedCollection new.
+        previous := -1.
+        names do: [ :f |
+            | o |
+            o := WinApi offsetOf: 'MSG' field: f.
+            self deny: o isNil.
+            self assert: o > previous.
+            previous := o.
+            offs add: o ].
+        size := WinApi sizeOf: 'MSG'.
+        last := (offs at: offs size) + (WinApi sizeOf: 'POINT').
+        self assert: last <= size.
+        self assert: size - last < 8.
+        self assert: size \\ 8 equals: 0.
+        "RECT is the struct WinShell actually reads, and it has no padding to
+         forgive: four LONGs, 16 bytes, exactly."
+        self assert: (WinApi sizeOf: 'RECT') equals: 16.
+        self assert: (WinApi offsetOf: 'RECT' field: 'left') equals: 0.
+        self assert: ((WinApi offsetOf: 'RECT' field: 'bottom')
+                        + 4) equals: (WinApi sizeOf: 'RECT')
+    ]
+
+    "── WinShell ─────────────────────────────────────────────────────────"
+
+    testDarkModePreferenceIsReadNotInvented [
+        "D3: the dark-mode value comes from the SYSTEM, not from a preference
+         this project invents. So the only honest assertions are about the
+         SHAPE of the answer — a REG_DWORD that is 0 or 1, or nil when the
+         value is not on this machine — and about the default when the read
+         fails being light. Asserting a particular value would be asserting
+         which theme the developer happened to be running.
+
+         The registry read is also the only thing in this layer that touches
+         a machine's configuration, and it must not raise when the key is
+         missing: `dwordAt:path:value:` answers nil, because a missing
+         preference is a normal state of the world."
+        | v absent |
+        v := WinShell appsUseLightTheme.
+        v isNil ifFalse: [
+            self assert: (v = 0 or: [ v = 1 ]).
+            self assert: WinShell systemPrefersDark equals: v = 0 ].
+        "Whatever the machine says, the answer is a Boolean and it agrees
+         with the brush the class would register."
+        self assert: (WinShell systemPrefersDark == true
+                        or: [ WinShell systemPrefersDark == false ]).
+        self assert: WinShell backgroundColorRef
+             equals: (WinShell systemPrefersDark ifTrue: [ 16r202020 ] ifFalse: [ 16rF3F3F3 ]).
+
+        "A value that certainly is not there answers nil rather than
+         raising, which is what makes 'light is the honest default' a
+         reachable path and not a comment."
+        absent := WinApi
+            dwordAt: (WinApi constant: 'HKEY_CURRENT_USER')
+            path: 'Software\Macvm\NoSuchKeyForWG1'
+            value: 'NoSuchValue'.
+        self assert: absent isNil
+    ]
+
+    testShellWithoutWindowFailsCleanly [
+        "Every window verb must answer a clean guest error NAMING itself
+         when there is no window — never a Win32 call on a null HWND.
+         SetWindowTextW(NULL, ...) was measured to answer TRUE and change
+         nothing, which is the worst of both worlds: no window, no error,
+         and a caller convinced it worked.
+
+         This test creates nothing and needs no database, which is why it is
+         above the winkb guard: `ensureOpen:` answers before anything below
+         it is consulted."
+        self assert: ((self shellErrorFor: [ WinShell setTitle: 'nope' ])
+             includesSubstring: 'setTitle:').
+        self assert: ((self shellErrorFor: [ WinShell title ]) includesSubstring: 'title').
+        self assert: ((self shellErrorFor: [ WinShell clientRect ]) includesSubstring: 'clientRect').
+        self assert: ((self shellErrorFor: [ WinShell close ]) includesSubstring: 'close').
+        self assert: ((self shellErrorFor: [ WinShell hwnd ]) includesSubstring: 'hwnd').
+        self assert: ((self shellErrorFor: [ WinShell windowThreadId ])
+             includesSubstring: 'windowThreadId').
+        "The message says what to do about it, because an error a user cannot
+         act on is a stack trace with better manners."
+        self assert: ((self shellErrorFor: [ WinShell close ]) includesSubstring: 'openMain').
+        "And the accessors that CAN answer without a window do, rather than
+         raising: a host asking 'is there a window yet' must not have to
+         catch an exception to find out."
+        self deny: WinShell isOpen.
+        self assert: WinShell hwndValue equals: 0
+    ]
+
+    shellErrorFor: aBlock [
+        ^[ aBlock value. '<<no error>>' ] on: Error do: [ :e | e messageText ]
+    ]
+]

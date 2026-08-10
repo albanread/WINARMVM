@@ -175,3 +175,137 @@ The window is visible, but nothing about proving it needs a human:
 
 Any WndProc other than `DefWindowProcW`; any control; any painting beyond
 what DWM does; menus; the primary VM; COM (WG3+).
+
+---
+
+> **Δ (2026-08-10, WG1 — BUILT; what measurement corrected).** The window is
+> real: 900×600 client at 96 DPI, title `MACVM — Windows` then `WG1-OK`,
+> created on tid *N* and pumped on tid *N*, both `DwmSetWindowAttribute` calls
+> `S_OK`, closed by a scripted `WM_CLOSE`, process exit **0**. `snap` produced
+> a 900×600 PNG whose first pixel is `243,243,243` — the light-theme fill this
+> machine's `AppsUseLightTheme` asked for. Twelve corrections, in the order
+> WG2 will meet them.
+>
+> 1. **D2's `register_hosted_worker(&mut vm)` is incoherent, and WG1 needs
+>    nothing in its place.** That call mints a worker entry **in a PRIMARY
+>    VM's registry** (CG1) and answers `None` when the receiver is not a
+>    primary — while the same section correctly says WG1 has **no primary
+>    VM**. There is nothing for a hosted worker to be hosted *by*. What D2
+>    actually wants — "this VM lives on the thread that called this, not on a
+>    spawned one" — is precisely what `VmHandle::boot` on `main` already is,
+>    so `macvm-winui` boots in place and stops there. `register_hosted_worker`
+>    comes back at WG4+, when commitment 2 has something worth messaging
+>    about. **WG2 should not reach for it either.**
+> 2. **A remembered HWND is not a window, and that cost the first clean
+>    shutdown.** `WinShell hwndValue` originally answered whatever the class
+>    variable held. `WM_CLOSE` → `DefWindowProcW` → `DestroyWindow` really did
+>    destroy the window, but the host asked, got a plausible handle back,
+>    concluded its window was alive and pumped an empty queue forever — a hang
+>    with no error anywhere. `hwndValue` now answers 0 unless `IsWindow` says
+>    otherwise, which is the same rule `WinRef>>isAlive` already stated and
+>    which WG2's dispatch will need on every handle it caches.
+> 3. **The pump must not ask the VM anything per message.** The first pump
+>    read `WinShell hwndValue` through `vm.eval` on every dispatched message —
+>    a parse, a compile and a send inside what will be a `WM_MOUSEMOVE` storm.
+>    Rust now reads the HWND once and asks Win32's own `IsWindow` thereafter.
+>    The general rule for WG2: the door crosses into Smalltalk because a
+>    message MEANS something; anything the pump merely needs to *know* about
+>    its own window, Win32 answers more cheaply than the VM can.
+> 4. **`gui/src/shell/win.rs::run` still has the −1 bug this sprint's own
+>    pitfall names.** `while GetMessageW(&mut msg, None, 0, 0).as_bool()` —
+>    and `BOOL(-1).as_bool()` is `-1 != 0`, i.e. TRUE. `macvm-gui` has shipped
+>    that loop since P4. WG1's pump classifies −1/0/other explicitly and has a
+>    unit test that asserts the naive predicate's wrongness so nobody
+>    "simplifies" it back; forcing the −1 for real (`GetMessageW` filtered to
+>    a dead HWND) confirms `rc = -1`. **The WebView2 host still needs the same
+>    fix** and it is not WG1's to make.
+> 5. **`AdjustWindowRectEx` (D3's DPI plan) is the wrong tool twice** — it is
+>    DPI-ignorant (its DPI-aware twin wants the DPI you are trying to
+>    discover), and it describes the frame the non-client metrics imply rather
+>    than the one DWM actually draws, which on Windows 11 differ. `applyDips`
+>    MEASURES instead: create, read the window rect and the client rect, grow
+>    the window by exactly the difference. One API fewer, no constant, and it
+>    makes gate item 7 an equality (`client == DIP × dpi/96`) rather than an
+>    approximation.
+> 6. **tests_wg1's `size = last field's offset + its width` does not hold for
+>    `MSG`, and should not.** `MSG.pt` is a `POINT` (8 bytes) at offset 36 and
+>    `MSG` is 48 — 44 rounded up to the struct's alignment. TAIL PADDING is
+>    exactly what `sizeOf:` exists to report and what deriving a size from
+>    offsets silently drops. The honest invariant is `lastOffset + width <=
+>    size` with the gap below the alignment. `WNDCLASSW` satisfied the
+>    stricter form only because its last member is a pointer already at a
+>    multiple of 8 — a coincidence of that struct, not a rule, and WG0's Δ 3
+>    should be read that way from now on.
+> 7. **§3.1's "lift `control.rs` wholesale (it is already shell-agnostic)" is
+>    false; `snap`'s claim is true.** `control.rs` reads `MACVM_GUI_CTL` and
+>    calls `crate::shell::waker()` — two hard couplings to the WebView2 host.
+>    Both became parameters (env var, log prefix, wake closure), after which
+>    BOTH files are **`#[path]`-included by the new crate rather than copied**:
+>    one listener, one PNG writer, two hosts, and a test in `win_gui` that
+>    fails if either is ever re-implemented locally. `snap` needed no change at
+>    all — `PrintWindow` + `PW_RENDERFULLCONTENT` captured a Smalltalk window
+>    in a process with no WebView2 in it, first try, correct size and correct
+>    pixels. §3.1's reasoning for that choice was right.
+> 8. **`PostThreadMessageW` needs a queue that does not exist yet.** The
+>    control channel is armed BEFORE Smalltalk makes a window — deliberately,
+>    because that is what keeps the app drivable when `openMain` fails — and a
+>    thread that has never called a message function has no message queue, so
+>    the first wake would be dropped. One `PeekMessageW` at startup creates it.
+>    A window message (what `macvm-gui` posts) would have had the same problem
+>    for a different reason; a thread message has no window to be null.
+> 9. **`gui quit` did not exist.** The "closing is two events" pitfall says
+>    WG1 "posts `WM_QUIT` from the control channel's own exit path", but
+>    `macvm rusttcl`'s `gui` verb had no subcommand that could say it. One
+>    line in `src/rusttcl/verbs.rs`; the other two hosts answer `ERR unknown
+>    control verb`, which is the honest reply rather than a silent no-op. The
+>    normal close path is still `WM_CLOSE` from a doit, with the host's pump
+>    noticing its window has gone — that branch is WG1's stand-in for the
+>    `WM_DESTROY` → `PostQuitMessage` wiring **WG2 should delete when the door
+>    lands**.
+> 10. **The control channel's `eval` answers INLINE here, and that is what
+>     makes the gate a script.** `macvm-gui` can only reply "OK submitted"
+>     because its VM is on a worker thread; `macvm-winui`'s VM is on the
+>     pump's own thread, so `eval` returns the real `printString`. Every
+>     number in gate items 1–7 — the client rect, the DPI, the HRESULTs, the
+>     title read back through `GetWindowTextW` — comes back over the wire in
+>     the same session that captures the PNG. WG3+ gates inherit this and
+>     should prefer `eval` over `sleep`-and-hope.
+> 11. **Mica "took" is not Mica "visible", and the HRESULT is not the reason.**
+>     Both attributes returned `S_OK` on this build; rounded corners and the
+>     system-themed titlebar are there. The backdrop is not, because the
+>     client area is filled opaquely by the class's background brush and DWM
+>     draws Mica *behind* the window. Making it show through is a painting
+>     decision (WG3/WG4), not another DWM call — recorded so nobody re-checks
+>     the HRESULT looking for a bug that is not there. The brush is not waste:
+>     it is read from `AppsUseLightTheme`, so the capture's pixels
+>     (`243,243,243` here) are a machine-checkable statement about the theme
+>     read, and the gate checks them.
+> 12. **Gate item 8 cannot hold literally, because item 27 of the same
+>     document mandates a new test file.** Measured: world **7650 → 7723**
+>     with the database present and **7526 → 7535** without it, **0 failed**
+>     in both; Rust unchanged. The invariant that means something is "nothing
+>     lost, nothing failing", not a frozen integer — and WG0's own numbers
+>     should be read the same way.
+> 13. **`winui.list` became two files and that broke `gate-wg0`.** Its ladder
+>     step ran `cat world/90_winui_probe.mst` on its own, which after the
+>     promotion still COMPILES (90 forward-declares `WinArena`/`WinApi` with
+>     empty bodies) and then dies at run time with `does not understand
+>     winkbAvailable` — a failure that only appears when the file is loaded
+>     ALONE, i.e. never in the test suite and always in that one gate. The
+>     recipe now reads `winui.list` and concatenates in the list's own order,
+>     so **WG2's third file cannot break it a second time**; anything else
+>     that names a layer file directly should do the same.
+>
+> Two non-corrections worth recording. **Every number WG1 needed was in the
+> database**, including the ones that look like macros rather than constants:
+> `DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2` (−4),
+> `HKEY_CURRENT_USER` (−2147483647, which marshals sign-extended to the real
+> 64-bit `0xFFFFFFFF80000001`), `IDC_ARROW`, `DWMSBT_MAINWINDOW`,
+> `USER_DEFAULT_SCREEN_DPI` — so D2's "never transcribe a header number" held
+> for all of WG1, and `dwmapi.dll` resolved through exactly the path `user32`
+> does. And **P2's recovery does what D4 assumed**: a forced guest `error:`
+> and a forced ACCESS_VIOLATION, both injected at the end of `openMain` with
+> the window fully shown, were recovered by the VM while the pump — which
+> never learned either happened — kept the window live and answered the
+> control channel, exiting 0 on request. That is D4's second reason, measured
+> rather than argued.

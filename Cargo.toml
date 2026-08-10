@@ -1,5 +1,12 @@
 [workspace]
-members = [".", "gui", "image_store", "ffi_gen"]
+members = [".", "gui", "image_store", "ffi_gen", "win_gui"]
+# WINARM (WG1): `win_gui` joins — the Windows-native Smalltalk UI's host
+# (`macvm-winui`, docs/win_gui_design.md §2/§3 row WG1). It is a NON-default
+# member like every GUI in this tree, so a bare `cargo build`/`cargo test` at
+# the top still builds and tests `macvm` alone and never links a window; build
+# it explicitly with `cargo build -p win_gui`. Its only dependencies are
+# `macvm` itself and the same `windows` 0.62 `gui` already pins, so nothing
+# here changes what the default members resolve to.
 # WINARM (P4 D1): `gui` has rejoined — its shell seam now exists (`gui/src/
 # shell/`: Win32 + WebView2 on Windows, Cocoa/WKWebView on macOS —
 # MIGRATION.md §2). `cocoa_gui` and `abc_player` are AppKit / AVFoundation and

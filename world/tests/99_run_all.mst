@@ -66,6 +66,14 @@ TestRunner run: ObjectProtocolGapsTests.
    before the test file and for a compiler reason spelled out there. Inside
    the class a SECOND announced skip covers windows_api.db being absent —
    WG0 takes every constant and struct offset from it by design.
+ - WinUiShellTests: `== #windows` — WG1's headless half (WinArena's
+   GC-stability contract, the UTF-16 boundary both ways, WinApi's
+   constants and struct offsets, WinShell's theme read and its no-window
+   error). Same layer, same two skip levels. Everything about WG1 that
+   needs a WINDOW is in the `macvm-winui` binary's own gate instead: WG0's
+   Δ 11 measured that several VMs share one process here, in parallel
+   threads, and a visible window with a message loop does not belong in a
+   parallel test harness.
 
  Guarded here rather than by dropping files from tests.list, because the
  files LOAD fine everywhere — only running them touches FFI — and the
@@ -91,6 +99,7 @@ TestRunner run: EditorSessionTests.
 Smalltalk platformName ~~ #windows ifTrue: [ TestRunner run: PosixIoTests ].
 Smalltalk platformName == #windows ifTrue: [ TestRunner run: WinIoTests ].
 Smalltalk platformName == #windows ifTrue: [ TestRunner run: WinUiProbeTests ].
+Smalltalk platformName == #windows ifTrue: [ TestRunner run: WinUiShellTests ].
 TestRunner run: IoStreamTests.
 TestRunner run: ScaledDecimalTests.
 Smalltalk platformName ~~ #windows ifTrue: [ TestRunner run: SocketTests ].

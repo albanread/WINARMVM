@@ -32,9 +32,16 @@ backend) and the winsock lifecycle. Both are named in
 **In progress: [Phase WG](docs/win_gui_design.md)** — a Windows-native
 environment *written in Smalltalk*, the way the Mac one is: UI VM on the
 UI thread, messaging an independent Smalltalk GUI layer, driving Win32 and
-COM through the FFI. WG0 has landed — a guest Smalltalk doit now registers
-a window class from winkb-queried struct offsets, creates a real window
-and destroys it.
+COM through the FFI. WG0 and WG1 have landed: `macvm-winui` boots a VM on
+the process's main thread, layers `world/winui.list`, and a guest Smalltalk
+doit registers a window class from winkb-queried struct offsets, opens a
+**visible** Windows-11 window — Mica backdrop attribute, system-themed
+titlebar, per-monitor-V2 DPI, all three set from Smalltalk through
+`dwmapi` — and closes it cleanly. Rust owns the message pump and nothing
+else. The window is scriptable rather than lookable-at: `MACVM_WINUI_CTL`
+arms the same control channel the web GUI uses, so `just gate-wg1` opens
+it, reads its client rect back through the FFI, captures a PNG and checks
+the PNG's own dimensions and pixels against it.
 
 ### Measured, on this machine (Snapdragon X / Oryon)
 

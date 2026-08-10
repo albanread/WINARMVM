@@ -11,8 +11,18 @@
 # belong to cocoaui.list and 01-84 to the base world (verify with `ls
 # world/`), and starting the Windows layer at 90 leaves both alone.
 #
-# From WG1 this is what the hosted main-thread UI VM loads at boot, the way
-# cocoa_gui/src/boot.rs loads cocoaui.list. WG0 has no binary yet, so the
-# layer is loaded by the world test run and by anyone driving the probe from
-# the CLI.
+# From WG1 this is what the main-thread UI VM loads at boot, the way
+# cocoa_gui/src/boot.rs loads cocoaui.list — `win_gui/src/main.rs` calls
+# `VmHandle::load_list` on this file. It is still also loaded by the world
+# test run and by anyone driving the probe or the shell from the CLI.
+#
+# ORDER: numeric, and it has to stay that way for a reason worth stating.
+# 90 defines WinProbe, whose bodies name WinArena and WinApi; 91 defines
+# those two plus WinShell, whose bodies name WinProbe's WinRef. The
+# reference runs BOTH ways, so no ordering of these two files can make
+# every name already exist — which is why 90 forward-declares WinArena and
+# WinApi with empty bodies and 91 reopens them (WG0's Δ 7, one file
+# further). Nothing here executes at load time, so a body compiled against
+# an empty class runs only once the real one has landed.
 90_winui_probe.mst
+91_winui_shell.mst

@@ -1,0 +1,1168 @@
+"91_winui_shell.mst — WG1, the window and the materials
+ (docs/win_gui_design.md §2.1/§2.2, docs/sprints/sprint_wg1_detail.md).
+ Loaded via world/winui.list, AFTER 90_winui_probe.mst, which forward-
+ declares the two classes promoted here (see that file's header).
+
+ WG0 proved handles. WG1 puts a REAL window on the screen — Mica backdrop,
+ dark-mode-aware titlebar, correct DPI — created by Smalltalk, owned by a UI
+ VM on the process's main thread, with Rust holding only the message pump.
+
+ ── D1: who owns what ────────────────────────────────────────────────────
+   window class, creation, styles, title, DPI, the DWM calls .. HERE
+   GetMessageW/TranslateMessage/DispatchMessageW ............. win_gui (Rust)
+   what each message MEANS .................................. WG2, not yet
+
+ Rust holds the pump for the three reasons D4 states — it must run before
+ this file has loaded, it must survive a guest fault, and GetMessageW blocks
+ where a Smalltalk `[true] whileTrue:` would starve the control channel.
+ Nothing below opens the WndProc door: DefWindowProcW answers every message
+ and WG2 owns that risk entirely.
+
+ ── Three classes, one seam each ─────────────────────────────────────────
+   WinArena  GC-stable foreign memory + the UTF-16 boundary. Promoted out
+             of WG0's WinProbe, which now delegates to it: there is ONE
+             arena per VM and one place that knows a scavenge moves things.
+   WinApi    the FFI façade — every binding, every winkb constant, every
+             struct offset. No policy: it answers what Win32 and the
+             database say.
+   WinShell  the window's Smalltalk owner. The only class here that has an
+             opinion about what a window should look like.
+
+ ── What measurement corrected in this file's own plan ───────────────────
+ * D3 says `SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)`, and
+   winkb carries DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 as -4 — a
+   `HANDLE` spelled as a cast negative, which marshals to the identical
+   register bits the header's (DPI_AWARENESS_CONTEXT)-4 would. It is asked
+   for by name like every other constant; nothing here transcribes -4.
+ * `AdjustWindowRectEx` is NOT how this file sizes the window. It is
+   DPI-ignorant (its DPI-aware twin needs the DPI you are trying to
+   discover) and it models a frame DWM may not actually draw. `applyDips`
+   MEASURES the frame instead — create, read the window rect and the client
+   rect, and grow the window by exactly the difference — which is
+   DPI-correct by construction and makes the gate's `client = DIP * dpi/96`
+   an equality rather than an approximation.
+ * HKEY_CURRENT_USER arrives from the database as -2147483647, i.e. C's own
+   `(LONG)0x80000001`, and marshals sign-extended to 0xFFFFFFFF80000001 —
+   which IS the 64-bit predefined key value. The signedness rule WG0 found
+   for CW_USEDEFAULT holds for the registry roots too."
+
+"── WinArena ─────────────────────────────────────────────────────────────
+ One VirtualAlloc'd region per VM, bump-allocated, never reclaimed.
+
+ WG0's Δ 5 is the whole reason I exist: a direct `Alien new:` is ordinary
+ GC-managed storage that a scavenge RELOCATES, so its address may never
+ cross the FFI (world/61a's NativeBuffer rule) — and `Alien` publishes no
+ address accessor to the guest at all, so a conversion answering an Alien
+ can never serve Win32 by itself. Every byte Win32 reads — a WNDCLASSW, a
+ class name, a window title, a RECT it writes back into — is here.
+
+ Two allocation disciplines, because WG1 found WG0's single one
+ insufficient:
+   * `alloc:` — permanent. Class names, structs that outlive a call.
+   * `scratchUtf16:` — a fixed, REUSED block for transient strings. A
+     window title changes; memoising every title into a bump allocator
+     that never reclaims is a slow leak with a cliff at the end of the
+     region, which is exactly what WG0's own comment predicted WG1 would
+     have to answer."
+Object subclass: WinArena [
+    <classVars: Base Next Limit Utf16Cache ScratchBase ScratchBytes>
+
+    WinArena class >> bytes ^ <Integer> [
+        "256 KiB. WG0 used 64; the point is still stability, not capacity,
+         but a shell with a class name, a WNDCLASSW, two DWM cells, a RECT,
+         a registry cell and a title buffer wants headroom that a probe did
+         not."
+        ^262144
+    ]
+
+    WinArena class >> scratchBytes ^ <Integer> [ ^8192 ]
+
+    WinArena class >> base ^ <Integer> [
+        "The region's address, allocating it on first use. Answers the same
+         number for the life of the VM, which is also what makes it a sound
+         per-VM discriminator for window-class names (WG0's Δ 11)."
+        | addr |
+        Base isNil ifTrue: [
+            addr := WinApi
+                virtualAlloc: 0
+                size: self bytes
+                type: ((WinApi constant: 'MEM_COMMIT') bitOr: (WinApi constant: 'MEM_RESERVE'))
+                protect: (WinApi constant: 'PAGE_READWRITE').
+            (addr isNil or: [ addr = 0 ]) ifTrue: [
+                ^self error: 'WinArena: VirtualAlloc of the ' , self bytes printString ,
+                    '-byte arena failed (GetLastError ' , WinApi lastError printString , ')' ].
+            Base := addr.
+            Next := 0.
+            Limit := self bytes ].
+        ^Base
+    ]
+
+    WinArena class >> alloc: nBytes <Integer> ^ <Integer> [
+        "The ADDRESS of nBytes of zeroed, 8-aligned, GC-stable storage.
+         VirtualAlloc zero-fills its pages and nothing here ever re-uses a
+         block, so the zeroing holds — which is what lets a struct's unset
+         members (hIcon, lpszMenuName, a RECT before Win32 writes it) be
+         reliably NULL without a memset this dialect does not have."
+        | base off end |
+        base := self base.
+        off := Next.
+        end := off + nBytes.
+        end > Limit ifTrue: [
+            ^self error: 'WinArena: exhausted (' , Limit printString , ' bytes, ' ,
+                off printString , ' used, ' , nBytes printString , ' wanted)' ].
+        Next := end + ((8 - (end \\ 8)) \\ 8).
+        ^base + off
+    ]
+
+    WinArena class >> used ^ <Integer> [ ^Next isNil ifTrue: [ 0 ] ifFalse: [ Next ] ]
+
+    WinArena class >> release [
+        "Give the region back and forget every address derived from it. Any
+         Alien still wrapping one of those addresses is now dangling, and any
+         HWND whose class name lived here is now registered against a string
+         that no longer exists — this is a teardown verb for a test that
+         wants a clean slate, not a general-purpose free."
+        Base isNil ifFalse: [
+            WinApi virtualFree: Base size: 0 type: (WinApi constant: 'MEM_RELEASE').
+            Base := nil. Next := nil. Limit := nil.
+            Utf16Cache := nil. ScratchBase := nil. ScratchBytes := nil ].
+        ^self
+    ]
+
+    "── the UTF-16 boundary ──────────────────────────────────────────────"
+
+    WinArena class >> nativeUtf16: aString <String> ^ <Integer> [
+        "A permanent, GC-stable copy of aString as NUL-terminated UTF-16LE;
+         answers its ADDRESS. Memoised by string value — not as an
+         optimisation but because the caller is usually a class name that
+         Win32 keeps a pointer to forever, and re-encoding it on every
+         registration would consume the arena a few hundred bytes at a time.
+         The cache is safe only because these strings are literals; a caller
+         that MUTATED one it had already passed here would get the old
+         bytes, which is why nothing does."
+        | src n addr dst hit |
+        Utf16Cache isNil ifTrue: [ Utf16Cache := Dictionary new ].
+        hit := Utf16Cache at: aString ifAbsent: [ nil ].
+        hit isNil ifFalse: [ ^hit ].
+        src := aString asUtf16Alien.
+        n := src size.
+        addr := self alloc: n.
+        dst := Alien forAddress: addr size: n.
+        1 to: n do: [ :i | dst byteAt: i put: (src byteAt: i) ].
+        Utf16Cache at: aString put: addr.
+        ^addr
+    ]
+
+    WinArena class >> scratchUtf16: aString <String> ^ <Integer> [
+        "aString as UTF-16LE in a REUSED block — for a string Win32 reads
+         once and does not retain (a window title, a registry value name).
+         Every call clobbers the previous one, which is the contract: the
+         address is valid until the next call, and callers that need
+         otherwise ask for `nativeUtf16:`."
+        | src n dst |
+        ScratchBase isNil ifTrue: [
+            ScratchBase := self alloc: self scratchBytes.
+            ScratchBytes := self scratchBytes ].
+        src := aString asUtf16Alien.
+        n := src size.
+        n > ScratchBytes ifTrue: [
+            ^self error: 'WinArena: ' , n printString , ' bytes of UTF-16 will not fit the ' ,
+                ScratchBytes printString , '-byte scratch block' ].
+        dst := Alien forAddress: ScratchBase size: ScratchBytes.
+        1 to: n do: [ :i | dst byteAt: i put: (src byteAt: i) ].
+        ^ScratchBase
+    ]
+
+    WinArena class >> nativeAscii: aString <String> ^ <Integer> [
+        "The narrow twin, needed where Win32 still takes a PSTR —
+         GetProcAddress's symbol name, which is ASCII by definition."
+        | n addr dst |
+        n := aString size + 1.
+        addr := self alloc: n.
+        dst := Alien forAddress: addr size: n.
+        1 to: aString size do: [ :i | dst byteAt: i put: (aString at: i) asInteger ].
+        dst byteAt: n put: 0.
+        ^addr
+    ]
+
+    WinArena class >> stringFromUtf16At: addr <Integer> units: n <Integer> ^ <String> [
+        "The inverse of `String>>asUtf16Alien`, reading n UTF-16LE code units
+         out of foreign memory and answering a UTF-8 String — which is what
+         a String is in this dialect (world/83 decodes one as UTF-8, and
+         pretending otherwise is what a text layer is for).
+
+         Surrogate pairs are recombined; a LONE surrogate is passed through
+         as its own code point rather than raising, because this decodes what
+         Win32 actually handed back and Win32's UTF-16 is not guaranteed
+         well-formed. GetWindowTextW's own output is, but a general reader
+         that raises on the first oddity is a reader nobody can use."
+        | out i hi lo cp |
+        out := OrderedCollection new.
+        i := 0.
+        [ i < n ] whileTrue: [
+            hi := self u16At: addr + (i * 2).
+            cp := hi.
+            (hi >= 16rD800 and: [ hi <= 16rDBFF and: [ i + 1 < n ] ]) ifTrue: [
+                lo := self u16At: addr + ((i + 1) * 2).
+                (lo >= 16rDC00 and: [ lo <= 16rDFFF ]) ifTrue: [
+                    cp := 16r10000 + ((hi - 16rD800) bitShift: 10) + (lo - 16rDC00).
+                    i := i + 1 ] ].
+            self utf8Of: cp into: out.
+            i := i + 1 ].
+        ^self stringFromBytes: out
+    ]
+
+    WinArena class >> utf8Of: cp <Integer> into: aCollection <OrderedCollection> [
+        "One Unicode scalar as UTF-8 bytes, appended. The encoder world/83
+         never needed because nothing until now read text back OUT of a
+         foreign buffer."
+        cp <= 16r7F ifTrue: [ ^aCollection add: cp ].
+        cp <= 16r7FF ifTrue: [
+            aCollection add: 16rC0 + (cp bitShift: -6).
+            ^aCollection add: 16r80 + (cp bitAnd: 16r3F) ].
+        cp <= 16rFFFF ifTrue: [
+            aCollection add: 16rE0 + (cp bitShift: -12).
+            aCollection add: 16r80 + ((cp bitShift: -6) bitAnd: 16r3F).
+            ^aCollection add: 16r80 + (cp bitAnd: 16r3F) ].
+        aCollection add: 16rF0 + (cp bitShift: -18).
+        aCollection add: 16r80 + ((cp bitShift: -12) bitAnd: 16r3F).
+        aCollection add: 16r80 + ((cp bitShift: -6) bitAnd: 16r3F).
+        ^aCollection add: 16r80 + (cp bitAnd: 16r3F)
+    ]
+
+    WinArena class >> stringFromBytes: aCollection <OrderedCollection> ^ <String> [
+        | s i |
+        s := String new: aCollection size.
+        i := 1.
+        aCollection do: [ :b | s at: i put: b asCharacter. i := i + 1 ].
+        ^s
+    ]
+
+    "── reading and writing foreign memory ───────────────────────────────
+     `Alien`'s accessor family is 1-byte, 8-byte and double (S20's
+     primitives), so the 4-byte members every Win32 struct is full of —
+     RECT's four LONGs, a DWORD the registry writes — are assembled a byte
+     at a time. Explicit little-endian, on purpose: this is exactly the kind
+     of place where an implicit assumption would produce a plausible wrong
+     number instead of an error."
+
+    WinArena class >> u8At: addr <Integer> ^ <Integer> [
+        ^(Alien forAddress: addr size: 1) byteAt: 1
+    ]
+
+    WinArena class >> u16At: addr <Integer> ^ <Integer> [
+        | a |
+        a := Alien forAddress: addr size: 2.
+        ^(a byteAt: 1) + ((a byteAt: 2) bitShift: 8)
+    ]
+
+    WinArena class >> u32At: addr <Integer> ^ <Integer> [
+        | a |
+        a := Alien forAddress: addr size: 4.
+        ^(a byteAt: 1)
+            + ((a byteAt: 2) bitShift: 8)
+            + ((a byteAt: 3) bitShift: 16)
+            + ((a byteAt: 4) bitShift: 24)
+    ]
+
+    WinArena class >> i32At: addr <Integer> ^ <Integer> [
+        ^WinApi i32: (self u32At: addr)
+    ]
+
+    WinArena class >> u32At: addr <Integer> put: v <Integer> ^ <Integer> [
+        | a n |
+        a := Alien forAddress: addr size: 4.
+        n := v < 0 ifTrue: [ v + 4294967296 ] ifFalse: [ v ].
+        a byteAt: 1 put: (n bitAnd: 255).
+        a byteAt: 2 put: ((n bitShift: -8) bitAnd: 255).
+        a byteAt: 3 put: ((n bitShift: -16) bitAnd: 255).
+        a byteAt: 4 put: ((n bitShift: -24) bitAnd: 255).
+        ^v
+    ]
+
+    WinArena class >> i64At: addr <Integer> ^ <Integer> [
+        ^(Alien forAddress: addr size: 8) signedLongAt: 1
+    ]
+
+    WinArena class >> i64At: addr <Integer> put: v <Integer> ^ <Integer> [
+        ^(Alien forAddress: addr size: 8) signedLongAt: 1 put: v
+    ]
+
+    WinArena class >> rectAt: addr <Integer> ^ <Array> [
+        "A RECT as #(left top right bottom), each member read at the offset
+         winkb records — never at a transcribed one, same rule as every
+         other struct in this layer."
+        ^Array
+            with: (self i32At: addr + (WinApi offsetOf: 'RECT' field: 'left'))
+            with: (self i32At: addr + (WinApi offsetOf: 'RECT' field: 'top'))
+            with: (self i32At: addr + (WinApi offsetOf: 'RECT' field: 'right'))
+            with: (self i32At: addr + (WinApi offsetOf: 'RECT' field: 'bottom'))
+    ]
+]
+
+"── WinApi ───────────────────────────────────────────────────────────────
+ The FFI façade: every binding this layer calls, every constant it names,
+ every struct offset it writes at. I hold no state a window would recognise
+ and make no decision — I answer what winkb and Win32 say. That separation
+ is what lets WinShell be readable as a UI class rather than as a pile of
+ pragmas.
+
+ Every parameter and return below is g-class: Win32's handles, BOOLs, ATOMs
+ and HRESULTs are all FP-free composites of 8 bytes or fewer, which the
+ MS-ARM64 classifier models as one GPR. The arity, float mask and return
+ class must match what windows_api.db records or the P5 resolver refuses the
+ call loudly BEFORE it happens.
+
+ GetLastError is bound here and is a DIAGNOSTIC ONLY (WG0's Δ 10): the VM's
+ own tier-1 compilation, W^X VirtualProtect flips and code-cache
+ VirtualAlloc all run between two guest sends and all reset the thread's
+ last error, so no guest-side sequencing can make it a control input. Ask
+ Win32 the real question instead — GetClassInfoW, IsWindow, the return
+ value, the HRESULT."
+Object subclass: WinApi [
+    <classVars: ConstantCache OffsetCache SizeCache User32Handle DefWindowProcAddr
+                ClassInfoScratch RegDataScratch RegSizeScratch>
+
+    "── the winkb data channel (WG0's primitives 268-271) ────────────────"
+
+    WinApi class >> primWinkbAvailable ^ <Boolean> [
+        <primitive: 268>
+        ^false
+    ]
+    WinApi class >> primWinkbConstant: aName <String> ^ <Object> [
+        <primitive: 269>
+        ^nil
+    ]
+    WinApi class >> primWinkbStructField: aStruct <String> field: aField <String> ^ <Object> [
+        <primitive: 270>
+        ^nil
+    ]
+    WinApi class >> primWinkbStructSize: aStruct <String> ^ <Object> [
+        <primitive: 271>
+        ^nil
+    ]
+
+    WinApi class >> winkbAvailable ^ <Boolean> [
+        "Is windows_api.db on this machine? A ~90 MB machine-local artifact,
+         never a build input — absence is not an error, it is a reason to
+         skip out loud. Answers false on macOS too, which is what lets this
+         file LOAD everywhere and only RUN here."
+        ^self primWinkbAvailable == true
+    ]
+
+    WinApi class >> constant: aName <String> ^ <Integer> [
+        "A named Win32 constant, from the database (D2). NEVER transcribe one
+         of these: a hand-copied number does not fault, it produces a window
+         with the wrong style and no error anywhere. Values arrive with C's
+         own signedness — CW_USEDEFAULT is -2147483648, HKEY_CURRENT_USER is
+         -2147483647, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 is -4 —
+         which is both what the header says and the only form that fits a
+         SmallInt and can therefore be marshalled at all.
+
+         Cached, because a shell asks for the same twenty flags on every
+         window it opens and each miss is a SQLite query. Only HITS are
+         cached: an unknown name must raise every time, not once."
+        | v |
+        ConstantCache isNil ifTrue: [ ConstantCache := Dictionary new ].
+        v := ConstantCache at: aName ifAbsent: [ nil ].
+        v isNil ifFalse: [ ^v ].
+        v := self primWinkbConstant: aName.
+        v isNil ifTrue: [
+            ^self error: 'winkb: no constant named ' , aName printString ,
+                (self winkbAvailable
+                    ifTrue: [ ' in windows_api.db' ]
+                    ifFalse: [ ' — and windows_api.db is not on this machine' ]) ].
+        ConstantCache at: aName put: v.
+        ^v
+    ]
+
+    WinApi class >> offsetOf: aStruct <String> field: aField <String> ^ <Integer> [
+        "A member's byte offset, 0-based as C counts it — what makes a
+         Smalltalk-built struct correct by DERIVATION rather than by
+         transcription: the guest asks where lpfnWndProc lives and writes
+         there, so a padding rule this file never learned still comes out
+         right."
+        | key v |
+        OffsetCache isNil ifTrue: [ OffsetCache := Dictionary new ].
+        key := aStruct , '.' , aField.
+        v := OffsetCache at: key ifAbsent: [ nil ].
+        v isNil ifFalse: [ ^v ].
+        v := self primWinkbStructField: aStruct field: aField.
+        v isNil ifTrue: [ ^self error: 'winkb: no field ' , key , ' recorded' ].
+        OffsetCache at: key put: v.
+        ^v
+    ]
+
+    WinApi class >> sizeOf: aStruct <String> ^ <Integer> [
+        "The struct's total size — the allocation half of build-by-layout.
+         Deriving it from the last member's offset would silently drop TAIL
+         PADDING, and it comes from a different database column than the
+         offsets do, which is what makes comparing the two a real cross-check
+         rather than a tautology."
+        | v |
+        SizeCache isNil ifTrue: [ SizeCache := Dictionary new ].
+        v := SizeCache at: aStruct ifAbsent: [ nil ].
+        v isNil ifFalse: [ ^v ].
+        v := self primWinkbStructSize: aStruct.
+        v isNil ifTrue: [ ^self error: 'winkb: no struct named ' , aStruct , ' recorded' ].
+        SizeCache at: aStruct put: v.
+        ^v
+    ]
+
+    "── narrowing ────────────────────────────────────────────────────────"
+
+    WinApi class >> i32: v <Integer> ^ <Integer> [
+        "Narrow a C `int` read raw out of x0. AAPCS64 leaves the upper half
+         UNSPECIFIED for a 32-bit return and Windows materialises it with
+         w-register writes, i.e. zero-extended: an i32 -1 arrives as
+         4294967295 through `ret: #g`. The width is not expressible in the
+         g/f token vocabulary, so the binding's author owns it (P5's Δ 1)."
+        ^v >= 2147483648 ifTrue: [ v - 4294967296 ] ifFalse: [ v ]
+    ]
+
+    WinApi class >> asBool: v <Integer> ^ <Boolean> [
+        "Win32 BOOL: any nonzero is true. Never compare against 1 — several
+         user32 entries answer other nonzero values on success."
+        ^(self i32: v) ~= 0
+    ]
+
+    WinApi class >> hresultOk: v <Integer> ^ <Boolean> [
+        "An HRESULT is a SIGNED 32-bit code and failure is exactly 'negative'
+         — S_OK is 0, but so are several other successes, and E_INVALIDARG
+         (0x80070057) arrives zero-extended as 2147942487 through `ret: #g`.
+         Testing `= 0` would call every one of those a failure and testing
+         `< 2147483648` would call them all a success."
+        ^(self i32: v) >= 0
+    ]
+
+    "── memory ───────────────────────────────────────────────────────────"
+
+    WinApi class >> virtualAlloc: a <Integer> size: s <Integer> type: t <Integer> protect: p <Integer> ^ <Integer> [
+        <primitive: FFI function: #VirtualAlloc ret: #g args: #(g g g g)>
+    ]
+    WinApi class >> virtualFree: a <Integer> size: s <Integer> type: t <Integer> ^ <Integer> [
+        <primitive: FFI function: #VirtualFree ret: #g args: #(g g g)>
+    ]
+
+    "── modules, addresses, diagnostics ──────────────────────────────────"
+
+    WinApi class >> moduleHandleAt: namePtr <Integer> ^ <Integer> [
+        <primitive: FFI function: #GetModuleHandleW ret: #g args: #(g)>
+    ]
+    WinApi class >> procAddressIn: hModule <Integer> named: namePtr <Integer> ^ <Integer> [
+        <primitive: FFI function: #GetProcAddress ret: #g args: #(g g)>
+    ]
+    WinApi class >> lastError ^ <Integer> [
+        <primitive: FFI function: #GetLastError ret: #g args: #()>
+    ]
+    WinApi class >> currentThreadId ^ <Integer> [
+        <primitive: FFI function: #GetCurrentThreadId ret: #g args: #()>
+    ]
+
+    WinApi class >> moduleHandle ^ <Integer> [
+        "GetModuleHandleW(NULL) — this process's own HINSTANCE, the one every
+         window class registers against. NULL is a genuine null POINTER
+         argument (0), not a missing one."
+        ^self moduleHandleAt: 0
+    ]
+
+    WinApi class >> user32Handle ^ <Integer> [
+        | h |
+        User32Handle isNil ifTrue: [
+            h := self moduleHandleAt: (WinArena nativeUtf16: 'user32.dll').
+            h = 0 ifTrue: [ ^self error: 'WinApi: user32.dll is not loaded in this process' ].
+            User32Handle := h ].
+        ^User32Handle
+    ]
+
+    WinApi class >> defWindowProcAddress ^ <Integer> [
+        "DefWindowProcW's own address, for the lpfnWndProc member — the
+         SYSTEM's default handler. WG1 hands Win32 this and nothing else:
+         there is no door, no dispatch into Smalltalk, no Rust trampoline.
+         WG2 owns that, and it will need a channel this port does not have —
+         the FFI resolves by NAME and never publishes a Rust function's
+         address to the guest (WG0's Δ 8)."
+        | a |
+        DefWindowProcAddr isNil ifTrue: [
+            a := self procAddressIn: self user32Handle
+                     named: (WinArena nativeAscii: 'DefWindowProcW').
+            (a isNil or: [ a = 0 ]) ifTrue: [
+                ^self error: 'WinApi: GetProcAddress(user32, DefWindowProcW) answered NULL' ].
+            DefWindowProcAddr := a ].
+        ^DefWindowProcAddr
+    ]
+
+    "── window classes ───────────────────────────────────────────────────"
+
+    WinApi class >> registerClass: wndClassPtr <Integer> ^ <Integer> [
+        <primitive: FFI function: #RegisterClassW ret: #g args: #(g)>
+    ]
+    WinApi class >> unregisterClass: namePtr <Integer> instance: hInstance <Integer> ^ <Integer> [
+        <primitive: FFI function: #UnregisterClassW ret: #g args: #(g g)>
+    ]
+    WinApi class >> classInfo: hInstance <Integer> name: namePtr <Integer> into: wcPtr <Integer> ^ <Integer> [
+        <primitive: FFI function: #GetClassInfoW ret: #g args: #(g g g)>
+    ]
+    WinApi class >> loadCursor: hInstance <Integer> name: namePtr <Integer> ^ <Integer> [
+        <primitive: FFI function: #LoadCursorW ret: #g args: #(g g)>
+    ]
+    WinApi class >> createSolidBrush: colorref <Integer> ^ <Integer> [
+        <primitive: FFI function: #CreateSolidBrush ret: #g args: #(g)>
+    ]
+
+    WinApi class >> classExists: aName <String> ^ <Boolean> [
+        "Is aName registered for this process's HINSTANCE? This is the
+         question WG0 discovered GetLastError cannot answer under this VM
+         (its Δ 10). GetClassInfoW fills a WNDCLASSW it is given and answers
+         a BOOL; the buffer's contents are of no interest, only the answer,
+         so one scratch struct serves every call."
+        ClassInfoScratch isNil ifTrue: [
+            ClassInfoScratch := WinArena alloc: (self sizeOf: 'WNDCLASSW') ].
+        ^self asBool: (self
+            classInfo: self moduleHandle
+            name: (WinArena nativeUtf16: aName)
+            into: ClassInfoScratch)
+    ]
+
+    WinApi class >> wndClassStyle: style <Integer> proc: procAddr <Integer> instance: hInst <Integer> cursor: hCursor <Integer> brush: hBrush <Integer> named: aName <String> ^ <Integer> [
+        "Build a WNDCLASSW in GC-stable memory at winkb-QUERIED offsets and
+         answer its address. Members are written with `signedLongAt:put:`
+         (an 8-byte write at a 1-based byte index), which is correct for the
+         two i32 members only because the arena is zeroed and both cbClsExtra
+         and cbWndExtra are 0 — the write of `style` covers cbClsExtra's
+         neighbouring padding with the same zeroes it already had.
+
+         Deliberately left NULL: hIcon and lpszMenuName. A window with no
+         icon takes the system default and a window with no menu is what WG1
+         wants; WG3 fills them in when there is a shell to hang them on."
+        | addr wc |
+        addr := WinArena alloc: (self sizeOf: 'WNDCLASSW').
+        wc := Alien forAddress: addr size: (self sizeOf: 'WNDCLASSW').
+        wc signedLongAt: (self offsetOf: 'WNDCLASSW' field: 'style') + 1 put: style.
+        wc signedLongAt: (self offsetOf: 'WNDCLASSW' field: 'lpfnWndProc') + 1 put: procAddr.
+        wc signedLongAt: (self offsetOf: 'WNDCLASSW' field: 'hInstance') + 1 put: hInst.
+        wc signedLongAt: (self offsetOf: 'WNDCLASSW' field: 'hCursor') + 1 put: hCursor.
+        wc signedLongAt: (self offsetOf: 'WNDCLASSW' field: 'hbrBackground') + 1 put: hBrush.
+        wc signedLongAt: (self offsetOf: 'WNDCLASSW' field: 'lpszClassName') + 1
+           put: (WinArena nativeUtf16: aName).
+        ^addr
+    ]
+
+    "── windows ──────────────────────────────────────────────────────────
+     CreateWindowExW's TWELVE g-class arguments are the first call on either
+     platform in this port to spill past x0-x7 into codecache::ffi_stubs'
+     stack slots against a Win32 entry point (WG0's Δ 9); MS ARM64 and Apple
+     AAPCS64 agree on 8-byte stack slots for 8-byte values, so the emitters
+     written for the Mac carry it unchanged."
+
+    WinApi class >> createWindowExStyle: exStyle <Integer> class: classPtr <Integer> title: titlePtr <Integer> style: style <Integer> x: x <Integer> y: y <Integer> width: w <Integer> height: h <Integer> parent: parent <Integer> menu: menu <Integer> instance: hInstance <Integer> param: lpParam <Integer> ^ <Integer> [
+        <primitive: FFI function: #CreateWindowExW ret: #g args: #(g g g g g g g g g g g g)>
+    ]
+    WinApi class >> isWindow: hwnd <Integer> ^ <Integer> [
+        <primitive: FFI function: #IsWindow ret: #g args: #(g)>
+    ]
+    WinApi class >> destroyWindow: hwnd <Integer> ^ <Integer> [
+        <primitive: FFI function: #DestroyWindow ret: #g args: #(g)>
+    ]
+    WinApi class >> showWindow: hwnd <Integer> cmd: nCmdShow <Integer> ^ <Integer> [
+        <primitive: FFI function: #ShowWindow ret: #g args: #(g g)>
+    ]
+    WinApi class >> updateWindow: hwnd <Integer> ^ <Integer> [
+        <primitive: FFI function: #UpdateWindow ret: #g args: #(g)>
+    ]
+    WinApi class >> setForegroundWindow: hwnd <Integer> ^ <Integer> [
+        <primitive: FFI function: #SetForegroundWindow ret: #g args: #(g)>
+    ]
+    WinApi class >> setWindowText: hwnd <Integer> text: textPtr <Integer> ^ <Integer> [
+        <primitive: FFI function: #SetWindowTextW ret: #g args: #(g g)>
+    ]
+    WinApi class >> getWindowText: hwnd <Integer> buffer: bufPtr <Integer> max: cch <Integer> ^ <Integer> [
+        <primitive: FFI function: #GetWindowTextW ret: #g args: #(g g g)>
+    ]
+    WinApi class >> getClientRect: hwnd <Integer> into: rectPtr <Integer> ^ <Integer> [
+        <primitive: FFI function: #GetClientRect ret: #g args: #(g g)>
+    ]
+    WinApi class >> getWindowRect: hwnd <Integer> into: rectPtr <Integer> ^ <Integer> [
+        <primitive: FFI function: #GetWindowRect ret: #g args: #(g g)>
+    ]
+    WinApi class >> setWindowPos: hwnd <Integer> after: hAfter <Integer> x: x <Integer> y: y <Integer> width: w <Integer> height: h <Integer> flags: f <Integer> ^ <Integer> [
+        <primitive: FFI function: #SetWindowPos ret: #g args: #(g g g g g g g)>
+    ]
+    WinApi class >> postMessage: hwnd <Integer> message: m <Integer> wParam: w <Integer> lParam: l <Integer> ^ <Integer> [
+        <primitive: FFI function: #PostMessageW ret: #g args: #(g g g g)>
+    ]
+    WinApi class >> windowThread: hwnd <Integer> processId: pidPtr <Integer> ^ <Integer> [
+        <primitive: FFI function: #GetWindowThreadProcessId ret: #g args: #(g g)>
+    ]
+
+    "── DPI (D3) ─────────────────────────────────────────────────────────"
+
+    WinApi class >> setProcessDpiAwarenessContext: ctx <Integer> ^ <Integer> [
+        <primitive: FFI function: #SetProcessDpiAwarenessContext ret: #g args: #(g)>
+    ]
+    WinApi class >> dpiForWindow: hwnd <Integer> ^ <Integer> [
+        <primitive: FFI function: #GetDpiForWindow ret: #g args: #(g)>
+    ]
+
+    "── Windows-11 materials (D3) ────────────────────────────────────────"
+
+    WinApi class >> dwmSetWindowAttribute: hwnd <Integer> attribute: attr <Integer> data: dataPtr <Integer> size: n <Integer> ^ <Integer> [
+        "dwmapi.dll, and the resolver reaches it exactly as it reaches
+         user32 — winkb records the DLL and P5's fallback loads it. Answers
+         an HRESULT: a build that predates an attribute answers a FAILURE
+         CODE rather than faulting, which is why D3 says check the HRESULT
+         and never the build number."
+        <primitive: FFI function: #DwmSetWindowAttribute ret: #g args: #(g g g g)>
+    ]
+
+    "── the registry, for the system's own dark-mode preference ──────────"
+
+    WinApi class >> regGetValue: hkey <Integer> subKey: subPtr <Integer> value: valuePtr <Integer> flags: f <Integer> type: typePtr <Integer> data: dataPtr <Integer> size: sizePtr <Integer> ^ <Integer> [
+        <primitive: FFI function: #RegGetValueW ret: #g args: #(g g g g g g g)>
+    ]
+
+    WinApi class >> dwordAt: aKeyRoot <Integer> path: aPath <String> value: aValue <String> ^ <Object> [
+        "One REG_DWORD, or nil if it is not there. Answers nil rather than
+         raising because a missing preference is a normal state of the world
+         and the caller's job is to have an honest default — the registry is
+         being ASKED, not depended on."
+        "The two out-parameter cells are allocated ONCE and reused. The arena
+         never reclaims, so a fresh pair per call would be a slow leak in the
+         one method a UI is most likely to poll — and RegGetValueW writes
+         both every time, so there is nothing stale to inherit."
+        | sub name data size rc |
+        RegDataScratch isNil ifTrue: [
+            RegDataScratch := WinArena alloc: 8.
+            RegSizeScratch := WinArena alloc: 8 ].
+        sub := WinArena nativeUtf16: aPath.
+        name := WinArena nativeUtf16: aValue.
+        data := RegDataScratch.
+        size := RegSizeScratch.
+        WinArena u32At: data put: 0.
+        WinArena u32At: size put: 4.
+        rc := self i32: (self
+            regGetValue: aKeyRoot
+            subKey: sub
+            value: name
+            flags: (self constant: 'RRF_RT_REG_DWORD')
+            type: 0
+            data: data
+            size: size).
+        rc = (self constant: 'ERROR_SUCCESS') ifFalse: [ ^nil ].
+        ^WinArena u32At: data
+    ]
+]
+
+"── WinShell ─────────────────────────────────────────────────────────────
+ I am the window. Everything a user would call 'how the environment looks'
+ is decided here, in Smalltalk, in a file the Browser can open and edit
+ while the window it made is on the screen.
+
+ I do NOT own the message loop. `macvm-winui` (Rust) pumps; I create, style
+ and close. That split is D1's, and D4 states its three reasons: the pump
+ must run before this file has loaded, it must survive a guest fault (P2
+ recovers the VM, not a loop), and GetMessageW blocks in a way a Smalltalk
+ `[true] whileTrue:` could not interleave the control channel with.
+
+ I also do not answer messages. DefWindowProcW does, unchanged, for all of
+ them. WG2 opens that door and owns the whole of its risk.
+
+ ── The order in `openMain` is load-bearing ──────────────────────────────
+   1  SetProcessDpiAwarenessContext   before ANY window exists, or the
+                                      process is stuck with what it had
+   2  read the system's theme         before the class, because the class
+                                      carries the background brush
+   3  RegisterClassW                  name unique per VM (WG0's Δ 11)
+   4  CreateWindowExW  (not visible)  binds the HWND to THIS thread
+   5  size to DIPs by measurement     while nobody can see it resize
+   6  the two DwmSetWindowAttribute   BEFORE showing, or Mica lands on an
+                                      already-painted frame and flickers
+   7  ShowWindow / UpdateWindow"
+Object subclass: WinShell [
+    <classVars: Hwnd ClassName Brush CreatingThreadId Dpi DarkMode
+                MicaHResult DarkHResult FaultMode RectScratch TextScratch DwmCell>
+
+    "── the window's own opinions ────────────────────────────────────────"
+
+    WinShell class >> dipWidth ^ <Integer> [ ^900 ]
+    WinShell class >> dipHeight ^ <Integer> [ ^600 ]
+    WinShell class >> defaultTitle ^ <String> [ ^'MACVM — Windows' ]
+    WinShell class >> textBufferUnits ^ <Integer> [ ^512 ]
+
+    WinShell class >> className ^ <String> [
+        "Unique per VM, because a window class is registered against the
+         PROCESS and several VMs share one (WG0's Δ 11 — its suite ran two
+         VMs in parallel threads and one's UnregisterClassW could pull the
+         class out from under the other's CreateWindowExW). The arena's base
+         address is unique per live VM and nothing ever frees it, so it is
+         exactly the discriminator needed at no extra state. Stable WITHIN a
+         VM, so re-registration is still genuinely exercised.
+
+         Two `macvm-winui` processes on one desktop are a normal debugging
+         situation and are covered for free — separate processes, separate
+         class namespaces."
+        ClassName isNil ifTrue: [
+            ClassName := 'MacvmWinUiShell_' , (WinArena base printString: 16) ].
+        ^ClassName
+    ]
+
+    "── theme (D3): the value comes from the system ──────────────────────"
+
+    WinShell class >> appsUseLightTheme ^ <Object> [
+        "HKCU\\...\\Themes\\Personalize\\AppsUseLightTheme — 0 dark, 1 light,
+         nil if the value is not there. This is a READ, never an invention:
+         the design's restraint principle says wear the host's clothes, and
+         a preference this project made up would not be the host's."
+        ^WinApi
+            dwordAt: (WinApi constant: 'HKEY_CURRENT_USER')
+            path: 'Software\Microsoft\Windows\CurrentVersion\Themes\Personalize'
+            value: 'AppsUseLightTheme'
+    ]
+
+    WinShell class >> systemPrefersDark ^ <Boolean> [
+        "Light is the honest default when the read fails: a missing key means
+         'this machine never said', and guessing dark would be this project
+         inventing the preference D3 forbids it from inventing."
+        | v |
+        v := self appsUseLightTheme.
+        v isNil ifTrue: [ ^false ].
+        ^v = 0
+    ]
+
+    WinShell class >> backgroundColorRef ^ <Integer> [
+        "COLORREF is 0x00BBGGRR. Both values are neutral greys (R=G=B), so
+         the channel order cannot be got wrong here by accident — which also
+         means a capture of this window is a machine-checkable statement
+         about which theme was read: #202020 dark, #F3F3F3 light, the Fluent
+         base layers.
+
+         Δ (WG1, nearly measured the hard way): the obvious version reads the
+         LATCHED `DarkMode`, which `openMain` sets and which is nil before it.
+         That answers 'light' on a machine in dark mode with no window open
+         yet — an answer that is wrong, plausible, and only wrong on somebody
+         else's machine, since this one runs light. So when nothing has been
+         latched, ask the system; once a window exists, answer what its brush
+         was actually made from, which is what a capture of it will show even
+         if the user has changed themes since."
+        ^(DarkMode isNil ifTrue: [ self systemPrefersDark ] ifFalse: [ DarkMode ])
+            ifTrue: [ 16r202020 ] ifFalse: [ 16rF3F3F3 ]
+    ]
+
+    "── state ────────────────────────────────────────────────────────────"
+
+    WinShell class >> hwndValue ^ <Integer> [
+        "The HWND as an Integer — what the Rust host reads back through `eval`
+         to point the inherited `snap` at, and to check the same-thread
+         invariant against its own GetCurrentThreadId. 0 when there is no
+         LIVE window.
+
+         Δ (WG1, measured): the obvious version answers whatever `Hwnd` holds,
+         and it made the first `WinShell close` in this port hang the process.
+         DefWindowProcW destroyed the window, but this class still remembered
+         the number, so the host asked `hwndValue`, got a plausible handle,
+         concluded its window was alive and kept pumping an empty queue
+         forever. A remembered handle is not a window — the same reason WinRef
+         asks Win32 every time it is asked whether it is alive rather than
+         caching an answer that a timestamp would make a lie."
+        ^self isOpen ifTrue: [ Hwnd ] ifFalse: [ 0 ]
+    ]
+
+    WinShell class >> hwnd ^ <WinRef> [
+        "The handle with an honest home (WG0's WinRef). Raises rather than
+         answering a null ref, because every caller of mine wants a window."
+        self ensureOpen: 'hwnd'.
+        ^WinRef onHandle: Hwnd
+    ]
+
+    WinShell class >> isOpen ^ <Boolean> [
+        (Hwnd isNil or: [ Hwnd = 0 ]) ifTrue: [ ^false ].
+        ^WinApi asBool: (WinApi isWindow: Hwnd)
+    ]
+
+    WinShell class >> ensureOpen: aSelector <String> [
+        "A clean guest error naming the call, never a Win32 call on a null
+         HWND. `WinShell setTitle:` before `openMain` is a programmer
+         mistake and must read like one — SetWindowTextW(NULL, ...) would
+         quietly answer TRUE and change nothing (measured), which is the
+         worst of both worlds."
+        self isOpen ifFalse: [
+            ^self error: 'WinShell ' , aSelector ,
+                ': there is no window — send `WinShell openMain` first' ].
+        ^self
+    ]
+
+    WinShell class >> creatingThreadId ^ <Object> [ ^CreatingThreadId ]
+    WinShell class >> dpi ^ <Object> [ ^Dpi ]
+    WinShell class >> darkMode ^ <Object> [ ^DarkMode ]
+    WinShell class >> micaHResult ^ <Object> [ ^MicaHResult ]
+    WinShell class >> darkHResult ^ <Object> [ ^DarkHResult ]
+
+    WinShell class >> windowThreadId ^ <Integer> [
+        "The thread Windows says owns the window — the half of the same-
+         thread invariant that Win32, not this file, is the authority on."
+        self ensureOpen: 'windowThreadId'.
+        ^WinApi windowThread: Hwnd processId: 0
+    ]
+
+    WinShell class >> threadInvariantHolds ^ <Boolean> [
+        "True when the thread asking is the thread that owns the window.
+         Asked from the pump thread, this is the assertion D2 exists for: if
+         a refactor ever moves `openMain` off main, DispatchMessageW silently
+         stops delivering and nothing else says so."
+        ^self windowThreadId = WinApi currentThreadId
+    ]
+
+    "── scratch buffers, allocated once ──────────────────────────────────"
+
+    WinShell class >> rectScratch ^ <Integer> [
+        RectScratch isNil ifTrue: [ RectScratch := WinArena alloc: (WinApi sizeOf: 'RECT') ].
+        ^RectScratch
+    ]
+
+    WinShell class >> textScratch ^ <Integer> [
+        TextScratch isNil ifTrue: [ TextScratch := WinArena alloc: self textBufferUnits * 2 ].
+        ^TextScratch
+    ]
+
+    "── opening ──────────────────────────────────────────────────────────"
+
+    WinShell class >> ensureClassRegistered [
+        "RegisterClassW, tolerating the second time. WG0's Δ 10 in one line:
+         the atom is 0 both when the class already exists and when the
+         registration genuinely failed, and GetLastError cannot tell them
+         apart under this VM — so ask Win32 the real question with
+         GetClassInfoW instead. The error message still REPORTS the code,
+         and says it may be stale."
+        | atom |
+        atom := WinApi registerClass: (WinApi
+            wndClassStyle: ((WinApi constant: 'CS_HREDRAW') bitOr: (WinApi constant: 'CS_VREDRAW'))
+            proc: WinApi defWindowProcAddress
+            instance: WinApi moduleHandle
+            cursor: (WinApi loadCursor: 0 name: (WinApi constant: 'IDC_ARROW'))
+            brush: self backgroundBrush
+            named: self className).
+        atom ~= 0 ifTrue: [ ^true ].
+        (WinApi classExists: self className) ifTrue: [ ^true ].
+        ^self error: 'WinShell: RegisterClassW(' , self className ,
+            ') answered 0 and the class is not registered; GetLastError = ' ,
+            WinApi lastError printString , ' (which the VM may have clobbered — WG0 Δ 10)'
+    ]
+
+    WinShell class >> backgroundBrush ^ <Integer> [
+        "One solid brush for the life of the VM. DefWindowProcW erases the
+         client area with it on WM_ERASEBKGND, which is the whole of WG1's
+         painting: the frame, the thread and the camera are what this sprint
+         proves, and an empty window whose fill is a KNOWN colour is better
+         evidence than an empty window whose fill is whatever was behind it."
+        Brush isNil ifTrue: [ Brush := WinApi createSolidBrush: self backgroundColorRef ].
+        ^Brush
+    ]
+
+    WinShell class >> openMain ^ <WinRef> [
+        "The whole of D1's Smalltalk half. See this class's header for why
+         the order of these steps is load-bearing."
+        | hwnd |
+        self isOpen ifTrue: [
+            ^self error: 'WinShell openMain: a window is already open (HWND 16r' ,
+                (Hwnd printString: 16) , '); send `close` first' ].
+
+        "1. DPI awareness, before any window exists (D3, and win_gui_design
+            §3's third named risk: declare PerMonitorV2 at WG1, not later).
+            The answer is deliberately not checked: it is a process-wide,
+            once-only setting, so every call after the first answers FALSE,
+            and `cycle:` makes exactly that happen ten times in a row. A
+            failure here that MATTERED would show up as a client rect that
+            does not scale — which `expectedClientWidth` asserts — rather
+            than as a BOOL nobody could interpret."
+
+        "2. The system's theme, before the class carries its brush."
+        DarkMode := self systemPrefersDark.
+
+        "3. The class."
+        self ensureClassRegistered.
+
+        "4. The window — NOT visible yet, so steps 5 and 6 happen where
+            nobody can watch them happen."
+        hwnd := WinApi
+            createWindowExStyle: 0
+            class: (WinArena nativeUtf16: self className)
+            title: (WinArena scratchUtf16: self defaultTitle)
+            style: (WinApi constant: 'WS_OVERLAPPEDWINDOW')
+            x: (WinApi constant: 'CW_USEDEFAULT')
+            y: (WinApi constant: 'CW_USEDEFAULT')
+            width: (WinApi constant: 'CW_USEDEFAULT')
+            height: (WinApi constant: 'CW_USEDEFAULT')
+            parent: 0
+            menu: 0
+            instance: WinApi moduleHandle
+            param: 0.
+        (hwnd isNil or: [ hwnd = 0 ]) ifTrue: [
+            ^self error: 'WinShell: CreateWindowExW failed (GetLastError ' ,
+                WinApi lastError printString , ')' ].
+        Hwnd := hwnd.
+        CreatingThreadId := WinApi currentThreadId.
+
+        "5. DPI-correct size."
+        self applyDips.
+
+        "6. The materials, BEFORE showing (D3's pitfall)."
+        self applyMaterials.
+
+        "7. On screen."
+        WinApi showWindow: Hwnd cmd: (WinApi constant: 'SW_SHOW').
+        WinApi updateWindow: Hwnd.
+        WinApi setForegroundWindow: Hwnd.
+
+        "A deliberately injected failure, for the gate's 'the loop outlives a
+         VM fault' item (tests_wg1.md stress row 4). Armed only by the host
+         when it is testing that; unarmed it costs one nil test."
+        self applyFaultInjection.
+        ^self hwnd
+    ]
+
+    WinShell class >> applyDips [
+        "Size the CLIENT area to dipWidth x dipHeight scaled by this
+         monitor's DPI, by MEASURING the frame rather than predicting it.
+
+         Δ (WG1, measured): D3 reaches for AdjustWindowRectEx, and the plan
+         is wrong twice. That call is DPI-ignorant (its DPI-aware twin wants
+         the DPI you are still discovering), and it describes the frame the
+         non-client metrics imply, not the one DWM actually draws — on
+         Windows 11 the two differ. Creating the window first and reading
+         BOTH rects gives the real delta in one step, with no constant, no
+         second API and no approximation, and it makes the gate's
+         `client = DIP * dpi / 96` an exact equality."
+        | client window dw dh wantW wantH |
+        Dpi := WinApi dpiForWindow: Hwnd.
+        (Dpi isNil or: [ Dpi = 0 ]) ifTrue: [ Dpi := WinApi constant: 'USER_DEFAULT_SCREEN_DPI' ].
+        wantW := self dipWidth * Dpi // (WinApi constant: 'USER_DEFAULT_SCREEN_DPI').
+        wantH := self dipHeight * Dpi // (WinApi constant: 'USER_DEFAULT_SCREEN_DPI').
+        client := self clientRect.
+        window := self windowRect.
+        dw := ((window at: 3) - (window at: 1)) - ((client at: 3) - (client at: 1)).
+        dh := ((window at: 4) - (window at: 2)) - ((client at: 4) - (client at: 2)).
+        WinApi
+            setWindowPos: Hwnd
+            after: 0
+            x: 0
+            y: 0
+            width: wantW + dw
+            height: wantH + dh
+            flags: ((WinApi constant: 'SWP_NOMOVE') bitOr: (WinApi constant: 'SWP_NOZORDER')).
+        ^self
+    ]
+
+    WinShell class >> applyMaterials [
+        "The three Windows-11 materials of §2.1, all from Smalltalk, all
+         through dwmapi:
+           Mica backdrop   DWMWA_SYSTEMBACKDROP_TYPE := DWMSBT_MAINWINDOW
+           dark titlebar   DWMWA_USE_IMMERSIVE_DARK_MODE := the SYSTEM's value
+           rounded corners nothing to call — Win11 does it for free
+
+         Both HRESULTs are RECORDED and neither is fatal. A Windows build
+         that predates an attribute answers a failure code and the window is
+         simply opaque or light-framed; that is a legitimate outcome, and
+         checking the HRESULT rather than the build number is the same
+         discipline as asking GetClassInfoW rather than reading an error
+         code (D3).
+
+         The 4-byte value cell is allocated once and reused across both
+         calls and every re-open: DwmSetWindowAttribute COPIES what it is
+         given before returning, so nothing here outlives the call."
+        | cell |
+        DwmCell isNil ifTrue: [ DwmCell := WinArena alloc: 8 ].
+        cell := DwmCell.
+
+        WinArena u32At: cell put: (WinApi constant: 'DWMSBT_MAINWINDOW').
+        MicaHResult := WinApi i32: (WinApi
+            dwmSetWindowAttribute: Hwnd
+            attribute: (WinApi constant: 'DWMWA_SYSTEMBACKDROP_TYPE')
+            data: cell
+            size: 4).
+
+        WinArena u32At: cell put: (DarkMode == true ifTrue: [ 1 ] ifFalse: [ 0 ]).
+        DarkHResult := WinApi i32: (WinApi
+            dwmSetWindowAttribute: Hwnd
+            attribute: (WinApi constant: 'DWMWA_USE_IMMERSIVE_DARK_MODE')
+            data: cell
+            size: 4).
+        ^self
+    ]
+
+    WinShell class >> micaTook ^ <Boolean> [ ^MicaHResult notNil and: [ MicaHResult >= 0 ] ]
+    WinShell class >> darkTitlebarTook ^ <Boolean> [ ^DarkHResult notNil and: [ DarkHResult >= 0 ] ]
+
+    "── geometry ─────────────────────────────────────────────────────────"
+
+    WinShell class >> clientRect ^ <Array> [
+        self ensureOpen: 'clientRect'.
+        (WinApi asBool: (WinApi getClientRect: Hwnd into: self rectScratch)) ifFalse: [
+            ^self error: 'WinShell: GetClientRect failed (GetLastError ' ,
+                WinApi lastError printString , ')' ].
+        ^WinArena rectAt: self rectScratch
+    ]
+
+    WinShell class >> windowRect ^ <Array> [
+        self ensureOpen: 'windowRect'.
+        (WinApi asBool: (WinApi getWindowRect: Hwnd into: self rectScratch)) ifFalse: [
+            ^self error: 'WinShell: GetWindowRect failed (GetLastError ' ,
+                WinApi lastError printString , ')' ].
+        ^WinArena rectAt: self rectScratch
+    ]
+
+    WinShell class >> clientWidth ^ <Integer> [
+        | r | r := self clientRect. ^(r at: 3) - (r at: 1)
+    ]
+    WinShell class >> clientHeight ^ <Integer> [
+        | r | r := self clientRect. ^(r at: 4) - (r at: 2)
+    ]
+
+    WinShell class >> expectedClientWidth ^ <Integer> [
+        "What the DIP width SHOULD be at this window's DPI — the gate's
+         arithmetic, written once here so the test and the report cannot
+         drift from each other."
+        ^self dipWidth * self dpi // (WinApi constant: 'USER_DEFAULT_SCREEN_DPI')
+    ]
+    WinShell class >> expectedClientHeight ^ <Integer> [
+        ^self dipHeight * self dpi // (WinApi constant: 'USER_DEFAULT_SCREEN_DPI')
+    ]
+
+    "── title ────────────────────────────────────────────────────────────"
+
+    WinShell class >> setTitle: aString <String> ^ <Boolean> [
+        self ensureOpen: 'setTitle:'.
+        ^WinApi asBool: (WinApi setWindowText: Hwnd
+                                text: (WinArena scratchUtf16: aString))
+    ]
+
+    WinShell class >> title ^ <String> [
+        "Read back from the WINDOW, not from a variable this class kept —
+         the gate's item 5 is 'the titlebar really changed', and a cached
+         copy could not tell the difference between that and a no-op."
+        | n |
+        self ensureOpen: 'title'.
+        n := WinApi i32: (WinApi getWindowText: Hwnd
+                                buffer: self textScratch
+                                max: self textBufferUnits).
+        n < 0 ifTrue: [ n := 0 ].
+        ^WinArena stringFromUtf16At: self textScratch units: n
+    ]
+
+    "── closing ──────────────────────────────────────────────────────────"
+
+    WinShell class >> close ^ <Boolean> [
+        "POST WM_CLOSE — the same message the titlebar's X sends, so the
+         script path and the human path are one path. DefWindowProcW turns it
+         into DestroyWindow (D1: WG1 answers no message itself).
+
+         Closing is TWO events, not one: WM_CLOSE destroys the window,
+         WM_DESTROY should PostQuitMessage so the pump's GetMessageW returns
+         0. The second half needs the door WG2 builds, so for WG1 the host's
+         pump notices its window has gone and posts the quit itself — see
+         win_gui's `pump`, which records the same thing from the other side."
+        self ensureOpen: 'close'.
+        ^WinApi asBool: (WinApi postMessage: Hwnd
+                                message: (WinApi constant: 'WM_CLOSE')
+                                wParam: 0
+                                lParam: 0)
+    ]
+
+    WinShell class >> destroyNow ^ <Boolean> [
+        "Synchronous teardown, for a test that opens and closes many windows
+         in one process without a pump to deliver WM_CLOSE. DestroyWindow
+         must be called on the owning thread, which is where a doit runs."
+        | ok |
+        self isOpen ifFalse: [ Hwnd := nil. ^false ].
+        ok := WinApi asBool: (WinApi destroyWindow: Hwnd).
+        Hwnd := nil.
+        ^ok
+    ]
+
+    WinShell class >> forget [
+        "Drop the window reference without touching Win32 — for a host that
+         has just watched its window disappear and wants this class to agree."
+        Hwnd := nil.
+        ^self
+    ]
+
+    "── fault injection, for the gate's 'the loop outlives a fault' item ─"
+
+    WinShell class >> faultMode: aSymbol <Symbol> [
+        "#guest raises an ordinary Smalltalk error; #native dereferences
+         address 1, which is a genuine access violation recovered by P2's
+         VEH + non-unwinding longjmp. Both are injected at the END of
+         `openMain`, so the window is fully real and fully shown when the
+         VM falls over — which is the arrangement the gate needs: the pump
+         must outlive the fault with a live window still in front of it."
+        FaultMode := aSymbol.
+        ^self
+    ]
+
+    WinShell class >> applyFaultInjection [
+        FaultMode isNil ifTrue: [ ^self ].
+        FaultMode == #guest ifTrue: [
+            FaultMode := nil.
+            ^self error: 'WinShell: deliberate guest fault inside openMain (MACVM_WINUI_FAULT)' ].
+        FaultMode == #native ifTrue: [
+            FaultMode := nil.
+            ^(Alien forAddress: 1 size: 8) signedLongAt: 1 ].
+        ^self
+    ]
+
+    "── reporting ────────────────────────────────────────────────────────"
+
+    WinShell class >> report [
+        "Every fact the sprint report has to state, in one doit. Written for
+         a human reading a terminal and for a grep in a gate script; both
+         audiences are real."
+        Transcript showCr: 'WinShell:'.
+        Transcript showCr: '  class          ' , self className.
+        Transcript showCr: '  hwnd           16r' , (self hwndValue printString: 16).
+        Transcript showCr: '  isWindow       ' , self isOpen printString.
+        Transcript showCr: '  title          ' , (self isOpen ifTrue: [ self title ] ifFalse: [ '<none>' ]).
+        Transcript showCr: '  dpi            ' , self dpi printString.
+        Transcript showCr: '  client         ' , (self isOpen
+            ifTrue: [ self clientWidth printString , 'x' , self clientHeight printString ]
+            ifFalse: [ '<none>' ]).
+        Transcript showCr: '  expected       ' , (self isOpen
+            ifTrue: [ self expectedClientWidth printString , 'x' , self expectedClientHeight printString ]
+            ifFalse: [ '<none>' ]).
+        Transcript showCr: '  dark preferred ' , self darkMode printString ,
+            ' (AppsUseLightTheme = ' , self appsUseLightTheme printString , ')'.
+        Transcript showCr: '  mica HRESULT   ' , self micaHResult printString ,
+            ' (' , self micaTook printString , ')'.
+        Transcript showCr: '  dark HRESULT   ' , self darkHResult printString ,
+            ' (' , self darkTitlebarTook printString , ')'.
+        Transcript showCr: '  created on tid ' , self creatingThreadId printString.
+        Transcript showCr: '  owned by tid   ' , (self isOpen
+            ifTrue: [ self windowThreadId printString ] ifFalse: [ '<none>' ]).
+        Transcript showCr: '  this tid       ' , WinApi currentThreadId printString.
+        ^self
+    ]
+
+    WinShell class >> cycle: n <Integer> ^ <Dictionary> [
+        "Open and destroy the window n times in one process (tests_wg1.md
+         stress row 2). What this is really testing is that the class
+         registration does not leak and that no HWND is handed back twice:
+         RegisterClassW answers 0 from the second call on, and a shell that
+         only ever opened once would pass in isolation and fail forever
+         after — the exact trap WG0's own re-run pitfall laid for WG1.
+
+         The window really is created and shown each time, because a hidden
+         window would not exercise what WG1 changed."
+        | handles usable |
+        handles := Set new.
+        usable := true.
+        1 to: n do: [ :i |
+            self openMain.
+            handles add: self hwndValue.
+            (WinApi classExists: self className) ifFalse: [ usable := false ].
+            self destroyNow ].
+        ^(Dictionary new)
+            at: 'opened' put: n;
+            at: 'distinctHandles' put: handles size;
+            at: 'classUsableEveryTime' put: usable;
+            at: 'stillRegistered' put: (WinApi classExists: self className);
+            yourself
+    ]
+]
