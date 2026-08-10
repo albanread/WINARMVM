@@ -30,3 +30,11 @@
 /dist/
 .cog/
 .dart/
+
+# MacGamePane is a NESTED SIBLING REPOSITORY (its own history, its own
+# remote: github.com/albanread/MacGamePane), not content of this one. It is
+# macOS-only (Metal/AppKit) and deliberately outside the Windows workspace;
+# gui/Cargo.toml's off-by-default `gamepane` feature documents how the mac
+# side consumes it. Ignored here so `git status` stays clean without either
+# flattening its history into ours or faking a submodule we don't need.
+MacGamePane/
