@@ -1,0 +1,18 @@
+# world/winui.list — the conditional Windows GUI world layer
+# (docs/win_gui_design.md §2.2/§2.3, sprint WG0). The exact mechanism
+# world/cocoaui.list uses: loaded ONLY by a caller that explicitly opts in,
+# via `frontend::world::load_list(vm, path)` (CG1, ported and tested on
+# Windows), AFTER the base world is up — never from world/world.list, so the
+# CLI, the web GUI and the base test suite carry none of it and the base
+# world stays byte-identical.
+#
+# Same format as world.list: one .mst path per line, relative to THIS file's
+# directory; blank lines and #-comments skipped. Files reserved 90+ — 63-85
+# belong to cocoaui.list and 01-84 to the base world (verify with `ls
+# world/`), and starting the Windows layer at 90 leaves both alone.
+#
+# From WG1 this is what the hosted main-thread UI VM loads at boot, the way
+# cocoa_gui/src/boot.rs loads cocoaui.list. WG0 has no binary yet, so the
+# layer is loaded by the world test run and by anyone driving the probe from
+# the CLI.
+90_winui_probe.mst

@@ -1,0 +1,332 @@
+"60_winui_probe_tests.mst — WinUiProbeTests, the WG0 acceptance gate in
+ language (docs/sprints/tests_wg0.md). Exercises world/90_winui_probe.mst:
+ the D1 call ladder, the D2 constants-from-the-database rule, the D3 UTF-16
+ helper, and the WinRef sketch.
+
+ WHERE THE PROBE COMES FROM. The probe classes live in the conditional
+ winui layer (world/winui.list), not in world.list, so the base world stays
+ byte-identical. This file therefore needs its layer loaded FIRST, and
+ world/tests/tests.list loads `../90_winui_probe.mst` immediately above this
+ line for exactly that reason.
+
+ Δ (WG0, measured): that is not decoration, it is a hard requirement of the
+ compiler. An unresolved capitalised name inside a method body is a COMPILE
+ error ('undeclared variable') — frontend/codegen.rs only auto-declares a
+ global for a top-level WRITE — and the guest has no `Smalltalk at:
+ #WinProbe` to reach one dynamically. So a test file for a layered world
+ cannot guard itself at run time the way a platform-specific one can: if
+ the layer is absent the file does not compile at all. Every later WG
+ sprint's tests inherit this: layer file first in tests.list, then the
+ tests that name it.
+
+ Runs ONLY on Windows (the platformName guard in 99_run_all.mst), loads
+ everywhere — an FFI pragma resolves at CALL time, so on macOS these are
+ inert definitions, exactly the posture 59_win_io_tests.mst takes.
+
+ TWO SKIP LEVELS, both announced, never silent (the posix-only: discipline
+ this repo uses everywhere):
+   * NOT WINDOWS — the runner never calls us (99_run_all.mst says why).
+   * NO DATABASE — windows_api.db is a ~90 MB machine-local artifact, not a
+     build input (winkb's founding contract: absence is not an error). WG0
+     resolves every constant and every struct offset from it by design
+     (D2), so without it the Win32 half of this file skips with a named
+     reason and nothing fails. The pure-Smalltalk half still runs."
+
+TestCase subclass: WinUiProbeTests [
+
+    runAll [
+        "The UTF-16 encoder and the WinRef sketch are pure Smalltalk — no
+         database, no Win32, not even a platform check — so they run
+         whenever this file runs at all, and would run on macOS if the
+         guard ever let them."
+        self runTest: #testUtf16RoundTrip do: [ self testUtf16RoundTrip ].
+        self runTest: #testUtf16Surrogates do: [ self testUtf16Surrogates ].
+        self runTest: #testRefPrintsWithoutWin32 do: [ self testRefPrintsWithoutWin32 ].
+
+        WinProbe winkbAvailable ifFalse: [
+            Transcript showCr:
+                '  SKIP WinUiProbeTests (9 of 12) — windows_api.db absent on this machine.'.
+            Transcript showCr:
+                '       WG0 resolves every constant and every WNDCLASSW offset from it by'.
+            Transcript showCr:
+                '       design (sprint_wg0_detail.md D2: never transcribe a header number),'.
+            Transcript showCr:
+                '       so testConstantResolves, testUnknownConstantRaises, testMetricsCall,'.
+            Transcript showCr:
+                '       testBeep, testStructOffsets, testWindowLifecycle, testRefPrints,'.
+            Transcript showCr:
+                '       testLadderIsReRunnable and testBadClassStructFailsCleanly cannot run.'.
+            Transcript showCr:
+                '       The database is a machine-local artifact, not a build input'.
+            Transcript showCr:
+                '       (tests_wg0.md gate item 5); nothing here is broken. The three that'.
+            Transcript showCr:
+                '       DID run above are pure Smalltalk and need neither it nor Win32.'.
+            ^self ].
+
+        self runTest: #testConstantResolves do: [ self testConstantResolves ].
+        self runTest: #testUnknownConstantRaises do: [ self testUnknownConstantRaises ].
+        self runTest: #testMetricsCall do: [ self testMetricsCall ].
+        self runTest: #testBeep do: [ self testBeep ].
+        self runTest: #testStructOffsets do: [ self testStructOffsets ].
+        self runTest: #testWindowLifecycle do: [ self testWindowLifecycle ].
+        self runTest: #testRefPrints do: [ self testRefPrints ].
+        self runTest: #testLadderIsReRunnable do: [ self testLadderIsReRunnable ].
+        self runTest: #testBadClassStructFailsCleanly do: [ self testBadClassStructFailsCleanly ].
+    ]
+
+    "── D3: wide strings ─────────────────────────────────────────────────"
+
+    testUtf16RoundTrip [
+        "'macVM' is 5 ASCII characters: 5 UTF-16 code units, 10 bytes, plus
+         the 2-byte NUL — 12 bytes, the number tests_wg0.md names. Read the
+         units back little-endian and compare against the source
+         characters, because a byte-order mistake here would produce a
+         window title of CJK noise and no error anywhere."
+        | a |
+        a := 'macVM' asUtf16Alien.
+        self assert: a size equals: 12.
+        self assert: 'macVM' utf16ByteSize equals: 12.
+        1 to: 5 do: [ :i |
+            self assert: (a byteAt: (i * 2) - 1) equals: ('macVM' at: i) asInteger.
+            self assert: (a byteAt: i * 2) equals: 0 ].
+        "NUL terminator, both bytes."
+        self assert: (a byteAt: 11) equals: 0.
+        self assert: (a byteAt: 12) equals: 0.
+        "The empty string is just the terminator — the edge every string
+         helper gets wrong once."
+        self assert: '' asUtf16Alien size equals: 2
+    ]
+
+    testUtf16Surrogates [
+        "Above the BMP, UTF-16 needs a surrogate PAIR, and a UTF-8 source
+         String is where a Windows title actually comes from. U+1F600 is
+         four UTF-8 bytes (240 159 152 128) and must become D83D DE00 —
+         two code units, six bytes with the terminator."
+        | s units a |
+        s := String new: 4.
+        s at: 1 put: 240 asCharacter.
+        s at: 2 put: 159 asCharacter.
+        s at: 3 put: 152 asCharacter.
+        s at: 4 put: 128 asCharacter.
+        self assert: s codePoints size equals: 1.
+        self assert: (s codePoints at: 1) equals: 16r1F600.
+        units := s utf16CodeUnits.
+        self assert: units size equals: 2.
+        self assert: (units at: 1) equals: 16rD83D.
+        self assert: (units at: 2) equals: 16rDE00.
+        a := s asUtf16Alien.
+        self assert: a size equals: 6.
+        "Little-endian: 3D D8 00 DE 00 00."
+        self assert: (a byteAt: 1) equals: 16r3D.
+        self assert: (a byteAt: 2) equals: 16rD8.
+        self assert: (a byteAt: 3) equals: 16r00.
+        self assert: (a byteAt: 4) equals: 16rDE
+    ]
+
+    "── the WinRef sketch, without touching Win32 ────────────────────────"
+
+    testRefPrintsWithoutWin32 [
+        "A ref of a kind whose liveness cannot be checked must print the
+         handle and say nothing about being alive — and must RAISE rather
+         than guess when asked. Honesty is the whole content of the sketch."
+        | r raised |
+        r := WinRef onHandle: 16rABCD kind: #HANDLE.
+        self assert: r handle equals: 16rABCD.
+        self assert: r kind equals: #HANDLE.
+        self deny: r isNull.
+        "Lowercase digits: `Integer>>printString:` (world/57) emits them
+         that way, and matching the world beats teaching WinRef a private
+         hex convention."
+        self assert: r printString equals: 'a WinRef(#HANDLE 16rabcd)'.
+        raised := [ r isAlive. false ] on: Error do: [ :e | true ].
+        self assert: raised.
+        self assert: (WinRef onHandle: 0) isNull
+    ]
+
+    "── D2: constants come from the database ─────────────────────────────"
+
+    testConstantResolves [
+        "SM_CXSCREEN is the landmark: its value is 0, which is also the
+         value a broken lookup would most plausibly invent — so the test
+         does not stop there. WS_OVERLAPPEDWINDOW is a composed flag word
+         (0x00CF0000) that no accident produces, and CW_USEDEFAULT proves
+         the SIGNEDNESS rule: it is stored as C's own -2147483648, the only
+         form that fits a SmallInt and therefore the only form the FFI can
+         marshal at all."
+        self assert: (WinProbe constant: 'SM_CXSCREEN') equals: 0.
+        self assert: (WinProbe constant: 'SM_CYSCREEN') equals: 1.
+        self assert: (WinProbe constant: 'MB_OK') equals: 0.
+        self assert: (WinProbe constant: 'WS_OVERLAPPEDWINDOW') equals: 16rCF0000.
+        self assert: (WinProbe constant: 'CW_USEDEFAULT') equals: -2147483648.
+        self assert: (WinProbe constant: 'ERROR_CLASS_ALREADY_EXISTS') equals: 1410
+    ]
+
+    testUnknownConstantRaises [
+        "A name the database does not carry must NAME itself in the error.
+         The alternative — answering 0 — is the failure mode D2 exists to
+         prevent: a zero flag word is a legal style, so the mistake would
+         reach Win32 and produce a subtly wrong window with nothing logged."
+        | text |
+        text := [ WinProbe constant: 'NO_SUCH_CONSTANT_AT_ALL'. nil ]
+                    on: Error do: [ :e | e messageText ].
+        self deny: text isNil.
+        self assert: (text includesSubstring: 'NO_SUCH_CONSTANT_AT_ALL')
+    ]
+
+    "── D1 steps 1-2 ─────────────────────────────────────────────────────"
+
+    testMetricsCall [
+        "The first guest-visible user32 value. Two calls must agree: a
+         garbage read out of the wrong register would be unlikely to repeat,
+         and the screen does not change size mid-test."
+        | w h |
+        w := WinProbe screenWidth.
+        self assert: w > 0.
+        self assert: w < 65536.
+        self assert: w equals: WinProbe screenWidth.
+        h := WinProbe screenHeight.
+        self assert: h > 0.
+        self assert: h < 65536
+    ]
+
+    testBeep [
+        "MessageBeep(MB_OK) answers a Win32 BOOL. The audible side effect is
+         deliberately not asserted — a headless test cannot hear."
+        self assert: WinProbe beep
+    ]
+
+    "── D1 steps 3-4: the struct, by layout ──────────────────────────────"
+
+    testStructOffsets [
+        "Every member's offset must ANSWER, and the two invariants that are
+         locally checkable must hold — but no offset is compared against a
+         hardcoded number, because that would just re-transcribe the header
+         into the test and pin nothing (pitfall 4).
+
+         Invariant 1: lpfnWndProc lands at 8. This is the one offset in the
+         struct derivable from first principles: a 4-byte `style` followed
+         by a pointer, which LP64 alignment must push to 8.
+
+         Invariant 2: the recorded SIZE agrees with the recorded OFFSETS —
+         size = lpszClassName's offset + 8, its own pointer width. Those
+         two facts come from different database tables (types.size_bits and
+         struct_fields.byte_offset), so their agreement is real evidence
+         rather than a tautology.
+
+         Plus internal consistency: offsets strictly increase in
+         declaration order, which catches a query wired to the wrong struct
+         far more cheaply than a crash would.
+
+         Δ (WG0, measured): tests_wg0.md says 'all 16 WNDCLASSW field-offset
+         queries answer'. WNDCLASSW has TEN members (WNDCLASSEXW has
+         twelve); 16 belongs to no Win32 window-class struct."
+        | off names size previous |
+        names := WinProbe wndclassFieldNames.
+        self assert: names size equals: 10.
+        off := WinProbe wndclassOffsets.
+        self assert: off size equals: names size.
+        previous := -1.
+        names do: [ :f |
+            self deny: (off at: f) isNil.
+            self assert: (off at: f) > previous.
+            previous := off at: f ].
+        self assert: (off at: 'lpfnWndProc') equals: 8.
+        size := WinProbe sizeOf: 'WNDCLASSW'.
+        self assert: size equals: (off at: 'lpszClassName') + 8.
+        self assert: size \\ 8 equals: 0
+    ]
+
+    "── D1 steps 4-6: register, create hidden, destroy ───────────────────"
+
+    testWindowLifecycle [
+        "The gate itself. Register (tolerating an existing class), create
+         HIDDEN, prove Win32 knows the handle, destroy it, prove Win32 no
+         longer does — and unregister on the way out whatever happened."
+        | ref rungs |
+        WinProbe withClassRegisteredDo: [
+            ref := WinProbe openHiddenWindow: 'MACVM WG0 lifecycle'.
+            self deny: ref isNull.
+            self assert: ref kind equals: #HWND.
+            self assert: (WinProbe isWindow: ref).
+            self assert: (WinProbe destroyWindow: ref).
+            self deny: (WinProbe isWindow: ref) ].
+        "And the whole ladder in one call answers every rung — no key left
+         nil, the window alive before the destroy and gone after it."
+        rungs := WinProbe runLadder.
+        rungs keysAndValuesDo: [ :k :v | self deny: v isNil ].
+        self assert: (rungs at: 'isWindowBefore').
+        self deny: (rungs at: 'isWindowAfter').
+        self assert: (rungs at: 'hwnd') > 0
+    ]
+
+    testRefPrints [
+        "A live HWND prints as live and a destroyed one prints as dead —
+         from Win32, asked fresh each time, never cached. `isAlive` on a
+         handle someone else destroyed is exactly the question a UI layer
+         will keep asking."
+        | ref live dead |
+        WinProbe withClassRegisteredDo: [
+            ref := WinProbe openHiddenWindow: 'MACVM WG0 printOn'.
+            self assert: ref isAlive.
+            live := ref printString.
+            WinProbe destroyWindow: ref.
+            self deny: ref isAlive.
+            dead := ref printString ].
+        self assert: (live includesSubstring: 'live').
+        self assert: (live includesSubstring: '#HWND').
+        self assert: (live includesSubstring: '16r').
+        self assert: (dead includesSubstring: 'dead')
+    ]
+
+    "── stress / negative ────────────────────────────────────────────────"
+
+    testLadderIsReRunnable [
+        "Twenty full ladders in ONE VM (tests_wg0.md stress row). Pitfall 1
+         made this a test: RegisterClassW answers 0 the second time, so a
+         probe that only ever ran once would pass in isolation and fail
+         forever after — a trap laid for WG1. The class name is stable
+         within a VM precisely so these twenty really do re-register it.
+         The window handles must also differ from run to run: a stale
+         handle answering IsWindow true would mean the destroy never
+         happened."
+        | seen |
+        seen := Set new.
+        1 to: 20 do: [ :i |
+            | out |
+            out := WinProbe runLadder.
+            self assert: (out at: 'screenWidth') > 0.
+            self assert: (out at: 'isWindowBefore').
+            self deny: (out at: 'isWindowAfter').
+            seen add: (out at: 'hwnd') ].
+        self assert: seen size > 1
+    ]
+
+    testBadClassStructFailsCleanly [
+        "A bad registration must be a clean guest-level error naming the
+         call — recoverable, not a crash (it rides P2's foreign-fault
+         recovery if user32 ever faults instead of validating).
+
+         Δ (WG0, measured): tests_wg0.md asks for 'a deliberately wrong
+         struct SIZE' here. WNDCLASSW has no size member to lie about —
+         only WNDCLASSEXW carries cbSize, and RegisterClassW is the entry
+         WG0 uses. The equivalent deliberate corruption for this struct is a
+         NULL class-name pointer, which RegisterClassW rejects; the test
+         asserts the failure is a named guest error and, crucially, that the
+         very next legitimate registration still works."
+        | raised addr off |
+        off := WinProbe wndclassOffsets.
+        addr := WinProbe buildWindowClassNamed: 'MacvmWG0Bad'.
+        (Alien forAddress: addr size: (WinProbe sizeOf: 'WNDCLASSW'))
+            signedLongAt: (off at: 'lpszClassName') + 1 put: 0.
+        raised := [ | atom |
+                    atom := WinProbe ffiRegisterClassW: addr.
+                    atom = 0
+                        ifTrue: [ WinProbe error: 'RegisterClassW rejected the mangled class' ]
+                        ifFalse: [ false ] ]
+                      on: Error do: [ :e | e messageText includesSubstring: 'RegisterClassW' ].
+        self assert: raised.
+        "The VM is still standing and the real ladder still runs."
+        self assert: (WinProbe runLadder at: 'isWindowBefore')
+    ]
+]

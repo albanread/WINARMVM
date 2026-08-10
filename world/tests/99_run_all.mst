@@ -59,6 +59,13 @@ TestRunner run: ObjectProtocolGapsTests.
  - ClockCompletionTests: UN-GATED (D4) — world/81 gained the Windows
    offset arm (GetTimeZoneInformation); Time now / Date today are live on
    both platforms.
+ - WinUiProbeTests: `== #windows` — WG0's Win32 call ladder
+   (docs/win_gui_design.md §3 row WG0), driving user32/kernel32 from guest
+   Smalltalk through the P5 resolver. Its classes come from the CONDITIONAL
+   winui layer (world/winui.list), which tests.list loads immediately
+   before the test file and for a compiler reason spelled out there. Inside
+   the class a SECOND announced skip covers windows_api.db being absent —
+   WG0 takes every constant and struct offset from it by design.
 
  Guarded here rather than by dropping files from tests.list, because the
  files LOAD fine everywhere — only running them touches FFI — and the
@@ -83,6 +90,7 @@ TestRunner run: RopeTests.
 TestRunner run: EditorSessionTests.
 Smalltalk platformName ~~ #windows ifTrue: [ TestRunner run: PosixIoTests ].
 Smalltalk platformName == #windows ifTrue: [ TestRunner run: WinIoTests ].
+Smalltalk platformName == #windows ifTrue: [ TestRunner run: WinUiProbeTests ].
 TestRunner run: IoStreamTests.
 TestRunner run: ScaledDecimalTests.
 Smalltalk platformName ~~ #windows ifTrue: [ TestRunner run: SocketTests ].

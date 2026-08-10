@@ -158,6 +158,19 @@ marshalling — so the classifier only needs to pass a `g`-class pointer,
 which it already models. Recorded here so P5's refusal list doesn't
 accidentally block WG.
 
+> **Addendum (WG0, measured).** That `g`-class pointer needs a *source*,
+> and WG0 proved there isn't one yet. A guest can learn a DLL export's
+> address the ordinary way (`GetModuleHandleW` + `GetProcAddress`, which is
+> exactly how WG0 fills `lpfnWndProc` with `DefWindowProcW`), because the
+> FFI resolves by NAME and never hands the guest an address of its own.
+> **No path publishes a *Rust* function's address to Smalltalk at all**, so
+> WG2 owes the door its own channel — a primitive, or a
+> `WinShell class>>doorAddress`-shaped verb. The same measurement produced
+> the winkb DATA channel WG0 needed (constants + struct layouts, primitives
+> 268–271): P5 wired winkb into the resolver only, and everything above the
+> handle layer that builds a struct or names a flag goes through those.
+> See `docs/sprints/sprint_wg0_detail.md`'s Δ.
+
 ### 2.4 COM from Smalltalk — the vtable path
 
 The flat API alone cannot reach modern Windows: the file dialogs

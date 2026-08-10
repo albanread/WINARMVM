@@ -773,6 +773,42 @@ pub fn lookup_constant(name: &str) -> Result<u64, WinkbError> {
     })
 }
 
+/// A struct's total size in BYTES — the other half of "build a struct by
+/// layout", added by WG0 (`docs/sprints/sprint_wg0_detail.md` D1 step 4).
+///
+/// [`lookup_struct_field`] alone tells a caller where to WRITE; it never
+/// says how much to ALLOCATE, and guessing that from the last field's
+/// offset silently drops tail padding. The two facts also live in
+/// independent columns (`types.size_bits` vs `struct_fields.byte_offset`),
+/// which makes "size == last offset + last field's width" a real
+/// cross-check on the database rather than a tautology — WG0's struct test
+/// asserts exactly that instead of re-transcribing header numbers.
+///
+/// `size_bits` is the recorded bit width; a struct whose size is missing or
+/// not a whole number of bytes is [`WinkbError::Unsupported`] rather than a
+/// rounded guess (the module's founding stance).
+#[cfg(windows)]
+pub fn lookup_struct_size(struct_name: &str) -> Result<i64, WinkbError> {
+    let conn = open()?;
+    let bits: Option<i64> = conn
+        .query_row(
+            "SELECT size_bits FROM types WHERE type_name = ?1 AND kind = 'struct' LIMIT 1",
+            [struct_name],
+            |r| r.get(0),
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => WinkbError::NotFound(struct_name.to_string()),
+            other => WinkbError::Db(other.to_string()),
+        })?;
+    match bits {
+        Some(b) if b > 0 && b % 8 == 0 => Ok(b / 8),
+        other => Err(WinkbError::Unsupported(format!(
+            "struct `{struct_name}` records size_bits = {other:?} — not a whole number of \
+             bytes, so its size cannot be answered (winkb)"
+        ))),
+    }
+}
+
 /// A struct field's byte offset — what `Alien` needs to read a field by
 /// name instead of a hand-counted constant. (The world's Windows clock
 /// branch pins `TIME_ZONE_INFORMATION`'s offsets against this — see the
@@ -1216,6 +1252,25 @@ mod tests {
         assert_eq!(lookup_struct_field("TIME_ZONE_INFORMATION", "StandardBias").unwrap(), 84);
         assert_eq!(lookup_struct_field("TIME_ZONE_INFORMATION", "DaylightBias").unwrap(), 168);
 
+        // WINARM (WG0): the struct WG0 actually builds, and the size query
+        // added for it. The two facts come from independent columns, so
+        // this pair is a real cross-check: `WNDCLASSW` is 72 bytes and its
+        // last member is an 8-byte PWSTR at 64. `lpfnWndProc` at 8 is the
+        // landmark the sprint's own test asserts guest-side (a 4-byte
+        // `style` plus 4 bytes of padding before the first pointer — the
+        // only offset in the struct derivable from first principles).
+        assert_eq!(lookup_struct_size("WNDCLASSW").unwrap(), 72);
+        assert_eq!(lookup_struct_field("WNDCLASSW", "lpfnWndProc").unwrap(), 8);
+        assert_eq!(
+            lookup_struct_field("WNDCLASSW", "lpszClassName").unwrap(),
+            64
+        );
+        // Δ (WG0, measured): the sprint doc calls WNDCLASSW "a 16-entry
+        // struct by layout". It has TEN members (WNDCLASSEXW has twelve).
+        // Pinned so the number in the corrected doc has evidence behind it.
+        let n: i64 = conn_count_fields("WNDCLASSW");
+        assert_eq!(n, 10, "WNDCLASSW's member count (sprint_wg0_detail.md D1)");
+
         // A symbol that genuinely is not there must say so, not guess.
         assert!(matches!(
             lookup_function("NoSuchApiExistsW"),
@@ -1225,6 +1280,20 @@ mod tests {
             lookup_constant("NO_SUCH_CONSTANT_AT_ALL"),
             Err(WinkbError::NotFound(_))
         ));
+    }
+
+    /// How many members a struct records — WG0's member-count Δ, kept as a
+    /// helper so the assertion above reads as one fact.
+    #[cfg(windows)]
+    fn conn_count_fields(struct_name: &str) -> i64 {
+        let conn = open().expect("db");
+        conn.query_row(
+            "SELECT COUNT(*) FROM struct_fields sf JOIN types t ON t.type_id = sf.struct_type_id \
+             WHERE t.type_name = ?1",
+            [struct_name],
+            |r| r.get(0),
+        )
+        .expect("count struct fields")
     }
 
     /// The dlsym twin against the real loader — no DB involved, so this

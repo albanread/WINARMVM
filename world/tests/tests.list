@@ -71,4 +71,18 @@ tier1.mst
 # underscore alias. Loads everywhere (FFI pragmas resolve at call time);
 # RUNS only on Windows (the platformName guard in 99_run_all.mst).
 59_win_io_tests.mst
+# WINARM (WG0, docs/sprints/sprint_wg0_detail.md): the Windows GUI world
+# LAYER, loaded from here — the one place outside world/winui.list that
+# names it, and not by choice. The probe classes deliberately stay out of
+# world.list (the base world must remain byte-identical), but an unresolved
+# capitalised name in a method body is a COMPILE error in this dialect and
+# the guest has no dynamic `Smalltalk at:` to reach a global with, so
+# 60_winui_probe_tests.mst cannot load at all unless its layer loaded
+# first. `..` resolves against world/tests/, i.e. world/90_winui_probe.mst;
+# both `it_world.rs::load_tests_list` and the justfile's concatenating
+# differential gates handle it identically. The layer is inert off Windows
+# (FFI pragmas resolve at CALL time) and its tests are platformName-guarded
+# in 99_run_all.mst.
+../90_winui_probe.mst
+60_winui_probe_tests.mst
 99_run_all.mst

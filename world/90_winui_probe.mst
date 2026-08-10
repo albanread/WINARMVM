@@ -1,0 +1,773 @@
+"90_winui_probe.mst — WG0, the first brick of the Windows-native Smalltalk
+ UI (docs/win_gui_design.md §2.2 + §3 row WG0;
+ docs/sprints/sprint_wg0_detail.md). Loaded ONLY via world/winui.list — the
+ cocoaui.list mechanism (CG1's load_list) — so world.list stays
+ byte-identical and the CLI, the web GUI and the base suite carry none of
+ this. Nothing here is UI: WG0 proves HANDLES, not pixels.
+
+ The architecture this answers to, in the author's own words:
+
+     UI VM on the UI thread, messaging to a Smalltalk independent GUI
+     layer. All in Smalltalk, with COM and API.
+
+ So the whole call ladder below is Smalltalk. Rust owns the resolver, the
+ trampolines and the GC; every decision about Win32 — which constant, which
+ offset, which order — is made here, in a file a user can open in the
+ Browser and edit while it runs.
+
+ ── The ladder (D1), in the order it is proven ────────────────────────────
+   1. GetSystemMetrics(SM_CXSCREEN)   int in, int out — first guest-visible
+                                      user32 value
+   2. MessageBeep(MB_OK)              BOOL semantics, audible side effect
+   3. GetModuleHandleW(NULL)          the HINSTANCE every registration needs
+   4. RegisterClassW(&wc)             a WNDCLASSW built in an Alien at
+                                      winkb-QUERIED offsets
+   5. CreateWindowExW(...)            hidden — no WS_VISIBLE
+   6. IsWindow / DestroyWindow / IsWindow    the lifecycle round-trip
+
+ ── Four facts this file exists to encode ────────────────────────────────
+
+ 1. NUMBERS COME FROM THE DATABASE (D2). Every constant is asked for by
+    NAME at run time (`WinProbe constant: 'WS_OVERLAPPEDWINDOW'`), and every
+    struct field's offset likewise (`WinProbe offsetOf:field:`). Nothing
+    below transcribes a value from a header. NAMES are transcribed — the
+    same status as the function names in the FFI pragmas — because a name
+    is the question; the value is the answer, and the answer lives in
+    winkb.
+
+ 2. THE HEAP MOVES; FOREIGN MEMORY MUST NOT. A direct `Alien new:` is
+    ordinary GC-managed heap storage that a scavenge can relocate, so its
+    address must NEVER cross the FFI (world/61a's NativeBuffer rule). Every
+    byte Win32 will read — the WNDCLASSW, the class name, the window title
+    — is bump-allocated out of one VirtualAlloc'd arena instead. `String >>
+    asUtf16Alien` answers a direct Alien on purpose (it is a pure
+    conversion, testable with no database and no Win32 at all) and
+    `nativeUtf16:` is the copy that makes it callable.
+
+ 3. A 32-BIT RETURN'S UPPER HALF IS UNSPECIFIED (P5's Δ 1). AAPCS64 leaves
+    x0's top 32 bits undefined for an `int`-returning callee, and Windows
+    materialises them with w-register writes, i.e. ZERO-extended: an i32
+    -1 arrives as 4294967295 through `ret: #g`. Every i32-returning binding
+    here narrows through `i32:`, as world/tests/59_win_io_tests.mst's own
+    header Δ requires.
+
+ 4. REGISTRATION IS NOT IDEMPOTENT, AND GetLastError CANNOT ADJUDICATE IT
+    (pitfall 1, plus what measuring it taught). RegisterClassW answers 0
+    the second time, and a suite re-runs in one process — but reading
+    GetLastError to tell already-exists from a real failure FAILS under the
+    JIT, because compilation and the W^X guard make Win32 calls between two
+    guest sends and reset the thread's error (see `ensureClassRegistered:`).
+    So the tolerance asks Win32 the real question instead —
+    `GetClassInfoW`, is-this-class-usable — and `withClassRegisteredDo:`
+    unregisters in an `ensure:` block so a failure mid-ladder cannot poison
+    the next run. The class name is also unique per VM, because several VMs
+    share one process's class namespace (see `probeClassName`).
+
+ ── Deliberately NOT here ────────────────────────────────────────────────
+ No message loop, no visible window, no WndProc other than DefWindowProcW's
+ own address (WG1 owns the loop, WG2 owns the door). No DWM/Mica, no
+ controls, no COM. And the window below is created on whatever thread the
+ doit runs on, which is legitimate ONLY because it is hidden, pumps no
+ messages and is destroyed immediately — WG1 moves window ownership to the
+ hosted main-thread UI VM precisely because none of those three will hold
+ once a window is real."
+
+"WinRef is FORWARD-DECLARED here, with its instance variables, and reopened
+ with its methods at the bottom of this file. The two classes name each
+ other — WinProbe answers a WinRef from openHiddenWindow:, WinRef asks
+ WinProbe whether its HWND is still alive — and a reference to a class not
+ yet installed is a compile error in this dialect (the same forward-
+ reference problem world/49_galaxigans.mst solves the same way, and the
+ same one cocoaui.list's own comment records about load ORDER fixing what
+ filename numbering does not)."
+Object subclass: WinRef [ | handle kind | ]
+
+"── WinProbe ─────────────────────────────────────────────────────────────
+ I am the Windows FFI probe: the smallest thing that can prove guest
+ Smalltalk reaches Win32 through winkb and the A64 trampolines. My class
+ side carries the raw bindings (one FFI pragma each, fixed arity, exactly
+ the signature windows_api.db records) and the ladder that uses them. Ask
+ me `screenWidth`, `beep`, `moduleHandle`, or run the whole thing with
+ `openHiddenWindow:` / `closeWindow:`. I am a PROBE, not a window system —
+ WinShell (WG1) is what grows here."
+Object subclass: WinProbe [
+    <classVars: Arena ArenaNext ArenaLimit User32Handle DefWindowProcAddr
+                Utf16Cache ProbeClassName ClassInfoScratch>
+
+    "── winkb: the knowledge base, made guest-visible (WG0) ──────────────
+     P5 wired winkb into the RESOLVER only: `lookup_function` feeds
+     `resolve_ffi_symbol`, while the constants (97,402 rows) and struct
+     layouts (66,708 rows) it also carries were reachable from Rust alone.
+     Primitives 268-271 (src/runtime/primitives.rs, `prim_winkb_available`'s
+     doc records the finding) expose the data half with NO policy: they
+     answer what the database says, or nil. Every decision about the answer
+     is made in the four methods below."
+
+    WinProbe class >> primWinkbAvailable ^ <Boolean> [
+        <primitive: 268>
+        ^false
+    ]
+    WinProbe class >> primWinkbConstant: aName <String> ^ <Object> [
+        <primitive: 269>
+        ^nil
+    ]
+    WinProbe class >> primWinkbStructField: aStruct <String> field: aField <String> ^ <Object> [
+        <primitive: 270>
+        ^nil
+    ]
+    WinProbe class >> primWinkbStructSize: aStruct <String> ^ <Object> [
+        <primitive: 271>
+        ^nil
+    ]
+
+    WinProbe class >> winkbAvailable ^ <Boolean> [
+        "Is windows_api.db on this machine? The database is a ~90 MB
+         machine-local artifact, NOT a build input (winkb's founding
+         contract: absence is not an error), so every caller of mine must be
+         able to ask this and skip out loud. Answers false on macOS too —
+         winkb is a Windows-only module — which is what lets this file LOAD
+         everywhere and only RUN here."
+        ^self primWinkbAvailable == true
+    ]
+
+    WinProbe class >> constant: aName <String> ^ <Integer> [
+        "A named Win32 constant, from the database. NEVER transcribe one of
+         these into Smalltalk source (D2): a hand-copied number is how a
+         port drifts, and drift in a flag word does not fault — it produces
+         a window with the wrong style and no error anywhere. The value
+         arrives with C's own signedness (CW_USEDEFAULT is -2147483648, not
+         2^63-ish), which is both what the header says and the only form
+         that fits a SmallInt and therefore the only form the FFI can
+         marshal."
+        | v |
+        v := self primWinkbConstant: aName.
+        v isNil ifTrue: [
+            ^self error: 'winkb: no constant named ' , aName printString ,
+                (self winkbAvailable
+                    ifTrue: [ ' in windows_api.db' ]
+                    ifFalse: [ ' — and windows_api.db is not on this machine' ]) ].
+        ^v
+    ]
+
+    WinProbe class >> offsetOf: aStruct <String> field: aField <String> ^ <Integer> [
+        "A struct member's byte offset, 0-based as C counts it. This is what
+         makes a Smalltalk-built WNDCLASSW correct by DERIVATION instead of
+         by transcription: the guest asks where lpfnWndProc lives and writes
+         there, so a padding rule this file never learned still comes out
+         right."
+        | v |
+        v := self primWinkbStructField: aStruct field: aField.
+        v isNil ifTrue: [
+            ^self error: 'winkb: no field ' , aStruct , '.' , aField , ' recorded' ].
+        ^v
+    ]
+
+    WinProbe class >> sizeOf: aStruct <String> ^ <Integer> [
+        "The struct's total size — the allocation half of build-by-layout.
+         Deriving it from the last member's offset would silently drop tail
+         padding, and it comes from a DIFFERENT database column than the
+         offsets do, which is what makes `size = lastOffset + lastWidth` a
+         real cross-check rather than a tautology (the invariant
+         world/tests/60_winui_probe_tests.mst asserts)."
+        | v |
+        v := self primWinkbStructSize: aStruct.
+        v isNil ifTrue: [ ^self error: 'winkb: no struct named ' , aStruct , ' recorded' ].
+        ^v
+    ]
+
+    "── the raw bindings ─────────────────────────────────────────────────
+     One pragma each, fixed arity, and the arity/float-mask/return-class
+     MUST match what windows_api.db records or P5's resolver refuses the
+     call loudly before it happens (runtime::ffi::resolve_ffi_symbol's
+     cross-check). Every parameter and return below is g-class: Win32's
+     handles (HWND, HINSTANCE, HMODULE), its BOOLs and its ATOMs are all
+     FP-free composites of 8 bytes or fewer, which the MS-ARM64 classifier
+     models as one GPR (winkb's D2 table)."
+
+    WinProbe class >> ffiVirtualAllocAddr: a <Integer> size: s <Integer> type: t <Integer> protect: p <Integer> ^ <Integer> [
+        <primitive: FFI function: #VirtualAlloc ret: #g args: #(g g g g)>
+    ]
+    WinProbe class >> ffiVirtualFree: a <Integer> size: s <Integer> type: t <Integer> ^ <Integer> [
+        <primitive: FFI function: #VirtualFree ret: #g args: #(g g g)>
+    ]
+    WinProbe class >> ffiGetSystemMetrics: index <Integer> ^ <Integer> [
+        <primitive: FFI function: #GetSystemMetrics ret: #g args: #(g)>
+    ]
+    WinProbe class >> ffiMessageBeep: style <Integer> ^ <Integer> [
+        <primitive: FFI function: #MessageBeep ret: #g args: #(g)>
+    ]
+    WinProbe class >> ffiGetModuleHandleW: namePtr <Integer> ^ <Integer> [
+        <primitive: FFI function: #GetModuleHandleW ret: #g args: #(g)>
+    ]
+    "GetProcAddress is how a Smalltalk-side caller learns a function's
+     ADDRESS rather than calling it: the FFI pragma resolves by NAME and
+     hands the address to the trampoline, never to the guest, and WG0 needs
+     DefWindowProcW's address as DATA (it goes in a struct field). Its
+     second argument is a PSTR — ANSI, not wide — one of the few places in
+     this file that is not UTF-16."
+    WinProbe class >> ffiGetProcAddressIn: hModule <Integer> named: namePtr <Integer> ^ <Integer> [
+        <primitive: FFI function: #GetProcAddress ret: #g args: #(g g)>
+    ]
+    WinProbe class >> ffiRegisterClassW: wndClassPtr <Integer> ^ <Integer> [
+        <primitive: FFI function: #RegisterClassW ret: #g args: #(g)>
+    ]
+    WinProbe class >> ffiUnregisterClassW: namePtr <Integer> instance: hInstance <Integer> ^ <Integer> [
+        <primitive: FFI function: #UnregisterClassW ret: #g args: #(g g)>
+    ]
+    "GetClassInfoW answers whether a class name is registered for an
+     HINSTANCE — 'is this class USABLE', which is the question
+     ensureClassRegistered: actually needs and the one GetLastError turned
+     out not to be able to answer here (see that method's Δ)."
+    WinProbe class >> ffiGetClassInfoW: hInstance <Integer> name: namePtr <Integer> into: wcPtr <Integer> ^ <Integer> [
+        <primitive: FFI function: #GetClassInfoW ret: #g args: #(g g g)>
+    ]
+    "Twelve g-class arguments: the first eight ride x0-x7 and the last four
+     SPILL TO THE STACK at [sp, #0..24] (codecache::ffi_stubs' one uniform
+     16-word shape). MS ARM64 and Apple AAPCS64 agree on 8-byte stack slots
+     for 8-byte values, which is why the emitters written for the Mac carry
+     this call unchanged — but WG0 is the first caller on EITHER platform to
+     push more than eight integers through a Win32 entry point, so if the
+     spill were wrong this is where it would show."
+    WinProbe class >> ffiCreateWindowExStyle: exStyle <Integer> class: classPtr <Integer> title: titlePtr <Integer> style: style <Integer> x: x <Integer> y: y <Integer> width: w <Integer> height: h <Integer> parent: parent <Integer> menu: menu <Integer> instance: hInstance <Integer> param: lpParam <Integer> ^ <Integer> [
+        <primitive: FFI function: #CreateWindowExW ret: #g args: #(g g g g g g g g g g g g)>
+    ]
+    WinProbe class >> ffiIsWindow: hwnd <Integer> ^ <Integer> [
+        <primitive: FFI function: #IsWindow ret: #g args: #(g)>
+    ]
+    WinProbe class >> ffiDestroyWindow: hwnd <Integer> ^ <Integer> [
+        <primitive: FFI function: #DestroyWindow ret: #g args: #(g)>
+    ]
+    "GetLastError has a discipline attached (winkb's module doc, measured in
+     P5): a binding's FIRST call runs resolution, and resolution itself
+     performs Win32 calls that reset the thread's last-error — so a cold
+     GetLastError reads 0 after a genuine failure. Warm it (see
+     `warmErrorBinding`), then read it as the IMMEDIATELY next FFI call."
+    WinProbe class >> ffiGetLastError ^ <Integer> [
+        <primitive: FFI function: #GetLastError ret: #g args: #()>
+    ]
+
+    "── narrowing ────────────────────────────────────────────────────────"
+
+    WinProbe class >> i32: v <Integer> ^ <Integer> [
+        "Narrow a C `int` read raw out of x0. AAPCS64 leaves the upper half
+         UNSPECIFIED for a 32-bit return and Windows zero-extends it, so -1
+         arrives as 4294967295 — the width is simply not expressible in the
+         g/f token vocabulary and the binding's author owns it (P5's Δ 1,
+         world/tests/59_win_io_tests.mst)."
+        ^v >= 2147483648 ifTrue: [ v - 4294967296 ] ifFalse: [ v ]
+    ]
+
+    WinProbe class >> asBool: v <Integer> ^ <Boolean> [
+        "Win32 BOOL: any nonzero is true. Never compare against 1 — several
+         user32 entries answer other nonzero values on success."
+        ^(self i32: v) ~= 0
+    ]
+
+    "── the arena: GC-stable memory for anything Win32 will read ─────────
+     One VirtualAlloc'd region, bump-allocated, never freed for the life of
+     the VM. Sixty-four kilobytes is far more than the probe needs; the
+     point is not capacity but STABILITY — a scavenge relocating a string
+     Win32 still holds a pointer to would be a use-after-move with no fault
+     at the point of error, the exact bug class this port keeps refusing.
+     `freeArena` exists for symmetry and for a test that wants a clean
+     slate; nothing calls it in the normal flow."
+
+    WinProbe class >> arenaBytes ^ <Integer> [ ^65536 ]
+
+    WinProbe class >> arenaBase ^ <Integer> [
+        | addr |
+        Arena isNil ifTrue: [
+            addr := self
+                ffiVirtualAllocAddr: 0
+                size: self arenaBytes
+                type: ((self constant: 'MEM_COMMIT') bitOr: (self constant: 'MEM_RESERVE'))
+                protect: (self constant: 'PAGE_READWRITE').
+            (addr isNil or: [ addr = 0 ]) ifTrue: [
+                ^self error: 'WinProbe: VirtualAlloc of the ' , self arenaBytes printString ,
+                    '-byte probe arena failed (GetLastError ' ,
+                    self ffiGetLastError printString , ')' ].
+            Arena := addr.
+            ArenaNext := 0.
+            ArenaLimit := self arenaBytes ].
+        ^Arena
+    ]
+
+    WinProbe class >> arenaAlloc: nBytes <Integer> ^ <Integer> [
+        "Answer the ADDRESS of nBytes of zeroed, GC-stable, 8-aligned
+         storage. VirtualAlloc zero-fills its pages, and nothing here ever
+         re-uses a block, so the zeroing holds — which matters for a struct
+         whose unset members (hIcon, hCursor, hbrBackground, lpszMenuName)
+         must be NULL."
+        | base off end |
+        base := self arenaBase.
+        off := ArenaNext.
+        end := off + nBytes.
+        end > ArenaLimit ifTrue: [
+            ^self error: 'WinProbe: probe arena exhausted (' , ArenaLimit printString ,
+                ' bytes); WG1 will want a real allocator here' ].
+        ArenaNext := end + ((8 - (end \\ 8)) \\ 8).
+        ^base + off
+    ]
+
+    WinProbe class >> arenaUsed ^ <Integer> [ ^ArenaNext isNil ifTrue: [ 0 ] ifFalse: [ ArenaNext ] ]
+
+    WinProbe class >> freeArena [
+        "Release the arena and forget every address derived from it. Any
+         Alien still wrapping one of those addresses is now dangling — this
+         is a test/teardown verb, not a general-purpose free."
+        Arena isNil ifFalse: [
+            self ffiVirtualFree: Arena size: 0 type: (self constant: 'MEM_RELEASE').
+            Arena := nil. ArenaNext := nil. ArenaLimit := nil.
+            User32Handle := nil. DefWindowProcAddr := nil.
+            Utf16Cache := nil. ProbeClassName := nil. ClassInfoScratch := nil ].
+        ^self
+    ]
+
+    "── strings: Win32 is UTF-16 (D3) ────────────────────────────────────
+     The ...W entries are the design's own Windows-materials stance applied
+     to the character set; the ...A entries are a shortcut this port does
+     not take. `String >> asUtf16Alien` (below, on String itself) does the
+     encoding; these two copy the result somewhere Win32 may safely read
+     it, and answer the ADDRESS, because Alien publishes no address
+     accessor to the guest at all."
+
+    WinProbe class >> nativeUtf16: aString <String> ^ <Integer> [
+        "MEMOISED by string value, and that is not an optimisation: the
+         arena is bump-allocated and never reclaims, so re-encoding the same
+         class name on every one of twenty ladders would be a slow leak with
+         a cliff at the end of the region. The cache is safe because these
+         strings are literals; a caller that MUTATED one it had already
+         passed here would get the old bytes, which is why nothing does."
+        | src n addr dst hit |
+        Utf16Cache isNil ifTrue: [ Utf16Cache := Dictionary new ].
+        hit := Utf16Cache at: aString ifAbsent: [ nil ].
+        hit isNil ifFalse: [ ^hit ].
+        src := aString asUtf16Alien.
+        n := src size.
+        addr := self arenaAlloc: n.
+        dst := Alien forAddress: addr size: n.
+        1 to: n do: [ :i | dst byteAt: i put: (src byteAt: i) ].
+        Utf16Cache at: aString put: addr.
+        ^addr
+    ]
+
+    WinProbe class >> nativeAscii: aString <String> ^ <Integer> [
+        "The narrow twin, needed exactly once: GetProcAddress takes a PSTR.
+         A symbol name is ASCII by definition, so no encoding question
+         arises — and this method deliberately does not pretend to be a
+         general Latin-1 path."
+        | n addr dst |
+        n := aString size + 1.
+        addr := self arenaAlloc: n.
+        dst := Alien forAddress: addr size: n.
+        1 to: aString size do: [ :i | dst byteAt: i put: (aString at: i) asInteger ].
+        dst byteAt: n put: 0.
+        ^addr
+    ]
+
+    "── ladder step 1-3 ──────────────────────────────────────────────────"
+
+    WinProbe class >> screenWidth ^ <Integer> [
+        "GetSystemMetrics(SM_CXSCREEN) — the first guest-visible user32
+         value in this port's history. Int in, int out, zero risk: if this
+         answers a plausible width, the whole chain (pragma → winkb lookup →
+         cross-check → GetProcAddress → A64 trampoline → user32) is alive."
+        ^self i32: (self ffiGetSystemMetrics: (self constant: 'SM_CXSCREEN'))
+    ]
+
+    WinProbe class >> screenHeight ^ <Integer> [
+        ^self i32: (self ffiGetSystemMetrics: (self constant: 'SM_CYSCREEN'))
+    ]
+
+    WinProbe class >> beep ^ <Boolean> [
+        "MessageBeep(MB_OK) — BOOL semantics with an audible side effect
+         (which nothing asserts: a test that needed to hear something would
+         not be headless)."
+        ^self asBool: (self ffiMessageBeep: (self constant: 'MB_OK'))
+    ]
+
+    WinProbe class >> moduleHandle ^ <Integer> [
+        "GetModuleHandleW(NULL) — this process's own HINSTANCE, the one
+         every window class registers against. NULL is a genuine null
+         POINTER argument (0), not a missing one."
+        ^self ffiGetModuleHandleW: 0
+    ]
+
+    WinProbe class >> user32Handle ^ <Integer> [
+        | h |
+        User32Handle isNil ifTrue: [
+            h := self ffiGetModuleHandleW: (self nativeUtf16: 'user32.dll').
+            h = 0 ifTrue: [ ^self error: 'WinProbe: user32.dll is not loaded in this process' ].
+            User32Handle := h ].
+        ^User32Handle
+    ]
+
+    WinProbe class >> defWindowProcAddress ^ <Integer> [
+        "DefWindowProcW's own address, for the lpfnWndProc member. WG0 hands
+         Win32 the SYSTEM's default handler: there is no door yet, no
+         dispatch into Smalltalk, and no Rust trampoline — WG2 owns that,
+         and win_gui_design.md §2.3 records why it will be structurally
+         simpler than Cocoa's C6 (one uniform four-word signature, no
+         runtime class synthesis)."
+        | a |
+        DefWindowProcAddr isNil ifTrue: [
+            a := self ffiGetProcAddressIn: self user32Handle
+                     named: (self nativeAscii: 'DefWindowProcW').
+            (a isNil or: [ a = 0 ]) ifTrue: [
+                ^self error: 'WinProbe: GetProcAddress(user32, DefWindowProcW) answered NULL' ].
+            DefWindowProcAddr := a ].
+        ^DefWindowProcAddr
+    ]
+
+    "── ladder step 4: the WNDCLASSW, by layout ──────────────────────────"
+
+    WinProbe class >> wndclassFieldNames ^ <Array> [
+        "The MEMBER NAMES, in declaration order — identifiers, exactly like
+         the #RegisterClassW in the pragma above, and the only part of the
+         layout this file states. Every offset and the total size are asked
+         of winkb (`wndclassOffsets`, `sizeOf:`).
+
+         Δ (WG0, measured): sprint_wg0_detail.md D1 step 4 calls WNDCLASSW
+         'a 16-entry struct'. windows_api.db records TEN members, 72 bytes
+         (WNDCLASSEXW — which WG0 does not use — has twelve, 80 bytes).
+         Pinned in runtime::winkb's real-DB test."
+        ^#('style' 'lpfnWndProc' 'cbClsExtra' 'cbWndExtra' 'hInstance'
+           'hIcon' 'hCursor' 'hbrBackground' 'lpszMenuName' 'lpszClassName')
+    ]
+
+    WinProbe class >> wndclassOffsets ^ <Dictionary> [
+        "Every member's offset, queried by name. `offsetOf:field:` raises on
+         a name the database does not carry, so a missing answer is a named
+         error and never a silent 0 written over the style word."
+        | d |
+        d := Dictionary new.
+        self wndclassFieldNames do: [ :f |
+            d at: f put: (self offsetOf: 'WNDCLASSW' field: f) ].
+        ^d
+    ]
+
+    WinProbe class >> buildWindowClassNamed: aName <String> ^ <Integer> [
+        "Build a WNDCLASSW in GC-stable memory and answer its address.
+         Members are written THROUGH the queried offsets — the point of the
+         exercise — with `signedLongAt:put:` (an 8-byte write at a 1-based
+         byte index; Alien's own accessor family is 1-, 8- and double-wide,
+         so the two i32 members ride the same 8-byte write as their
+         neighbours' padding, which is correct here only because the arena
+         is zeroed and both are 0).
+
+         What is deliberately left NULL: hIcon, hCursor, hbrBackground and
+         lpszMenuName. A cursor-less, brush-less class is fine for a window
+         that is never shown and never painted; WG1 fills them."
+        | off addr wc |
+        off := self wndclassOffsets.
+        addr := self arenaAlloc: (self sizeOf: 'WNDCLASSW').
+        wc := Alien forAddress: addr size: (self sizeOf: 'WNDCLASSW').
+        wc signedLongAt: (off at: 'style') + 1
+           put: ((self constant: 'CS_HREDRAW') bitOr: (self constant: 'CS_VREDRAW')).
+        wc signedLongAt: (off at: 'lpfnWndProc') + 1 put: self defWindowProcAddress.
+        wc signedLongAt: (off at: 'hInstance') + 1 put: self moduleHandle.
+        wc signedLongAt: (off at: 'lpszClassName') + 1 put: (self nativeUtf16: aName).
+        ^addr
+    ]
+
+    WinProbe class >> warmErrorBinding [
+        "One throwaway GetLastError so the binding is RESOLVED. P5 measured
+         this: the first call through any binding runs resolution, and
+         resolution performs Win32 calls (the sqlite open,
+         GetModuleHandle/LoadLibrary/GetProcAddress) that reset the thread's
+         last-error — so `fail(); GetLastError()` reads 0 on a cold
+         binding."
+        self ffiGetLastError.
+        ^self
+    ]
+
+    WinProbe class >> classExists: aName <String> ^ <Boolean> [
+        "Is aName registered for this process's HINSTANCE? GetClassInfoW
+         fills a WNDCLASSW it is given and answers a BOOL; the buffer's
+         contents are of no interest here, only the answer — so ONE scratch
+         buffer serves every call (the arena never reclaims, and this runs
+         on every re-registration)."
+        ClassInfoScratch isNil ifTrue: [
+            ClassInfoScratch := self arenaAlloc: (self sizeOf: 'WNDCLASSW') ].
+        ^self asBool: (self
+            ffiGetClassInfoW: self moduleHandle
+            name: (self nativeUtf16: aName)
+            into: ClassInfoScratch)
+    ]
+
+    WinProbe class >> ensureClassRegistered: aName <String> ^ <Boolean> [
+        "RegisterClassW, tolerating the second time (pitfall 1). A window
+         class is per-process state that outlives a doit, and a test suite
+         re-runs in one process — a probe that passes once and fails forever
+         after is a trap for WG1.
+
+         Δ (WG0, MEASURED the hard way): the obvious implementation reads
+         GetLastError after a zero atom and tolerates
+         ERROR_CLASS_ALREADY_EXISTS. It works in isolation and FAILS under
+         the JIT: at a low compile threshold this call site read 203
+         (ERROR_ENVVAR_NOT_FOUND) — a leftover from somebody else's Win32
+         call entirely. P5's GetLastError discipline says nothing between
+         two cached guest FFI sends performs a Win32 call, and that is true
+         of marshalling but NOT of the VM underneath it: compilation, the
+         W^X guard's VirtualProtect flips and code-cache VirtualAlloc all
+         run between guest sends and all reset the thread's last error.
+         There is no guest-side way to close that window.
+
+         So the tolerance is decided by the question the sprint doc itself
+         poses — 'assert the class is usable either way' — asked of Win32
+         directly with GetClassInfoW. The error code is still read, but only
+         to REPORT with, and the report says it may be stale. Any Win32
+         logic that BRANCHES on GetLastError under this VM is fragile in
+         exactly this way; WG1 and WG2 should treat it as a diagnostic, not
+         a control input."
+        | atom |
+        self warmErrorBinding.
+        atom := self ffiRegisterClassW: (self buildWindowClassNamed: aName).
+        atom ~= 0 ifTrue: [ ^true ].
+        (self classExists: aName) ifTrue: [ ^true ].
+        ^self error: 'WinProbe: RegisterClassW(' , aName ,
+            ') answered 0 and the class is not registered; GetLastError = ' ,
+            self ffiGetLastError printString ,
+            ' (which the JIT may have clobbered — see ensureClassRegistered:)'
+    ]
+
+    WinProbe class >> unregisterClass: aName <String> ^ <Boolean> [
+        ^self asBool: (self ffiUnregisterClassW: (self nativeUtf16: aName)
+                            instance: self moduleHandle)
+    ]
+
+    "── ladder steps 5-6: create hidden, prove alive, destroy ────────────"
+
+    WinProbe class >> probeClassName ^ <String> [
+        "Unique per VM, because a window class is registered against the
+         PROCESS and two VMs share one.
+
+         Δ (WG0, MEASURED): the suite runs several VMs in one process, in
+         parallel test threads, and each ran the same ladder — so one VM's
+         UnregisterClassW could pull the class out from under another VM's
+         CreateWindowExW, and the failures looked like flakes. The arena's
+         base address is unique per live VM in a process (nothing ever
+         frees it), so it is exactly the discriminator needed and it costs
+         no new state. Within ONE VM the name is stable, which is what
+         keeps the re-registration pitfall genuinely exercised.
+
+         WG1 inherits the general form of this: window classes, atoms, the
+         message queue and the last-error value are all PER-PROCESS or
+         per-thread state that the two-VM split (win_gui_design.md §2.2)
+         has to reason about explicitly."
+        ProbeClassName isNil ifTrue: [
+            ProbeClassName := 'MacvmWG0Probe_' , (self arenaBase printString: 16) ].
+        ^ProbeClassName
+    ]
+
+    WinProbe class >> openHiddenWindow: aTitle <String> ^ <WinRef> [
+        "CreateWindowExW with NO WS_VISIBLE. WG0 proves handles, not pixels:
+         a visible window with no message loop behind it is a hung white
+         rectangle, and the loop belongs to WG1's main-thread UI VM.
+         CW_USEDEFAULT arrives from the database as -2147483648 — C's own
+         signed reading — and marshals to the identical register bits the
+         header's 0x80000000 would."
+        | hwnd |
+        self ensureClassRegistered: self probeClassName.
+        hwnd := self
+            ffiCreateWindowExStyle: 0
+            class: (self nativeUtf16: self probeClassName)
+            title: (self nativeUtf16: aTitle)
+            style: (self constant: 'WS_OVERLAPPEDWINDOW')
+            x: (self constant: 'CW_USEDEFAULT')
+            y: (self constant: 'CW_USEDEFAULT')
+            width: 320
+            height: 200
+            parent: 0
+            menu: 0
+            instance: self moduleHandle
+            param: 0.
+        hwnd = 0 ifTrue: [
+            ^self error: 'WinProbe: CreateWindowExW failed, GetLastError = ' ,
+                self ffiGetLastError printString ].
+        ^WinRef onHandle: hwnd
+    ]
+
+    WinProbe class >> isWindow: aWinRef <WinRef> ^ <Boolean> [
+        ^self asBool: (self ffiIsWindow: aWinRef handle)
+    ]
+
+    WinProbe class >> destroyWindow: aWinRef <WinRef> ^ <Boolean> [
+        ^self asBool: (self ffiDestroyWindow: aWinRef handle)
+    ]
+
+    WinProbe class >> withClassRegisteredDo: aBlock [
+        "Run aBlock with the probe class registered, and unregister on the
+         way out WHATEVER happens (tests_wg0.md gate item 3). `ensure:`
+         because an intermediate failure must not leave the class behind:
+         the next run would then take the already-exists path and never
+         exercise a real registration again."
+        self ensureClassRegistered: self probeClassName.
+        ^[ aBlock value ] ensure: [ self unregisterClass: self probeClassName ]
+    ]
+
+    WinProbe class >> runLadder ^ <Dictionary> [
+        "The whole of D1 in one doit, answering what each rung returned,
+         keyed by rung — the shape a Workspace (or a sprint report) wants.
+         Cleans up after itself, so it is safe to run repeatedly in one
+         process; running it twenty times in a row is a test."
+        | out ref |
+        out := Dictionary new.
+        out at: 'screenWidth' put: self screenWidth.
+        out at: 'beep' put: self beep.
+        out at: 'hInstance' put: self moduleHandle.
+        out at: 'defWindowProc' put: self defWindowProcAddress.
+        [ ref := self openHiddenWindow: 'MACVM WG0 probe'.
+          out at: 'hwnd' put: ref handle.
+          out at: 'isWindowBefore' put: (self isWindow: ref).
+          out at: 'destroyed' put: (self destroyWindow: ref).
+          out at: 'isWindowAfter' put: (self isWindow: ref) ]
+            ensure: [ self unregisterClass: self probeClassName ].
+        ^out
+    ]
+
+    WinProbe class >> report [
+        "Human-readable ladder, for a Workspace or a CLI doit."
+        Transcript showCr: 'WG0 ladder (winkb ' ,
+            (self winkbAvailable ifTrue: [ 'present' ] ifFalse: [ 'ABSENT' ]) , '):'.
+        self winkbAvailable ifFalse: [
+            Transcript showCr: '  SKIP — windows_api.db is not on this machine; every'.
+            Transcript showCr: '  constant and struct offset below comes from it (D2).'.
+            ^self ].
+        Transcript showCr: '  1 GetSystemMetrics(SM_CXSCREEN) = ' , self screenWidth printString.
+        Transcript showCr: '  2 MessageBeep(MB_OK) = ' , self beep printString.
+        Transcript showCr: '  3 GetModuleHandleW(NULL) = 16r' , (self moduleHandle printString: 16).
+        Transcript showCr: '    DefWindowProcW = 16r' , (self defWindowProcAddress printString: 16).
+        Transcript showCr: '  4 WNDCLASSW = ' , (self sizeOf: 'WNDCLASSW') printString ,
+            ' bytes, ' , self wndclassFieldNames size printString , ' members, lpfnWndProc@' ,
+            (self offsetOf: 'WNDCLASSW' field: 'lpfnWndProc') printString.
+        [ | ref |
+          ref := self openHiddenWindow: 'MACVM WG0 probe'.
+          Transcript showCr: '  5 CreateWindowExW (hidden) = ' , ref printString.
+          Transcript showCr: '  6 IsWindow = ' , (self isWindow: ref) printString.
+          Transcript showCr: '    DestroyWindow = ' , (self destroyWindow: ref) printString.
+          Transcript showCr: '    IsWindow = ' , (self isWindow: ref) printString ]
+            ensure: [ self unregisterClass: self probeClassName ].
+        ^self
+    ]
+]
+
+"── WinRef ───────────────────────────────────────────────────────────────
+ I wrap one Windows handle so a guest program never passes a bare integer
+ around. This is a SKETCH: WG0 needs the probe's HWND to have an honest
+ home, and nothing more. The full protocol — message sending, the
+ doesNotUnderstand: path, lifetime, the COM sibling (win_gui_design.md
+ §2.4's ComRef) — belongs to WG2 and after, and is deliberately absent
+ rather than half-built.
+
+ What I do NOT do, on purpose:
+   * I do not own my handle. DestroyWindow is the caller's call; there are
+     no finalizers in this VM (weak refs are a later slice), so an owning
+     WinRef would be a promise the runtime cannot keep.
+   * I do not cache liveness. `isAlive` asks Win32 every time, because a
+     handle can be destroyed by anyone — including the system — and a
+     cached answer is a lie with a timestamp.
+   * I am not an ObjcRef twin. ObjcRef wraps a retained `id` with real
+     lifetime semantics; an HWND is a process-wide token, not a refcount."
+Object subclass: WinRef [
+
+    WinRef class >> onHandle: anInteger <Integer> ^ <WinRef> [
+        ^self onHandle: anInteger kind: #HWND
+    ]
+    WinRef class >> onHandle: anInteger <Integer> kind: aSymbol <Symbol> ^ <WinRef> [
+        ^self basicNew setHandle: anInteger kind: aSymbol
+    ]
+    setHandle: anInteger <Integer> kind: aSymbol <Symbol> [
+        handle := anInteger.
+        kind := aSymbol.
+        ^self
+    ]
+
+    handle ^ <Integer> [ ^handle ]
+    kind ^ <Symbol> [ ^kind ]
+    isNull ^ <Boolean> [ ^handle isNil or: [ handle = 0 ] ]
+
+    isAlive ^ <Boolean> [
+        "Only an HWND can answer this — IsWindow is a window question, and
+         answering false for a live HANDLE of some other kind would be a
+         lie. Kinds I cannot check say so by raising rather than guessing."
+        kind == #HWND ifFalse: [
+            ^self error: 'WinRef: liveness is only checkable for an HWND, not ' , kind printString ].
+        self isNull ifTrue: [ ^false ].
+        ^WinProbe isWindow: self
+    ]
+
+    printOn: aStream <WriteStream> [
+        "Honest: the kind, the handle in hex, and — for an HWND — whether
+         Win32 still knows it. A destroyed window prints `dead`, which is
+         the whole reason this class exists rather than a bare integer."
+        aStream nextPutAll: 'a WinRef('.
+        aStream nextPutAll: kind printString.
+        aStream nextPutAll: ' 16r'.
+        aStream nextPutAll: (handle isNil ifTrue: [ 'nil' ] ifFalse: [ handle printString: 16 ]).
+        kind == #HWND ifTrue: [
+            aStream nextPutAll: (self isAlive ifTrue: [ ' live' ] ifFalse: [ ' dead' ]) ].
+        aStream nextPutAll: ')'
+    ]
+
+    = anObject ^ <Boolean> [
+        ^(anObject isKindOf: WinRef) and: [ anObject handle = handle and: [ anObject kind == kind ] ]
+    ]
+    hash ^ <Integer> [ ^handle hash ]
+]
+
+"── String: UTF-16, once and for all (D3) ────────────────────────────────
+ Win32's ...W entries take UTF-16LE, NUL-terminated. This is the encoder,
+ written here, tested here (world/tests/60_winui_probe_tests.mst) and
+ reused by every WG sprint after. It is pure Smalltalk: no database, no
+ Win32, no platform check — so it works, and is testable, on macOS too."
+ArrayedCollection subclass: String [
+
+    utf16CodeUnits ^ <OrderedCollection> [
+        "My Unicode scalars as UTF-16 code units, surrogate pairs included.
+         Built on world/83's `codePoints` (which decodes me as UTF-8 — a
+         String here is a BYTE vector, and pretending otherwise is what a
+         text layer is for), so a malformed byte sequence raises rather than
+         silently producing mojibake in a window title."
+        | out v points |
+        self isValidUtf8 ifFalse: [
+            ^self error: 'asUtf16: the receiver is not valid UTF-8, so it has no code points' ].
+        points := self codePoints.
+        out := OrderedCollection new.
+        points do: [ :cp |
+            cp <= 16rFFFF
+                ifTrue: [ out add: cp ]
+                ifFalse: [
+                    v := cp - 16r10000.
+                    out add: 16rD800 + (v bitShift: -10).
+                    out add: 16rDC00 + (v bitAnd: 16r3FF) ] ].
+        ^out
+    ]
+
+    utf16ByteSize ^ <Integer> [
+        "Bytes an `asUtf16Alien` of me occupies — code units, two bytes
+         each, plus the two-byte NUL terminator."
+        ^(self utf16CodeUnits size * 2) + 2
+    ]
+
+    asUtf16Alien ^ <Alien> [
+        "Me as NUL-terminated UTF-16LE bytes in a DIRECT Alien.
+
+         Direct — heap-backed — on purpose: this is a conversion, and its
+         result is an ordinary movable object that GC may relocate at any
+         time. Its address must therefore NEVER cross the FFI (world/61a's
+         NativeBuffer rule); `WinProbe nativeUtf16:` copies these bytes into
+         GC-stable arena memory and answers the address that may."
+        | units a i |
+        units := self utf16CodeUnits.
+        a := Alien new: (units size * 2) + 2.
+        i := 1.
+        units do: [ :u |
+            a byteAt: i put: (u bitAnd: 255).
+            a byteAt: i + 1 put: ((u bitShift: -8) bitAnd: 255).
+            i := i + 2 ].
+        a byteAt: i put: 0.
+        a byteAt: i + 1 put: 0.
+        ^a
+    ]
+]

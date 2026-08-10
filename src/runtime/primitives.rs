@@ -1493,6 +1493,45 @@ pub static PRIMITIVES: &[PrimDesc] = &[
         can_allocate: false,
         can_fail: false,
     },
+    // WINARM (WG0): the winkb DATA half, made guest-visible. P5 wired
+    // `runtime::winkb` into the RESOLVER only (`resolve_ffi_symbol` calls
+    // `lookup_function`); `lookup_constant` and `lookup_struct_field` were
+    // built, tested and then reachable from Rust alone. See
+    // `prim_winkb_available` for why WG0 could not proceed without these
+    // three, and `docs/sprints/sprint_wg0_detail.md` D2 for the rule they
+    // exist to keep ("the database is present, use it" — never transcribe).
+    PrimDesc {
+        id: 268,
+        name: "WinProbe class>>primWinkbAvailable",
+        f: prim_winkb_available,
+        argc: 0,
+        can_allocate: false,
+        can_fail: false,
+    },
+    PrimDesc {
+        id: 269,
+        name: "WinProbe class>>primWinkbConstant:",
+        f: prim_winkb_constant,
+        argc: 1,
+        can_allocate: false,
+        can_fail: true,
+    },
+    PrimDesc {
+        id: 270,
+        name: "WinProbe class>>primWinkbStructField:field:",
+        f: prim_winkb_struct_field,
+        argc: 2,
+        can_allocate: false,
+        can_fail: true,
+    },
+    PrimDesc {
+        id: 271,
+        name: "WinProbe class>>primWinkbStructSize:",
+        f: prim_winkb_struct_size,
+        argc: 1,
+        can_allocate: false,
+        can_fail: true,
+    },
 ];
 
 pub fn prim_by_id(id: u16) -> Option<&'static PrimDesc> {
@@ -3870,6 +3909,132 @@ fn prim_platform_name(vm: &mut VmState, _args: &[Oop]) -> PrimResult {
     PrimResult::Ok(vm.universe.intern(name).oop())
 }
 
+// ── WINARM (WG0): winkb's DATA half, exposed to the guest ───────────────────
+//
+// `docs/win_gui_design.md` §2.2 says Rust owns no UI, and sprint WG0 is
+// therefore a world-side proof — no Rust changes IF P5's surface sufficed.
+// It did not, and this is the exact and only gap, recorded here rather than
+// worked around in Smalltalk:
+//
+// P5 built `runtime::winkb` complete — `lookup_function` (the resolver's
+// input), `lookup_constant` and `lookup_struct_field` — but only wired
+// `lookup_function` to a guest-reachable path (`runtime::ffi::
+// resolve_ffi_symbol`). The other two are used by P5's own Rust tests and
+// by nothing else, so from Smalltalk the 97,402-row constants table and the
+// 66,708-row struct_fields table did not exist.
+//
+// WG0's D2 ("`SM_CXSCREEN`, `MB_OK`, `WS_OVERLAPPEDWINDOW`, `CW_USEDEFAULT`
+// resolved from winkb's constants, NOT transcribed into Smalltalk source")
+// and its `WNDCLASSW`-by-winkb-offsets requirement are unreachable without
+// them, and there is no world-side substitute: the FFI resolves by NAME
+// only (no call-through-an-address primitive exists, so a guest-side
+// `LoadLibraryA`+`GetProcAddress` of some sqlite entry point could not be
+// CALLED even once resolved), and `winsqlite3.dll` is outside
+// `winkb::DEFAULT_PROBE` anyway. The alternative was world/81's posture —
+// transcribe the numbers with a citation and pin them in a Rust test — which
+// is precisely what D2 and pitfall #4 forbid, and which does not scale to a
+// UI that will want hundreds of constants and dozens of struct layouts.
+//
+// So: three primitives, no policy. They answer what the database says (or
+// nil), the guest owns every decision about it, and nothing here knows a
+// single thing about windows, messages or UI.
+
+/// `primWinkbAvailable` — is `windows_api.db` on this machine?
+///
+/// Separated from the two lookups so the guest can tell "no database"
+/// (→ announce a skip, the `posix-only:` discipline) from "the database
+/// does not know that name" (→ a named error). Both lookups answer `nil`
+/// in either case, and conflating them would turn a typo into a silent
+/// skip. Always `false` off Windows: winkb is a Windows-only module by
+/// construction (`#[cfg(windows)]`), which is also why the MACVM side of
+/// this shared file compiles unchanged.
+fn prim_winkb_available(vm: &mut VmState, _args: &[Oop]) -> PrimResult {
+    #[cfg(windows)]
+    let yes = crate::runtime::winkb::available();
+    #[cfg(not(windows))]
+    let yes = false;
+    PrimResult::Ok(if yes {
+        vm.universe.true_obj
+    } else {
+        vm.universe.false_obj
+    })
+}
+
+/// `primWinkbConstant: aString` — a named Win32 constant's value, or `nil`
+/// if the database is absent or does not carry that name.
+///
+/// **The value is answered with C's own signedness**, i.e. the stored bits
+/// reinterpreted as `i64`. `winkb::lookup_constant` answers `u64` (P5's
+/// choice: `GENERIC_READ` is `0x8000_0000` and several flag sets have the
+/// top bit set), and for the `constants` table's `int`-kind rows that `u64`
+/// is a SIGN-EXTENDED negative — `CW_USEDEFAULT` is stored `-2147483648`
+/// and comes back as `0xFFFF_FFFF_8000_0000`. Reinterpreting restores
+/// −2147483648, which (a) is what the C header says, (b) is what prints
+/// sensibly in a Transcript, and (c) is the ONLY form that survives the FFI
+/// at all: `runtime::ffi::marshal_g` takes a SmallInt and re-widens it with
+/// `value() as u64`, reproducing the identical register bits, while the raw
+/// `u64` overflows SmallInt's 61-bit magnitude and could not be passed.
+/// Unsigned constants are unaffected — no real Win32 flag word sets bit 63.
+fn prim_winkb_constant(vm: &mut VmState, args: &[Oop]) -> PrimResult {
+    let Some(name) = string_arg(vm, args[1]) else {
+        return PrimResult::Fail;
+    };
+    let _ = &name;
+    #[cfg(windows)]
+    let found = crate::runtime::winkb::lookup_constant(&name).ok();
+    #[cfg(not(windows))]
+    let found: Option<u64> = None;
+    PrimResult::Ok(match found {
+        Some(v) => SmallInt::new(v as i64).oop(),
+        None => vm.universe.nil_obj,
+    })
+}
+
+/// `primWinkbStructField: structName field: fieldName` — a struct field's
+/// byte offset from the recorded Win32Metadata layout, or `nil` if the
+/// database is absent or has no such struct/field.
+///
+/// This is the mechanism that lets a Smalltalk-built `WNDCLASSW` be correct
+/// by DERIVATION rather than by transcription (WG0 D1 step 4): the guest
+/// asks where `lpfnWndProc` lives and writes there. Offsets are 0-based C
+/// offsets, exactly as the database stores them — the 1-based conversion is
+/// `Alien`'s business and stays in Smalltalk, where the accessor lives.
+fn prim_winkb_struct_field(vm: &mut VmState, args: &[Oop]) -> PrimResult {
+    let (Some(s), Some(f)) = (string_arg(vm, args[1]), string_arg(vm, args[2])) else {
+        return PrimResult::Fail;
+    };
+    let _ = (&s, &f);
+    #[cfg(windows)]
+    let found = crate::runtime::winkb::lookup_struct_field(&s, &f).ok();
+    #[cfg(not(windows))]
+    let found: Option<i64> = None;
+    PrimResult::Ok(match found {
+        Some(off) => SmallInt::new(off).oop(),
+        None => vm.universe.nil_obj,
+    })
+}
+
+/// `primWinkbStructSize: structName` — the struct's total size in bytes, or
+/// `nil`. The allocation half of "build a struct by layout": offsets say
+/// where to write, this says how much to reserve, and deriving it from the
+/// last offset would silently drop tail padding. Independent database
+/// column from the offsets, which is what makes the guest-side
+/// `size = lastOffset + lastWidth` assertion a real cross-check.
+fn prim_winkb_struct_size(vm: &mut VmState, args: &[Oop]) -> PrimResult {
+    let Some(s) = string_arg(vm, args[1]) else {
+        return PrimResult::Fail;
+    };
+    let _ = &s;
+    #[cfg(windows)]
+    let found = crate::runtime::winkb::lookup_struct_size(&s).ok();
+    #[cfg(not(windows))]
+    let found: Option<i64> = None;
+    PrimResult::Ok(match found {
+        Some(n) => SmallInt::new(n).oop(),
+        None => vm.universe.nil_obj,
+    })
+}
+
 /// `Smalltalk microsecondClock` — the monotonic elapsed-since-VM-start clock
 /// (same `start_instant` source as `millisecondClock`, prim 92), in
 /// MICROSECONDS. Added for the Cog-comparison harness (`docs/cog_bench.md`):
@@ -5386,6 +5551,13 @@ mod tests {
             (265, "instVarAt:put:"),
             (266, "platformName"),
             (267, "wallClockMilliseconds"),
+            // WINARM (WG0): winkb's data half (constants + struct offsets),
+            // the one thing P5's resolver-only wiring left unreachable from
+            // Smalltalk. See `prim_winkb_available`'s doc for the finding.
+            (268, "WinProbe class>>primWinkbAvailable"),
+            (269, "WinProbe class>>primWinkbConstant:"),
+            (270, "WinProbe class>>primWinkbStructField:field:"),
+            (271, "WinProbe class>>primWinkbStructSize:"),
         ];
         assert_eq!(
             PRIMITIVES.len(),

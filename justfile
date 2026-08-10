@@ -248,6 +248,46 @@ gate-p05: gate-p03
     # sprint (FFI through a DB-booted VM, the live-compile path).
     cargo test -p macvm-gui --bin macvm-gui -- ffi_works_through_a_db_booted_vm
 
+# --- Phase WG: the Windows-native Smalltalk UI (docs/win_gui_design.md) -----
+
+# WG0 (docs/sprints/tests_wg0.md): guest Smalltalk drives user32/kernel32
+# through the P5 resolver — GetSystemMetrics, MessageBeep, GetModuleHandleW,
+# then a WNDCLASSW built at winkb-QUERIED offsets, RegisterClassW,
+# CreateWindowExW (hidden) and the IsWindow/DestroyWindow/IsWindow round
+# trip. Everything below is world-side and driven through the existing
+# `macvm` CLI, which is the gate's own wording: WG0 adds no binary and no
+# UI code (the four winkb DATA primitives it did need are the sprint's
+# recorded Δ, not UI).
+#
+# Chains gate-p05 because WG0 rides P5's resolver and nothing else; the two
+# DB states are run explicitly here for the same reason P5 ran them — the
+# database is a machine-local artifact and the fallback IS the story.
+gate-wg0: gate-p05
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # The in-language suite through the CLI, both DB states. `winui.list`'s
+    # layer is loaded by tests.list (see its comment for the compile-time
+    # reason a layered world's tests cannot self-guard); the probe's own
+    # tests are platformName-guarded in 99_run_all.mst.
+    grep -v '^#' world/tests/tests.list | grep -v '^$' | sed 's|^|world/tests/|' \
+        | xargs cat > /tmp/macvm_wg0_tests.mst
+    cargo build --quiet
+    ./target/debug/macvm run /tmp/macvm_wg0_tests.mst --world world | tee /tmp/wg0_present.txt
+    grep -q ', 0 failed' /tmp/wg0_present.txt
+    WINKB_DB=/nonexistent/windows_api.db ./target/debug/macvm run /tmp/macvm_wg0_tests.mst \
+        --world world | tee /tmp/wg0_absent.txt
+    grep -q ', 0 failed' /tmp/wg0_absent.txt
+    # gate item 5: the DB-absent skip is ANNOUNCED, never silent.
+    grep -q 'SKIP WinUiProbeTests' /tmp/wg0_absent.txt
+    # gate items 1-2: the ladder itself, rung by rung, from a doit.
+    cat world/90_winui_probe.mst > /tmp/macvm_wg0_probe.mst
+    echo 'WinProbe report.' >> /tmp/macvm_wg0_probe.mst
+    ./target/debug/macvm run /tmp/macvm_wg0_probe.mst --world world | tee /tmp/wg0_ladder.txt
+    grep -q 'IsWindow = false' /tmp/wg0_ladder.txt
+    # gate item 4: world.list is untouched — the base world stays
+    # byte-identical, which is what "winui.list is additive" means.
+    git diff --quiet -- world/world.list
+
 # P3 (tests_p03.md "Stress/negative tests") — the FLAKY-CATCHER. The
 # combined three-mode run, three consecutive times, because WINVM's
 # card-boundary bug was found by run-to-run variance and not by any single
