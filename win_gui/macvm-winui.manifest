@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  WG3 D6 — the assembly manifest that makes `SysListView32`, `BUTTON` and every
+  other common control render in the CURRENT visual style instead of their
+  Windows-95 skin.
+
+  This is not decoration and it is not optional: without the dependency below,
+  `comctl32.dll` version 5 is loaded, `InitCommonControlsEx` still succeeds,
+  every control still appears, and every functional test still passes — while
+  the window looks two decades old. That is precisely why `tests_wg3.md` item 8
+  asserts a PIXEL: a manifest that failed to embed is otherwise invisible.
+
+  DPI is deliberately NOT declared here. `world/91_winui_shell.mst` calls
+  `SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)` as the first step of
+  `openMain` (WG1's D3), and a manifest `dpiAwareness` element would win over
+  that call and move the decision out of Smalltalk — breaking §2.2's ownership
+  line for no gain, since the runtime call is already proven by WG1's own
+  `client = DIP * dpi/96` equality.
+-->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <assemblyIdentity
+      type="win32"
+      name="MACVM.WindowsUI.macvm-winui"
+      version="1.0.0.0"
+      processorArchitecture="*"/>
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity
+          type="win32"
+          name="Microsoft.Windows.Common-Controls"
+          version="6.0.0.0"
+          processorArchitecture="*"
+          publicKeyToken="6595b64144ccf1df"
+          language="*"/>
+    </dependentAssembly>
+  </dependency>
+</assembly>

@@ -1,0 +1,731 @@
+"92_winui_controls.mst — WG3 D3/D4: real Win32 controls, created by Smalltalk,
+ notified through WG2's door, laid out by a Smalltalk layout object, serviced by
+ WG3's drain (docs/sprints/sprint_wg3_detail.md, docs/win_gui_design.md §2.4a).
+
+ Loaded via world/winui.list AFTER 91_winui_shell.mst, and the order is the
+ sprint's own: `the drain lands before the first control exists`. 91 defines the
+ whole flag-and-drain pass with four no-op hooks; this file overrides them. Part
+ 1 of the acceptance gate runs with this file's contents making no difference at
+ all, which is the check that the ordering was honoured rather than claimed.
+
+ ── Two classes, one job each ────────────────────────────────────────────
+   WinLayout   PURE arithmetic. No handle, no Win32, no window — a client size
+               and a DPI in, a Dictionary of rects out. That is what makes
+               `testLayoutComputesRects` and `testLayoutScalesWithDpi` run
+               headless in `world/tests/`, on a machine with no desktop, in
+               parallel with everything else (WG0's Δ 11).
+   WinControl  ONE child window: its HWND, its child id, its name, and the
+               flag the door sets on it. It knows how to be created, moved,
+               measured and asked whether it is still alive; it decides
+               nothing about what its own notifications MEAN.
+
+ ── Where a control's MEANING runs, and why it is not here ───────────────
+ `WinShell>>serviceCommand:code:from:` and `serviceNotifyFrom:id:code:` are
+ called from `drainPass`, never from a handler. The button's action sends two
+ messages into two other controls, and Win32 delivers those synchronously — so
+ running it in the door would be a VM entry nested inside a VM entry, which is
+ the failure §2.4a exists to prevent and the one the Cocoa side paid for twice
+ (silently failing closed, then corrupting the tier-link invariant once
+ JIT-compiled).
+
+ ── What measurement corrected in this file's own plan ───────────────────
+ * A control's rect is asked of `GetWindowRect`, in SCREEN coordinates, and
+   converted to client coordinates by subtracting the client area's own screen
+   origin. `GetClientRect` on a child answers its size at (0,0) and says
+   nothing about where it is, which is the number a layout test actually wants.
+ * `SysListView32` does not exist until `InitCommonControlsEx` has run — and
+   its failure mode is `CreateWindowExW` answering NULL, not an error anyone
+   can read. `ensureCommonControls` is therefore checked, not assumed."
+
+"── WinLayout ────────────────────────────────────────────────────────────
+ D4's layout object: a vertical stack of bands, computed in DIPs and scaled
+ once at the end.
+
+ The 'scaled once at the end' is the whole of why this class exists rather than
+ a method that multiplies as it goes. WG1 established the environment's DPI
+ contract as an EQUALITY (`client = DIP * dpi/96`), and a layout that scaled
+ each band as it accumulated would round each one separately — so the same
+ layout at 144 dpi would not be 1.5x the layout at 96, it would be 1.5x plus a
+ pixel here and there. `testLayoutScalesWithDpi` asserts the exact thing, which
+ is only assertable because the arithmetic is done in one space and converted in
+ one step."
+Object subclass: WinLayout [
+    | bands margin |
+
+    WinLayout class >> new ^ <WinLayout> [ ^super new initLayout ]
+
+    WinLayout class >> shell ^ <WinLayout> [
+        "The layout WG3's window actually wears: a command band at the top, a
+         one-line status field under it, and a report-mode list filling the
+         rest. Three bands is the smallest arrangement that exercises what D4
+         has to get right — a fixed band, a second fixed band whose position
+         depends on the first, and a filler whose SIZE depends on both."
+        ^self new
+            add: #button height: 32;
+            add: #status height: 26;
+            fill: #list;
+            yourself
+    ]
+
+    initLayout [
+        bands := OrderedCollection new.
+        margin := 10.
+        ^self
+    ]
+
+    margin ^ <Integer> [ ^margin ]
+    margin: n <Integer> [ margin := n. ^self ]
+    bandNames ^ <OrderedCollection> [ ^bands collect: [ :b | b at: 1 ] ]
+
+    add: aName <Symbol> height: h <Integer> [
+        "A fixed band, h DIPs tall, full width between the margins."
+        bands add: (Array with: aName with: h).
+        ^self
+    ]
+
+    fill: aName <Symbol> [
+        "The band that takes whatever is left. At most one, and it must be
+         last — the arithmetic below depends on both, and a layout object that
+         let you write something it cannot compute is a worse object than one
+         that refuses."
+        bands do: [ :b | (b at: 2) isNil ifTrue: [
+            ^self error: 'WinLayout: a layout may have only one fill band (already ' ,
+                (b at: 1) printString , ')' ] ].
+        bands add: (Array with: aName with: nil).
+        ^self
+    ]
+
+    rectsIn: clientWidth <Integer> by: clientHeight <Integer> dpi: dpi <Integer> ^ <Dictionary> [
+        "name -> #(x y width height), in PIXELS, for a client area of
+         clientWidth x clientHeight pixels at dpi.
+
+         Computed entirely in DIP space and scaled ONCE, which is what makes
+         the same layout at two DPIs exactly proportional."
+        | dipW dipH out y avail fillHeight |
+        dipW := clientWidth * 96 // dpi.
+        dipH := clientHeight * 96 // dpi.
+        out := Dictionary new.
+        avail := dipH - (margin * (bands size + 1)).
+        fillHeight := avail.
+        bands do: [ :b | (b at: 2) isNil ifFalse: [ fillHeight := fillHeight - (b at: 2) ] ].
+        fillHeight < 0 ifTrue: [ fillHeight := 0 ].
+        y := margin.
+        bands do: [ :b |
+            | h |
+            h := (b at: 2) isNil ifTrue: [ fillHeight ] ifFalse: [ b at: 2 ].
+            out at: (b at: 1) put: (Array
+                with: margin * dpi // 96
+                with: y * dpi // 96
+                with: (dipW - (margin * 2)) * dpi // 96
+                with: h * dpi // 96).
+            y := y + h + margin ].
+        ^out
+    ]
+
+    rectFor: aName <Symbol> in: w <Integer> by: h <Integer> dpi: dpi <Integer> ^ <Array> [
+        ^(self rectsIn: w by: h dpi: dpi) at: aName ifAbsent: [
+            self error: 'WinLayout: no band named ' , aName printString ]
+    ]
+]
+
+"── WinControl ───────────────────────────────────────────────────────────
+ One child window. WG0's WinRef is the honest home for a HANDLE; this is the
+ honest home for a handle that has an IDENTITY — a child id Windows quotes back
+ in WM_COMMAND's wParam and in WM_NOTIFY's NMHDR.idFrom, which is how a
+ notification finds its way from four words of message to an object."
+Object subclass: WinControl [
+    | handle id name klass flag notifyCount lastCode |
+
+    WinControl class >> name: aName <Symbol> class: aClass <String> text: aText <String>
+                        style: style <Integer> exStyle: exStyle <Integer>
+                        id: anId <Integer> in: parent <Integer> ^ <WinControl> [
+        "CreateWindowExW against a SYSTEM window class — `BUTTON`, `EDIT`,
+         `SysListView32` — with WS_CHILD and the caller's id in the `menu`
+         slot, which is where a child window's id lives.
+
+         Creation SENDS messages (WM_CREATE, WM_SIZE, WM_PARENTNOTIFY), so this
+         must be called at open time or from the drain and never from a doit:
+         from a doit those arrive at a VM that is already inside an entry and
+         the busy guard declines them, which is correct but is not what a
+         caller who expected them would think happened."
+        | hwnd |
+        (parent isNil or: [ parent = 0 ]) ifTrue: [
+            ^self error: 'WinControl ' , aName printString ,
+                ': there is no parent window — send `WinShell openMain` first' ].
+        hwnd := WinApi
+            createWindowExStyle: exStyle
+            class: (WinArena nativeUtf16: aClass)
+            title: (WinArena nativeUtf16: aText)
+            style: style
+            x: 0 y: 0 width: 10 height: 10
+            parent: parent
+            menu: anId
+            instance: WinApi moduleHandle
+            param: 0.
+        (hwnd isNil or: [ hwnd = 0 ]) ifTrue: [
+            ^self error: 'WinControl: CreateWindowExW(' , aClass , ') for ' ,
+                aName printString , ' answered NULL (GetLastError ' ,
+                WinApi lastError printString ,
+                (aClass = 'SysListView32'
+                    ifTrue: [ '; is InitCommonControlsEx done?' ]
+                    ifFalse: [ '' ]) , ')' ].
+        ^self new setHandle: hwnd id: anId name: aName class: aClass
+    ]
+
+    setHandle: h <Integer> id: anId <Integer> name: aName <Symbol> class: aClass <String> [
+        handle := h. id := anId. name := aName. klass := aClass.
+        flag := false. notifyCount := 0.
+        ^self
+    ]
+
+    handle ^ <Integer> [ ^handle ]
+    id ^ <Integer> [ ^id ]
+    name ^ <Symbol> [ ^name ]
+    windowClass ^ <String> [ ^klass ]
+    lastCode ^ <Object> [ ^lastCode ]
+    notifyCount ^ <Integer> [ ^notifyCount ]
+
+    isAlive ^ <Boolean> [
+        "WG1's Δ 2, inherited without argument: a remembered HWND is not a
+         window. Asked of Win32 every time."
+        (handle isNil or: [ handle = 0 ]) ifTrue: [ ^false ].
+        ^WinApi asBool: (WinApi isWindow: handle)
+    ]
+
+    ref ^ <WinRef> [ ^WinRef onHandle: handle ]
+
+    "── the door's half: a flag, set in microseconds ─────────────────────"
+
+    flagged ^ <Boolean> [ ^flag == true ]
+    flag [ flag := true. ^self ]
+    clearFlag [ flag := false. ^self ]
+
+    noteNotify: aCode <Integer> [
+        notifyCount := notifyCount + 1.
+        lastCode := aCode.
+        ^self
+    ]
+
+    "── the drain's half: everything that touches Win32 ──────────────────"
+
+    moveTo: aRect <Array> ^ <Boolean> [
+        "One SetWindowPos per control per pass. DeferWindowPos exists for the
+         flicker a multi-control move can cause and D4 says to reach for it `if
+         measurement says the flicker warrants it` — measurement did not: three
+         controls on a window whose parent has CS_HREDRAW|CS_VREDRAW redraw
+         once either way, and a begin/end pair would add a handle whose failure
+         mode is a silently un-laid-out window."
+        self isAlive ifFalse: [ ^false ].
+        ^WinApi asBool: (WinApi
+            setWindowPos: handle
+            after: 0
+            x: (aRect at: 1)
+            y: (aRect at: 2)
+            width: (aRect at: 3)
+            height: (aRect at: 4)
+            flags: ((WinApi constant: 'SWP_NOZORDER') bitOr: (WinApi constant: 'SWP_NOACTIVATE')))
+    ]
+
+    screenRect ^ <Array> [
+        "#(left top right bottom) in SCREEN coordinates — what GetWindowRect
+         answers for a child, and the only rect Win32 will tell you about a
+         child's POSITION. `GetClientRect` on a child answers its size at
+         (0,0), which is a different question."
+        self isAlive ifFalse: [ ^self error: 'WinControl ' , name printString , ': no window' ].
+        (WinApi asBool: (WinApi getWindowRect: handle into: WinShell rectScratch)) ifFalse: [
+            ^self error: 'WinControl ' , name printString , ': GetWindowRect failed' ].
+        ^WinArena rectAt: WinShell rectScratch
+    ]
+
+    clientRectIn: originArray <Array> ^ <Array> [
+        "This control's rect as #(x y width height) relative to an origin —
+         the same shape `WinLayout` answers, so the gate's item 7 is one
+         equality between two independently produced Arrays."
+        | r |
+        r := self screenRect.
+        ^Array
+            with: (r at: 1) - (originArray at: 1)
+            with: (r at: 2) - (originArray at: 2)
+            with: (r at: 3) - (r at: 1)
+            with: (r at: 4) - (r at: 2)
+    ]
+
+    setFont: hFont <Integer> [
+        "Without this a control renders in the ancient bitmap System font even
+         under visual styles v6 — the manifest chooses which comctl32 draws the
+         control, not which font it draws with. Sent from open time, into a
+         CHILD's own window proc, so it never touches this port's door."
+        hFont = 0 ifTrue: [ ^self ].
+        WinApi sendMessage: handle
+               message: (WinApi constant: 'WM_SETFONT')
+               wParam: hFont
+               lParam: 1.
+        ^self
+    ]
+
+    setText: aString <String> ^ <Boolean> [
+        ^WinApi asBool: (WinApi setWindowText: handle text: (WinArena scratchUtf16: aString))
+    ]
+
+    text ^ <String> [
+        | n |
+        n := WinApi i32: (WinApi getWindowText: handle
+                                buffer: WinShell textScratch
+                                max: WinShell textBufferUnits).
+        n < 0 ifTrue: [ n := 0 ].
+        ^WinArena stringFromUtf16At: WinShell textScratch units: n
+    ]
+
+    send: msg <Integer> wParam: w <Integer> lParam: l <Integer> ^ <Integer> [
+        "A message to THIS control's own (system) window proc. Never reaches
+         this port's door: a BUTTON's or a list view's wndproc is comctl32's,
+         and only the PARENT's is ours."
+        ^WinApi sendMessage: handle message: msg wParam: w lParam: l
+    ]
+
+    printOn: aStream [
+        aStream nextPutAll: 'a WinControl(', name printString, ' ', klass, ' id ';
+                nextPutAll: id printString;
+                nextPutAll: ' 16r'; nextPutAll: (handle isNil ifTrue: [ '0' ] ifFalse: [ handle printString: 16 ]);
+                nextPutAll: ')'
+    ]
+]
+
+"── WinShell, reopened ───────────────────────────────────────────────────
+ The four hooks 91 declares as no-ops, filled in. Nothing here is reachable
+ unless this file is loaded, which is what lets `Part 1` of the gate prove the
+ drain with no control in existence."
+Object subclass: WinShell [
+    <classVars: Controls ControlsById NextControlId Layout GuiFont
+                ClickCount CommonControlsReady SelectRequest ListRowCount
+                LastMeaningfulNotify ControlsEnabled RowScratch>
+
+    "── the switch WG1's and WG2's gates need ────────────────────────────
+     `tests_wg3.md` item 1 asks for WG2's entire gate to pass unchanged
+     `with the drain installed and NO CONTROL CREATED`, and that phrase is
+     load-bearing rather than incidental: a list view repaints, a repaint sends
+     NM_CUSTOMDRAW, and WG2's gate counts every message that crossed the door.
+     Controls also put white list-view pixels exactly where WG1's and WG2's
+     gates read the window's background fill.
+
+     So both older gates run with controls off, which is the configuration they
+     were written against, and WG3's own gate runs with them on. The default is
+     ON: this is the sprint that adds them."
+
+    WinShell class >> controlsEnabled ^ <Boolean> [ ^ControlsEnabled ~~ false ]
+    WinShell class >> controlsEnabled: aBoolean <Boolean> [ ControlsEnabled := aBoolean. ^self ]
+
+    "── the ids ──────────────────────────────────────────────────────────
+     A child id is a 16-bit number Windows quotes back in WM_COMMAND's wParam
+     low word and in NMHDR.idFrom. Starting at 100 keeps clear of the standard
+     dialog ids (IDOK is 1) that a system dialog would send if one ever became
+     a child of this window."
+
+    WinShell class >> firstControlId ^ <Integer> [ ^100 ]
+
+    WinShell class >> controls ^ <OrderedCollection> [
+        Controls isNil ifTrue: [ Controls := OrderedCollection new ].
+        ^Controls
+    ]
+
+    WinShell class >> controlNamed: aName <Symbol> ^ <Object> [
+        ^self controls detect: [ :c | c name == aName ] ifNone: [ nil ]
+    ]
+
+    WinShell class >> controlWithId: anId <Integer> ^ <Object> [
+        ControlsById isNil ifTrue: [ ^nil ].
+        ^ControlsById at: anId ifAbsent: [ nil ]
+    ]
+
+    WinShell class >> ownsControlId: anId <Integer> ^ <Boolean> [
+        ^(self controlWithId: anId) notNil
+    ]
+
+    WinShell class >> layout ^ <WinLayout> [
+        Layout isNil ifTrue: [ Layout := WinLayout shell ].
+        ^Layout
+    ]
+
+    WinShell class >> clickCount ^ <Integer> [ ^ClickCount isNil ifTrue: [ 0 ] ifFalse: [ ClickCount ] ]
+    WinShell class >> listRowCount ^ <Integer> [ ^ListRowCount isNil ifTrue: [ 0 ] ifFalse: [ ListRowCount ] ]
+
+    "── D6's other half: the class library, not the manifest ─────────────"
+
+    WinShell class >> ensureCommonControls ^ <Boolean> [
+        "InitCommonControlsEx registers `SysListView32` (and the rest of the
+         ICC_ set asked for). Without it CreateWindowExW answers NULL and
+         nothing else says why, which is why this is CHECKED.
+
+         Distinct from the v6 manifest and neither substitutes for the other:
+         the manifest decides WHICH comctl32 is loaded (v5's Windows-95 skin or
+         v6's themed one), this decides which classes that comctl32 registers.
+         A window can perfectly well have working, ugly controls."
+        | icc |
+        CommonControlsReady == true ifTrue: [ ^true ].
+        icc := WinArena alloc: (WinApi sizeOf: 'INITCOMMONCONTROLSEX').
+        WinArena u32At: icc + (WinApi offsetOf: 'INITCOMMONCONTROLSEX' field: 'dwSize')
+                 put: (WinApi sizeOf: 'INITCOMMONCONTROLSEX').
+        WinArena u32At: icc + (WinApi offsetOf: 'INITCOMMONCONTROLSEX' field: 'dwICC')
+                 put: (((WinApi constant: 'ICC_LISTVIEW_CLASSES')
+                        bitOr: (WinApi constant: 'ICC_TREEVIEW_CLASSES'))
+                        bitOr: (WinApi constant: 'ICC_STANDARD_CLASSES')).
+        CommonControlsReady := WinApi asBool: (WinApi initCommonControls: icc).
+        CommonControlsReady ifFalse: [
+            ^self error: 'WinShell: InitCommonControlsEx failed (GetLastError ' ,
+                WinApi lastError printString , ') — SysListView32 will not register' ].
+        ^true
+    ]
+
+    WinShell class >> guiFont ^ <Integer> [
+        "DEFAULT_GUI_FONT is a stock object: never deleted, valid for the life
+         of the process, and the same handle every time. A control that is not
+         sent one renders in the bitmap System font — 1994's default, which
+         visual styles do not override."
+        GuiFont isNil ifTrue: [ GuiFont := WinApi getStockObject: (WinApi constant: 'DEFAULT_GUI_FONT') ].
+        ^GuiFont
+    ]
+
+    "── D3: the controls ─────────────────────────────────────────────────"
+
+    WinShell class >> buildControls ^ <OrderedCollection> [
+        "Called from `openMain`, at open time — never from a doit (Δ2) and
+         never from a handler (§2.4a). Idempotent, because `cycle: 10` opens
+         ten windows in one VM and a second call must build children for the
+         NEW window rather than hand back handles belonging to a destroyed one."
+        | child |
+        self ensureOpen: 'buildControls'.
+        self controlsEnabled ifFalse: [
+            Controls := OrderedCollection new.
+            ControlsById := Dictionary new.
+            ^Controls ].
+        self ensureCommonControls.
+        Controls := OrderedCollection new.
+        ControlsById := Dictionary new.
+        NextControlId := self firstControlId.
+
+        child := self
+            addControl: #button
+            class: 'BUTTON'
+            text: 'Do It'
+            style: (((WinApi constant: 'WS_CHILD')
+                bitOr: (WinApi constant: 'WS_VISIBLE'))
+                bitOr: ((WinApi constant: 'WS_TABSTOP')
+                    bitOr: (WinApi constant: 'BS_DEFPUSHBUTTON')))
+            exStyle: 0.
+
+        child := self
+            addControl: #status
+            class: 'EDIT'
+            text: 'clicks: 0'
+            style: (((WinApi constant: 'WS_CHILD')
+                bitOr: (WinApi constant: 'WS_VISIBLE'))
+                bitOr: ((WinApi constant: 'WS_BORDER')
+                    bitOr: (WinApi constant: 'ES_AUTOHSCROLL')))
+            exStyle: 0.
+
+        child := self
+            addControl: #list
+            class: 'SysListView32'
+            text: ''
+            style: (((WinApi constant: 'WS_CHILD')
+                bitOr: (WinApi constant: 'WS_VISIBLE'))
+                bitOr: ((WinApi constant: 'LVS_REPORT')
+                    bitOr: ((WinApi constant: 'LVS_SINGLESEL')
+                        bitOr: (WinApi constant: 'LVS_SHOWSELALWAYS'))))
+            exStyle: 0.
+        self buildListColumns: child.
+        self addListRow: 'the drain' detail: 'flag, then work'.
+        self addListRow: 'the door' detail: 'record and return'.
+        ^Controls
+    ]
+
+    WinShell class >> addControl: aName <Symbol> class: aClass <String> text: aText <String>
+                       style: style <Integer> exStyle: exStyle <Integer> ^ <WinControl> [
+        | c |
+        c := WinControl
+            name: aName class: aClass text: aText
+            style: style exStyle: exStyle
+            id: NextControlId in: Hwnd.
+        c setFont: self guiFont.
+        Controls add: c.
+        ControlsById at: NextControlId put: c.
+        NextControlId := NextControlId + 1.
+        ^c
+    ]
+
+    "── the list view's own content ──────────────────────────────────────
+     Struct-by-layout, at winkb-QUERIED offsets, exactly as WNDCLASSW is built
+     in 91 — nothing here transcribes a member position."
+
+    WinShell class >> buildListColumns: aControl <WinControl> [
+        | col |
+        col := WinArena alloc: (WinApi sizeOf: 'LVCOLUMNW').
+        self setColumn: col text: 'what' width: 160 index: 0 in: aControl.
+        self setColumn: col text: 'it does' width: 260 index: 1 in: aControl.
+        ^self
+    ]
+
+    WinShell class >> setColumn: colPtr <Integer> text: aString <String> width: w <Integer> index: i <Integer> in: aControl <WinControl> [
+        WinArena u32At: colPtr + (WinApi offsetOf: 'LVCOLUMNW' field: 'mask')
+                 put: (((WinApi constant: 'LVCF_TEXT') bitOr: (WinApi constant: 'LVCF_WIDTH'))
+                       bitOr: (WinApi constant: 'LVCF_SUBITEM')).
+        WinArena u32At: colPtr + (WinApi offsetOf: 'LVCOLUMNW' field: 'cx') put: w.
+        WinArena u32At: colPtr + (WinApi offsetOf: 'LVCOLUMNW' field: 'iSubItem') put: i.
+        WinArena i64At: colPtr + (WinApi offsetOf: 'LVCOLUMNW' field: 'pszText')
+                 put: (WinArena nativeUtf16: aString).
+        aControl send: (WinApi constant: 'LVM_INSERTCOLUMNW') wParam: i lParam: colPtr.
+        ^self
+    ]
+
+    WinShell class >> addListRow: aString <String> detail: aDetail <String> ^ <Integer> [
+        "One row, appended. Answers the item index Win32 assigned, or -1.
+
+         Called from `buildControls` at open time and from the button's action
+         IN THE DRAIN — never from a handler, because LVM_INSERTITEMW makes the
+         list view notify its parent, and a notification arriving inside a
+         handler is the nesting this whole architecture avoids."
+        "The LVITEMW and both strings are REUSED, and both choices are the
+         stress row's ('the arena does not grow without bound'). The arena
+         never reclaims, so a fresh 88-byte struct per row would be a slow
+         leak with a cliff at the end of the region — and `nativeUtf16:`
+         memoises by VALUE, so 200 distinct row labels would be 200 permanent
+         allocations. LVM_INSERTITEMW and LVM_SETITEMTEXTW both COPY the text
+         before they return, which is exactly the contract `scratchUtf16:`
+         asks its callers to satisfy."
+        | item idx |
+        RowScratch isNil ifTrue: [ RowScratch := WinArena alloc: (WinApi sizeOf: 'LVITEMW') ].
+        item := RowScratch.
+        WinArena u32At: item + (WinApi offsetOf: 'LVITEMW' field: 'mask')
+                 put: (WinApi constant: 'LVIF_TEXT').
+        WinArena u32At: item + (WinApi offsetOf: 'LVITEMW' field: 'iItem')
+                 put: self listRowCount.
+        WinArena u32At: item + (WinApi offsetOf: 'LVITEMW' field: 'iSubItem') put: 0.
+        WinArena i64At: item + (WinApi offsetOf: 'LVITEMW' field: 'pszText')
+                 put: (WinArena scratchUtf16: aString).
+        idx := WinApi i32: ((self controlNamed: #list)
+            send: (WinApi constant: 'LVM_INSERTITEMW') wParam: 0 lParam: item).
+        idx < 0 ifTrue: [ ^-1 ].
+        WinArena u32At: item + (WinApi offsetOf: 'LVITEMW' field: 'iItem') put: idx.
+        WinArena u32At: item + (WinApi offsetOf: 'LVITEMW' field: 'iSubItem') put: 1.
+        WinArena i64At: item + (WinApi offsetOf: 'LVITEMW' field: 'pszText')
+                 put: (WinArena scratchUtf16: aDetail).
+        (self controlNamed: #list)
+            send: (WinApi constant: 'LVM_SETITEMTEXTW') wParam: idx lParam: item.
+        ListRowCount := self listRowCount + 1.
+        ^idx
+    ]
+
+    WinShell class >> selectRequestFor: index <Integer> ^ <Integer> [
+        "Build the LVITEMW that LVM_SETITEMSTATE reads, and answer its ADDRESS
+         so the HOST can send the message.
+
+         That division is WG2's Δ 3 made practical. A WM_NOTIFY that reaches
+         Smalltalk must originate outside every VM entry, so the message cannot
+         be sent from a doit — but the struct it points at can only be built by
+         the side that owns the arena. So Smalltalk builds; the host's control
+         drain sends. The address is stable arena storage, allocated once."
+        SelectRequest isNil ifTrue: [ SelectRequest := WinArena alloc: (WinApi sizeOf: 'LVITEMW') ].
+        WinArena u32At: SelectRequest + (WinApi offsetOf: 'LVITEMW' field: 'mask')
+                 put: (WinApi constant: 'LVIF_STATE').
+        WinArena u32At: SelectRequest + (WinApi offsetOf: 'LVITEMW' field: 'iItem') put: index.
+        WinArena u32At: SelectRequest + (WinApi offsetOf: 'LVITEMW' field: 'state')
+                 put: ((WinApi constant: 'LVIS_SELECTED') bitOr: (WinApi constant: 'LVIS_FOCUSED')).
+        WinArena u32At: SelectRequest + (WinApi offsetOf: 'LVITEMW' field: 'stateMask')
+                 put: ((WinApi constant: 'LVIS_SELECTED') bitOr: (WinApi constant: 'LVIS_FOCUSED')).
+        ^SelectRequest
+    ]
+
+    "── D4: the layout, run BY THE DRAIN ─────────────────────────────────"
+
+    WinShell class >> applyLayout ^ <Integer> [
+        "Compute every rect from the settled client size, then one SetWindowPos
+         per control. Answers how many moved.
+
+         This runs from `drainPass` and from nowhere else that matters. Each
+         SetWindowPos here SENDS messages — to the child (whose wndproc is
+         comctl32's, not ours) and, for WM_WINDOWPOSCHANGED, back to us — and
+         the ones that do reach our door find the depth counter at 1, because
+         the drain took the guard. They are declined, and that is exactly
+         right: a layout that provoked another layout would not terminate."
+        | rects moved |
+        self isOpen ifFalse: [ ^0 ].
+        rects := self layout
+            rectsIn: self clientWidth
+            by: self clientHeight
+            dpi: (Dpi isNil ifTrue: [ WinApi constant: 'USER_DEFAULT_SCREEN_DPI' ] ifFalse: [ Dpi ]).
+        moved := 0.
+        self controls do: [ :c |
+            | r |
+            r := rects at: c name ifAbsent: [ nil ].
+            r isNil ifFalse: [ (c moveTo: r) ifTrue: [ moved := moved + 1 ] ] ].
+        ^moved
+    ]
+
+    WinShell class >> expectedRects ^ <Dictionary> [
+        "What the layout SAYS the controls should be, for a gate that compares
+         it against what GetWindowRect says they ARE. Two independent
+         productions of the same numbers — the same shape of cross-check
+         `lastSizeMatchesClientRect` already uses."
+        ^self layout
+            rectsIn: self clientWidth
+            by: self clientHeight
+            dpi: (Dpi isNil ifTrue: [ WinApi constant: 'USER_DEFAULT_SCREEN_DPI' ] ifFalse: [ Dpi ])
+    ]
+
+    WinShell class >> clientOrigin ^ <Array> [
+        "The client area's top-left in SCREEN coordinates, obtained by
+         subtracting the client rect's size from the window rect the same way
+         `applyDips` measures the frame — no ClientToScreen, no assumption
+         about where DWM put the border.
+
+         Δ: the naive version uses the window rect's own left/top, which is
+         wrong by exactly the frame width on every window with a border, and
+         wrong by a plausible-looking small number rather than by an error.
+
+         Δ (measured, and worth a line because it cost the first run of gate
+         item 7): every intermediate here is a NAMED TEMPORARY, not an inline
+         expression. Smalltalk's binary operators are strictly left to right —
+         `left + frame // 2` is `(left + frame) // 2`, not `left + (frame // 2)`
+         — and the first version of this method produced 112 where 216 was
+         right, which is a coordinate, not an error. Nothing about it looked
+         wrong; only the layout comparison said so."
+        | wr cr frameW clientW clientH border |
+        wr := self windowRect.
+        cr := self clientRect.
+        frameW := (wr at: 3) - (wr at: 1).
+        clientW := (cr at: 3) - (cr at: 1).
+        clientH := (cr at: 4) - (cr at: 2).
+        border := (frameW - clientW) // 2.
+        ^Array
+            with: (wr at: 1) + border
+            with: (wr at: 4) - border - clientH
+    ]
+
+    WinShell class >> actualRects ^ <Dictionary> [
+        "Where the controls actually are, in client coordinates, read back from
+         Win32."
+        | origin out |
+        origin := self clientOrigin.
+        out := Dictionary new.
+        self controls do: [ :c | out at: c name put: (c clientRectIn: origin) ].
+        ^out
+    ]
+
+    WinShell class >> layoutMatches ^ <Boolean> [
+        "Gate item 7, as one equality. Every control's real rect equals the
+         rect `WinLayout` computed for the settled client size."
+        | want got |
+        self isOpen ifFalse: [ ^false ].
+        want := self expectedRects.
+        got := self actualRects.
+        self controls do: [ :c |
+            | w g |
+            w := want at: c name ifAbsent: [ nil ].
+            g := got at: c name ifAbsent: [ nil ].
+            (w isNil or: [ g isNil ]) ifTrue: [ ^false ].
+            1 to: 4 do: [ :i | (w at: i) = (g at: i) ifFalse: [ ^false ] ] ].
+        ^true
+    ]
+
+    "── the MEANING of a control message, run in the drain ───────────────"
+
+    WinShell class >> serviceCommand: anId <Integer> code: aCode <Integer> from: aHandle <Integer> [
+        "The button's action. Two SendMessageW's into two other controls and a
+         list-view insertion — synchronous Win32 work, i.e. exactly what a
+         message handler may not do — running here, one pass later, with the VM
+         quiescent.
+
+         `tests_wg3.md` item 6 asks for this to be proven by SMALLTALK state
+         rather than by a Rust counter, so the click count is a class variable
+         and the status field is read back out of Win32 with GetWindowTextW."
+        | c |
+        c := self controlWithId: anId.
+        c isNil ifTrue: [ ^self ].
+        c flag.
+        c name == #button ifTrue: [
+            ClickCount := self clickCount + 1.
+            (self controlNamed: #status)
+                setText: 'clicks: ' , ClickCount printString.
+            self addListRow: 'click ' , ClickCount printString
+                 detail: 'serviced in drain pass ' , self drainPasses printString ].
+        ^self
+    ]
+
+    WinShell class >> serviceNotifyFrom: aHandle <Integer> id: anId <Integer> code: aCode <Integer> [
+        "A WM_NOTIFY, one pass after it arrived — with its NMHDR pointer long
+         since invalid, which is precisely why the door read the three fields
+         into Integers before it returned."
+        | c |
+        c := self controlWithId: anId.
+        c isNil ifTrue: [ ^self ].
+        c noteNotify: aCode.
+        "NM_CUSTOMDRAW arrives once per PAINT of a themed list view — it is a
+         drawing callback wearing a notification's clothes, and it is the only
+         member of the storm class that reaches this layer at all. Recorded but
+         not treated as news, so `lastMeaningfulNotify` answers the thing a test
+         (or a user) actually asked about rather than whatever was drawn last."
+        aCode = (WinApi constant: 'NM_CUSTOMDRAW') ifFalse: [
+            LastMeaningfulNotify := Array with: aHandle with: anId with: aCode ].
+        ^self
+    ]
+
+    WinShell class >> lastMeaningfulNotify ^ <Object> [ ^LastMeaningfulNotify ]
+
+    "── reporting ────────────────────────────────────────────────────────"
+
+    WinShell class >> controlReport ^ <String> [
+        | s |
+        self controls isEmpty ifTrue: [ ^'<none built>' ].
+        s := WriteStream on: String new.
+        self controls do: [ :c |
+            s nextPutAll: c name printString;
+              nextPutAll: '(id '; nextPutAll: c id printString;
+              nextPutAll: (c isAlive ifTrue: [ ' live' ] ifFalse: [ ' DEAD' ]);
+              nextPutAll: ' notifies '; nextPutAll: c notifyCount printString;
+              nextPutAll: ') ' ].
+        ^s contents
+    ]
+
+    WinShell class >> controlReportLine [
+        Transcript showCr: 'WinControls: ' , self controlReport.
+        Transcript showCr: '  layout wants ' , self expectedRects printString.
+        Transcript showCr: '  win32 says   ' , self actualRects printString.
+        Transcript showCr: '  matches      ' , self layoutMatches printString.
+        ^self
+    ]
+
+    WinShell class >> buttonCentreInWindow ^ <Array> [
+        "The button's centre, in WINDOW coordinates — which is the coordinate
+         system `snap` captures in (`gui/src/shell/snap.rs` sizes its bitmap by
+         GetWindowRect, WG2's Δ 6). Gate item 8 reads the PNG at this point and
+         asserts it is not the unthemed button face."
+        | wr br |
+        wr := self windowRect.
+        br := (self controlNamed: #button) screenRect.
+        ^Array
+            with: ((br at: 1) + (br at: 3)) // 2 - (wr at: 1)
+            with: ((br at: 2) + (br at: 4)) // 2 - (wr at: 2)
+    ]
+
+    WinShell class >> buttonProbePointInWindow ^ <Array> [
+        "A point one sixth of the way across the button and vertically centred
+         — inside the fill, clear of the label. The CENTRE is the obvious probe
+         and it is the wrong one: a push button's centre is where its text is,
+         so a themed button and an unthemed button both answer 'the text
+         colour' there and the pixel proves nothing about either."
+        | wr br |
+        wr := self windowRect.
+        br := (self controlNamed: #button) screenRect.
+        ^Array
+            with: (br at: 1) + (((br at: 3) - (br at: 1)) // 6) - (wr at: 1)
+            with: ((br at: 2) + (br at: 4)) // 2 - (wr at: 2)
+    ]
+
+    WinShell class >> unthemedButtonFace ^ <Integer> [
+        "COLOR_BTNFACE as a COLORREF — what a button looks like WITHOUT the v6
+         manifest. Asked of the system rather than transcribed, so the gate's
+         'themed, by pixel' assertion compares two things this machine
+         produced."
+        ^WinApi getSysColor: (WinApi constant: 'COLOR_BTNFACE')
+    ]
+]

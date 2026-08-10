@@ -644,6 +644,53 @@ Object subclass: WinApi [
         <primitive: FFI function: #PostQuitMessage ret: #v args: #(g)>
     ]
 
+    "── WG3: the drain's clock, the controls' library, the theme's colours ─"
+
+    WinApi class >> setTimer: hwnd <Integer> id: idEvent <Integer> elapse: ms <Integer> proc: fn <Integer> ^ <Integer> [
+        "The drain's HEARTBEAT — not its wake. WG3's pitfall list is explicit
+         that WM_TIMER is low-resolution and coalesces already, so a design
+         that used it as the primary wake would drain late and in clumps;
+         PostMessageW(WM_APP_DRAIN) is the wake, and this catches the case the
+         wake cannot: a flag set with no message following, and a drainPass
+         that asked to be run again (which must NOT re-post from inside itself
+         or the pass loops).
+
+         `proc: 0` means 'post WM_TIMER to the window', which is what sends it
+         through the door. A non-null TIMERPROC would be called by
+         DefWindowProcW instead and would never reach the drain."
+        <primitive: FFI function: #SetTimer ret: #g args: #(g g g g)>
+    ]
+
+    WinApi class >> killTimer: hwnd <Integer> id: idEvent <Integer> ^ <Integer> [
+        <primitive: FFI function: #KillTimer ret: #g args: #(g g)>
+    ]
+
+    WinApi class >> initCommonControls: iccPtr <Integer> ^ <Integer> [
+        "comctl32's own initialiser, and `SysListView32` will not register its
+         window class without it — CreateWindowExW simply answers NULL. The
+         manifest (WG3 D6) decides which comctl32 gets loaded; this decides
+         which classes that comctl32 registers. Both are needed and neither
+         substitutes for the other, which is exactly why the gate checks the
+         manifest by PIXEL and the class by a NULL handle."
+        <primitive: FFI function: #InitCommonControlsEx ret: #g args: #(g)>
+    ]
+
+    WinApi class >> getSysColor: index <Integer> ^ <Integer> [
+        "A system colour as a COLORREF. WG3 needs exactly one — COLOR_BTNFACE,
+         the unthemed button face — because `tests_wg3.md` item 8 asserts a
+         pixel inside a button DIFFERS from it. Read rather than transcribed,
+         for the same reason every other number in this file is."
+        <primitive: FFI function: #GetSysColor ret: #g args: #(g)>
+    ]
+
+    WinApi class >> getStockObject: index <Integer> ^ <Integer> [
+        <primitive: FFI function: #GetStockObject ret: #g args: #(g)>
+    ]
+
+    WinApi class >> getDlgItem: hwnd <Integer> id: id <Integer> ^ <Integer> [
+        <primitive: FFI function: #GetDlgItem ret: #g args: #(g g)>
+    ]
+
     WinApi class >> defWindowProc: hwnd <Integer> message: m <Integer> wParam: w <Integer> lParam: l <Integer> ^ <Integer> [
         "The system default, callable from the guest. The door does not need
          this — a handler answers the Symbol #defwindowproc and Rust makes the
@@ -764,7 +811,17 @@ Object subclass: WinShell [
                 MicaHResult DarkHResult FaultMode RectScratch TextScratch DwmCell
                 MessagesSeen LastMessage LastSizeSeen SizeCount CloseCount
                 DestroyCount QuitPosted HandlerMode NestedSendResult LastKey
-                LastCommand>
+                LastCommand
+                "── WG3: the drain's own state ──────────────────────────────
+                 Everything a message HANDLER writes and a drain PASS reads.
+                 The split is the whole architecture (win_gui_design §2.4a):
+                 the handler sets a flag and returns in microseconds; the pass
+                 runs later, on a fresh top-level entry, against the SETTLED
+                 state — so ten resizes produce one layout, not ten."
+                DrainPasses PendingLayout LastLayoutSize LayoutCount
+                PendingCommands PendingNotifies NotifyCount LastNotify
+                TrackEnterCount TrackExitCount ReaskOnce ReaskCount
+                DrainRaiseOnce DrainFaultOnce DrainWorkCount TimerId>
 
     "── the window's own opinions ────────────────────────────────────────"
 
@@ -992,6 +1049,23 @@ Object subclass: WinShell [
         "6. The materials, BEFORE showing (D3's pitfall)."
         self applyMaterials.
 
+        "6b. WG3: the children, and then the drain's heartbeat.
+
+             AT OPEN TIME, never from a doit and never from a handler — the
+             sprint's pitfall list says so and WG2's Δ 2 says why: CreateWindowExW
+             SENDS messages, so a control created from a doit delivers them into
+             a VM that is already inside an entry. Here they are declined by the
+             busy guard, which is correct and costs nothing: nothing in this
+             window's construction needs to hear its own WM_SIZE, because
+             `applyLayout` runs explicitly on the next line.
+
+             Before ShowWindow, so the window's first frame is already laid out
+             rather than a flash of empty client area."
+        self buildControls.
+        PendingLayout := true.
+        self drainPass.
+        self startHeartbeat.
+
         "7. On screen."
         WinApi showWindow: Hwnd cmd: (WinApi constant: 'SW_SHOW').
         WinApi updateWindow: Hwnd.
@@ -1003,6 +1077,37 @@ Object subclass: WinShell [
         self applyFaultInjection.
         ^self hwnd
     ]
+
+    WinShell class >> drainTimerId ^ <Integer> [
+        "One timer, one id. Arbitrary but fixed, so a WG4 timer can pick
+         another and the two never collide."
+        ^16rD8A1
+    ]
+
+    WinShell class >> heartbeatMillis ^ <Integer> [
+        "50 ms. Low enough that a pass which asked to be run again is serviced
+         while a script is still watching, high enough to be free: a heartbeat
+         with nothing to do costs NO VM ENTRY at all (Rust checks the request
+         flag before it sends `drainPass`), which is what keeps `drainPasses`
+         a measurement of the drain rather than of the clock."
+        ^50
+    ]
+
+    WinShell class >> startHeartbeat ^ <Integer> [
+        "The heartbeat, NOT the wake — see WinApi setTimer:id:elapse:proc:.
+         Answers the timer id Win32 confirmed, or 0. Not fatal if it fails: the
+         posted wake services every drain that follows a message, and the only
+         thing lost would be a pass that asked to be run again."
+        self ensureOpen: 'startHeartbeat'.
+        TimerId := WinApi
+            setTimer: Hwnd
+            id: self drainTimerId
+            elapse: self heartbeatMillis
+            proc: 0.
+        ^TimerId isNil ifTrue: [ 0 ] ifFalse: [ TimerId ]
+    ]
+
+    WinShell class >> timerId ^ <Object> [ ^TimerId ]
 
     WinShell class >> applyDips [
         "Size the CLIENT area to dipWidth x dipHeight scaled by this
@@ -1221,6 +1326,10 @@ Object subclass: WinShell [
         msg = (WinApi constant: 'WM_COMMAND') ifTrue: [ ^self onCommand: wp lParam: lp ].
         msg = (WinApi constant: 'WM_KEYDOWN') ifTrue: [ ^self onKeyDown: wp lParam: lp ].
         msg = (WinApi constant: 'WM_CHAR') ifTrue: [ ^self onChar: wp lParam: lp ].
+        msg = (WinApi constant: 'WM_ENTERSIZEMOVE') ifTrue: [ ^self onEnterTracking: #sizemove ].
+        msg = (WinApi constant: 'WM_ENTERMENULOOP') ifTrue: [ ^self onEnterTracking: #menu ].
+        msg = (WinApi constant: 'WM_EXITSIZEMOVE') ifTrue: [ ^self onExitTracking: #sizemove ].
+        msg = (WinApi constant: 'WM_EXITMENULOOP') ifTrue: [ ^self onExitTracking: #menu ].
 
         "The safe half of the two-sided allowlist. Rust forwarded something I
          do not handle — a legitimate state of the world while the two lists
@@ -1236,11 +1345,73 @@ Object subclass: WinShell [
          the client rect GetClientRect reports) is therefore a real
          cross-check of two independent sources and not a tautology.
 
-         Answers 0: handled. WG3 puts layout here."
+         Answers 0: handled.
+
+         Δ (WG3): WG2's comment ended 'WG3 puts layout here'. WG3 put layout
+         somewhere else on purpose, and the reason is this file's most
+         important new sentence. Laying out INSIDE a handler is a second VM
+         entry nested in the first the moment the layout's own SetWindowPos
+         sends a message, and the Cocoa side measured what that costs: the work
+         fails closed behind the re-entrancy guard with nothing in any log, and
+         once JIT-compiled it corrupts the tier-link invariant `walk_frames`
+         asserts, which is a hard crash. So this handler does what §2.4a says a
+         handler may do — record, set a flag, return — and `drainPass` below
+         does the work, later, once, against the settled size."
         self applyHandlerMode: #size.
         LastSizeSeen := Array with: (WinApi loWord: lp) with: (WinApi hiWord: lp).
         SizeCount := (SizeCount isNil ifTrue: [ 0 ] ifFalse: [ SizeCount ]) + 1.
+        PendingLayout := true.
         ^0
+    ]
+
+    WinShell class >> onEnterTracking: aKind <Symbol> ^ <Object> [
+        "A modal move/size or menu loop is about to start, and it will pump
+         this thread's queue ITSELF — so a posted WM_APP_DRAIN and a WM_TIMER
+         both fire inside it. Rust's own tracking flag (set in the trampoline,
+         before any guard, because it must hold even when the VM is busy) is
+         what actually suppresses the drain; this records that it happened, so
+         a test can assert the message path was used rather than a flag poked.
+
+         Windows has no NSDefaultRunLoopMode. That single absence is the one
+         genuine difference between this design and the Cocoa one it ports."
+        TrackEnterCount := (TrackEnterCount isNil ifTrue: [ 0 ] ifFalse: [ TrackEnterCount ]) + 1.
+        LastMessage := aKind.
+        ^#defwindowproc
+    ]
+
+    WinShell class >> onExitTracking: aKind <Symbol> ^ <Object> [
+        "Tracking ends. The flags that accumulated during the drag are still
+         set, and the door posts one wake on its way out of this message — so
+         exactly ONE pass runs, against the final size, which is what
+         `tests_wg3.md` item 4 asserts."
+        TrackExitCount := (TrackExitCount isNil ifTrue: [ 0 ] ifFalse: [ TrackExitCount ]) + 1.
+        ^#defwindowproc
+    ]
+
+    WinShell class >> window: hwnd <Integer> notifyFrom: from <Integer> id: id <Integer> code: code <Integer> ^ <Object> [
+        "WM_NOTIFY, already decoded — and the decoding is the point.
+
+         WM_NOTIFY's lParam is a pointer to an NMHDR that Windows guarantees
+         only for the DURATION OF THE CALL. So the door reads its three fields
+         (hwndFrom, idFrom, code — at the offsets winkb records) inside the
+         recovery window and hands them here as three Integers. Nothing stashes
+         the pointer, because a stashed one is valid right up until it is not,
+         and the failure is invisible until it corrupts something.
+
+         Recorded and queued; the MEANING runs in the drain, like every other
+         control message."
+        MessagesSeen := (MessagesSeen isNil ifTrue: [ 0 ] ifFalse: [ MessagesSeen ]) + 1.
+        LastMessage := WinApi constant: 'WM_NOTIFY'.
+        NotifyCount := (NotifyCount isNil ifTrue: [ 0 ] ifFalse: [ NotifyCount ]) + 1.
+        LastNotify := Array with: from with: id with: code.
+        PendingNotifies isNil ifTrue: [ PendingNotifies := OrderedCollection new ].
+        "Bounded: a custom-draw notification arrives per paint, and an unbounded
+         queue between two drains would be a slow leak in the busiest message
+         this layer has. The LATEST is what a drain wants anyway — that is what
+         coalescing means."
+        PendingNotifies size >= 64 ifTrue: [ PendingNotifies removeFirst ].
+        PendingNotifies add: LastNotify.
+        ^#defwindowproc
     ]
 
     WinShell class >> onClose ^ <Object> [
@@ -1278,11 +1449,159 @@ Object subclass: WinShell [
     ]
 
     WinShell class >> onCommand: wp <Integer> lParam: lp <Integer> ^ <Object> [
-        "Menus and controls are WG3's. Recording the id and defaulting is the
-         whole of WG2's opinion about them — and it proves the route exists
-         before there is anything on the other end of it."
+        "A control (or, later, a menu) speaking. wParam's low word is the child
+         id and its high word the notification code (BN_CLICKED is 0); lParam
+         is the control's own HWND, or 0 for a menu.
+
+         D3's rule, in three lines: look up nothing expensive, set a flag,
+         return. The control's MEANING — which for WG3's button is two
+         SendMessageW's into other controls, i.e. exactly the kind of work that
+         would nest if it ran here — happens in `drainPass`."
         LastCommand := WinApi loWord: wp.
-        ^#defwindowproc
+        PendingCommands isNil ifTrue: [ PendingCommands := OrderedCollection new ].
+        PendingCommands size >= 512 ifTrue: [ PendingCommands removeFirst ].
+        PendingCommands add: (Array with: LastCommand with: (WinApi hiWord: wp) with: lp).
+        "Answering 0 means 'handled' and is right for a control we own; anything
+         else is still DefWindowProcW's, which is what keeps menus, accelerators
+         and the system menu working while WG4 has not built them yet."
+        ^(self ownsControlId: LastCommand) ifTrue: [ 0 ] ifFalse: [ #defwindowproc ]
+    ]
+
+    "── WG3 D1: the drain pass ───────────────────────────────────────────
+     The other half of flag-and-drain, and the only place in this layer where
+     real work happens.
+
+     I am called by the Rust trampoline on WM_APP_DRAIN (the wake, posted by
+     the door) and on WM_TIMER (the heartbeat, catching what the wake could
+     not) — as a FRESH TOP-LEVEL VM ENTRY, with the depth guard at 0, no host
+     `eval` live, and no modal loop pumping. Every one of those is checked in
+     Rust before I am sent, and together they are the property this whole
+     architecture buys: I am not inside a callback.
+
+     THREE RULES, all of them learnt from somebody else's scar tissue:
+
+       * Clear the flag BEFORE doing its work. A pass that raised half way
+         through would otherwise retry forever, and `tests_wg3.md`'s stress row
+         asks for the opposite: the pass completes, the flag is cleared, the
+         next pass runs normally.
+       * Read the SETTLED state, not the message's. Ten resizes set one flag;
+         asking GetClientRect here answers what the window actually IS, which
+         is why one pass is enough and why `drainPasses < sizeCount` is a
+         property rather than an optimisation.
+       * NEVER post a wake from in here. A pass that discovered more work
+         answers NON-ZERO and the HEARTBEAT picks it up; posting from inside
+         the pass is how a drain becomes a spin."
+
+    WinShell class >> drainPass ^ <Integer> [
+        "Answers 0 for 'nothing more', non-zero for 'run me again'. Anything
+         that is not an Integer — a raise, a fault — Rust reads as 'nothing
+         more', which is the safe direction."
+        | more |
+        DrainPasses := (DrainPasses isNil ifTrue: [ 0 ] ifFalse: [ DrainPasses ]) + 1.
+        more := 0.
+        self applyDrainFailureMode.
+        PendingLayout == true ifTrue: [
+            PendingLayout := false.
+            LayoutCount := (LayoutCount isNil ifTrue: [ 0 ] ifFalse: [ LayoutCount ]) + 1.
+            LastLayoutSize := self isOpen
+                ifTrue: [ Array with: self clientWidth with: self clientHeight ]
+                ifFalse: [ LastSizeSeen ].
+            self applyLayout ].
+        (PendingCommands isNil or: [ PendingCommands isEmpty ]) ifFalse: [
+            | queued |
+            queued := PendingCommands.
+            PendingCommands := OrderedCollection new.
+            queued do: [ :c |
+                DrainWorkCount := (DrainWorkCount isNil ifTrue: [ 0 ] ifFalse: [ DrainWorkCount ]) + 1.
+                self serviceCommand: (c at: 1) code: (c at: 2) from: (c at: 3) ] ].
+        (PendingNotifies isNil or: [ PendingNotifies isEmpty ]) ifFalse: [
+            | queued |
+            queued := PendingNotifies.
+            PendingNotifies := OrderedCollection new.
+            queued do: [ :n |
+                self serviceNotifyFrom: (n at: 1) id: (n at: 2) code: (n at: 3) ] ].
+        ReaskOnce == true ifTrue: [
+            "The guest's own escape hatch, and `tests_wg3.md` item 5's whole
+             mechanism: work discovered DURING a pass. Answering non-zero
+             leaves the request standing for the heartbeat; the pass count
+             must therefore go up by one more and then stop, not run away."
+            ReaskOnce := false.
+            ReaskCount := (ReaskCount isNil ifTrue: [ 0 ] ifFalse: [ ReaskCount ]) + 1.
+            more := 1 ].
+        ^more
+    ]
+
+    WinShell class >> applyDrainFailureMode [
+        "`tests_wg3.md`'s stress rows 3 and 4 need a pass that RAISES and a pass
+         that FAULTS, on the real window, with the real pump running — and
+         neither can be arranged from outside this class. One-shot, unlike
+         `handlerMode:`, because the question here is 'does the NEXT pass run
+         normally' and a persistent mode could not ask it."
+        DrainRaiseOnce == true ifTrue: [
+            DrainRaiseOnce := false.
+            ^self error: 'WinShell: deliberate raise inside drainPass (tests_wg3.md stress row 3)' ].
+        DrainFaultOnce == true ifTrue: [
+            DrainFaultOnce := false.
+            ^(Alien forAddress: 1 size: 8) signedLongAt: 1 ].
+        ^self
+    ]
+
+    "── the hooks 92_winui_controls.mst fills in ─────────────────────────
+     Defined here as no-ops so that this file is complete on its own: the
+     drain, the tracking suppression and the coalescing gate are `Part 1` of
+     WG3's acceptance and must pass with NO CONTROL IN EXISTENCE. Loading 92
+     overrides all four.
+
+     That ordering is not tidiness. Controls are what generate the storm the
+     drain absorbs, and the sprint's own opening says retrofitting the pattern
+     afterwards is exactly how the Cocoa side acquired its scars."
+
+    WinShell class >> applyLayout [ ^self ]
+    WinShell class >> buildControls [ ^self ]
+    WinShell class >> ownsControlId: anId <Integer> ^ <Boolean> [ ^false ]
+    WinShell class >> serviceCommand: anId <Integer> code: aCode <Integer> from: aHandle <Integer> [ ^self ]
+    WinShell class >> serviceNotifyFrom: aHandle <Integer> id: anId <Integer> code: aCode <Integer> [ ^self ]
+
+    "── what the drain recorded ──────────────────────────────────────────"
+
+    WinShell class >> drainPasses ^ <Integer> [ ^DrainPasses isNil ifTrue: [ 0 ] ifFalse: [ DrainPasses ] ]
+    WinShell class >> layoutCount ^ <Integer> [ ^LayoutCount isNil ifTrue: [ 0 ] ifFalse: [ LayoutCount ] ]
+    WinShell class >> lastLayoutSize ^ <Object> [ ^LastLayoutSize ]
+    WinShell class >> pendingLayout ^ <Boolean> [ ^PendingLayout == true ]
+    WinShell class >> notifyCount ^ <Integer> [ ^NotifyCount isNil ifTrue: [ 0 ] ifFalse: [ NotifyCount ] ]
+    WinShell class >> lastNotify ^ <Object> [ ^LastNotify ]
+    WinShell class >> trackEnterCount ^ <Integer> [ ^TrackEnterCount isNil ifTrue: [ 0 ] ifFalse: [ TrackEnterCount ] ]
+    WinShell class >> trackExitCount ^ <Integer> [ ^TrackExitCount isNil ifTrue: [ 0 ] ifFalse: [ TrackExitCount ] ]
+    WinShell class >> reaskCount ^ <Integer> [ ^ReaskCount isNil ifTrue: [ 0 ] ifFalse: [ ReaskCount ] ]
+    WinShell class >> drainWorkCount ^ <Integer> [ ^DrainWorkCount isNil ifTrue: [ 0 ] ifFalse: [ DrainWorkCount ] ]
+    WinShell class >> pendingCommandCount ^ <Integer> [
+        ^PendingCommands isNil ifTrue: [ 0 ] ifFalse: [ PendingCommands size ] ]
+
+    WinShell class >> askForAnotherPass [
+        "Arm the 'work discovered during a pass' case (gate item 5)."
+        ReaskOnce := true. ^self ]
+    WinShell class >> raiseInNextPass [ DrainRaiseOnce := true. ^self ]
+    WinShell class >> faultInNextPass [ DrainFaultOnce := true. ^self ]
+
+    WinShell class >> lastLayoutMatchesClientRect ^ <Boolean> [
+        "Gate item 2's assertion, written here so the script and the check
+         cannot drift: what the DRAIN laid out against what the window IS. The
+         two are read at different times from different sources, which is what
+         makes it a cross-check rather than a tautology."
+        LastLayoutSize isNil ifTrue: [ ^false ].
+        self isOpen ifFalse: [ ^false ].
+        ^(LastLayoutSize at: 1) = self clientWidth
+            and: [ (LastLayoutSize at: 2) = self clientHeight ]
+    ]
+
+    WinShell class >> resetDrainCounters [
+        DrainPasses := 0. PendingLayout := nil. LastLayoutSize := nil. LayoutCount := 0.
+        PendingCommands := OrderedCollection new. PendingNotifies := OrderedCollection new.
+        NotifyCount := 0. LastNotify := nil.
+        TrackEnterCount := 0. TrackExitCount := 0.
+        ReaskOnce := nil. ReaskCount := 0. DrainWorkCount := 0.
+        DrainRaiseOnce := nil. DrainFaultOnce := nil.
+        ^self
     ]
 
     WinShell class >> onKeyDown: wp <Integer> lParam: lp <Integer> ^ <Object> [
@@ -1326,6 +1645,10 @@ Object subclass: WinShell [
         SizeCount := 0. CloseCount := 0. DestroyCount := 0.
         QuitPosted := nil. NestedSendResult := nil.
         LastKey := nil. LastCommand := nil.
+        "WG3: the drain's tallies zero with the door's, because every gate line
+         compares one against the other — `drainPasses < sizeCount` is
+         meaningless if the two were reset at different moments."
+        self resetDrainCounters.
         ^self
     ]
 
@@ -1467,7 +1790,23 @@ Object subclass: WinShell [
             ', close ' , self closeCount printString ,
             ', destroy ' , self destroyCount printString , ')'.
         Transcript showCr: '  last size seen ' , self lastSizeSeen printString.
+        Transcript showCr: '  drain passes   ' , self drainPasses printString ,
+            ' (layouts ' , self layoutCount printString ,
+            ', notifies ' , self notifyCount printString ,
+            ', work ' , self drainWorkCount printString , ')'.
+        Transcript showCr: '  last layout    ' , self lastLayoutSize printString.
+        Transcript showCr: '  heartbeat id   ' , self timerId printString ,
+            ' every ' , self heartbeatMillis printString , 'ms'.
+        Transcript showCr: '  controls       ' , self controlReport.
         ^self
+    ]
+
+    WinShell class >> controlReport ^ <String> [
+        "Overridden by 92_winui_controls.mst. Without that file loaded there
+         are no controls, and saying so is better than a blank line — the drain
+         is a deliverable on its own and Part 1 of the gate runs with nothing
+         in the window at all."
+        ^'<none — 92_winui_controls.mst is not loaded>'
     ]
 
     WinShell class >> cycle: n <Integer> ^ <Dictionary> [

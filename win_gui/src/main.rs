@@ -130,9 +130,10 @@ mod app {
     use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
     use windows::Win32::System::Threading::GetCurrentThreadId;
     use windows::Win32::UI::WindowsAndMessaging::{
-        DispatchMessageW, GetMessageW, GetWindowThreadProcessId, IsWindow, PeekMessageW,
-        PostQuitMessage, PostThreadMessageW, SetWindowPos, TranslateMessage, HWND_TOP, MSG,
-        PM_NOREMOVE, SWP_NOMOVE, SWP_NOZORDER, WM_APP,
+        DispatchMessageW, GetDlgItem, GetMessageW, GetWindowThreadProcessId, IsWindow,
+        PeekMessageW, PostQuitMessage, PostThreadMessageW, SendMessageW, SetWindowPos,
+        TranslateMessage, HWND_TOP, MSG, PM_NOREMOVE, PM_REMOVE, SWP_NOMOVE, SWP_NOZORDER, WM_APP,
+        WM_QUIT,
     };
 
     use crate::control::CtlReq;
@@ -232,6 +233,22 @@ mod app {
         let list = world.join("winui.list");
         vm.load_list(&list)
             .map_err(|e| format!("loading {}: {}", list.display(), e.msg))?;
+        // WG3: `tests_wg3.md` item 1 wants WG2's whole gate re-run "with the
+        // drain installed and NO CONTROL CREATED", and that phrase is
+        // load-bearing rather than incidental — a themed list view repaints, a
+        // repaint sends `NM_CUSTOMDRAW`, and WG2's gate counts every message
+        // that crossed the door; controls also put white list-view pixels
+        // exactly where WG1's and WG2's gates read the window's background
+        // fill. So the older gates set this and go on testing the
+        // configuration they were written against. Default is ON: this is the
+        // sprint that adds controls.
+        if matches!(
+            std::env::var("MACVM_WINUI_CONTROLS").as_deref(),
+            Ok("off") | Ok("0") | Ok("false")
+        ) {
+            guarded_exec(&mut vm, "WinShell controlsEnabled: false.")
+                .map_err(|e| format!("MACVM_WINUI_CONTROLS=off: {e}"))?;
+        }
         Ok(vm)
     }
 
@@ -337,6 +354,61 @@ mod app {
                     let reply = resize_window(vm, arg);
                     let _ = req.reply.send(reply);
                 }
+                // ── WG3's four drain/control verbs ───────────────────────
+                //
+                // Every one of them exists for the same reason `resize` does,
+                // and it is now a permanent constraint on every WG gate (WG2
+                // Δ 3): **a message that reaches Smalltalk must originate
+                // OUTSIDE every VM entry.** A doit cannot drive a control,
+                // because `SendMessageW` from inside `exec` is correctly
+                // refused by the busy guard. This drain is the one place in
+                // the process that is neither a VM entry nor a wndproc — the
+                // same place the pump and Windows' own modal loop call from.
+                //
+                // `drain`  — report the drain's tallies (the coalescing ratio
+                //            lives here), or force one pass synchronously.
+                // `track`  — send the real WM_ENTERSIZEMOVE/WM_EXITSIZEMOVE, so
+                //            D2 is proven through the message path a drag uses
+                //            and not by poking a Rust flag.
+                // `burst`  — N resizes with NO pump turn between them, which is
+                //            the only shape in which coalescing is observable:
+                //            one `gui resize` per round trip lets the pump
+                //            drain each one, and 1:1 is the CORRECT answer at
+                //            that rate.
+                // `send`   — one synthesised message to the shell or to one of
+                //            its controls by id. The user's mouse, in a script.
+                "drain" => {
+                    let reply = drain_verb(vm, arg);
+                    let _ = req.reply.send(reply);
+                }
+                "track" => {
+                    let msg = match arg {
+                        "on" => win_wndproc::WM_ENTERSIZEMOVE,
+                        "off" => win_wndproc::WM_EXITSIZEMOVE,
+                        "menuon" => win_wndproc::WM_ENTERMENULOOP,
+                        "menuoff" => win_wndproc::WM_EXITMENULOOP,
+                        other => {
+                            let _ = req.reply.send(format!(
+                                "ERR track wants on|off|menuon|menuoff, got '{other}'"
+                            ));
+                            continue;
+                        }
+                    };
+                    let reply = send_to(vm, 0, msg, 0, 0)
+                        .map(|r| {
+                            format!("OK track {arg} lresult={r} {}", win_wndproc::drain_line())
+                        })
+                        .unwrap_or_else(|e| e);
+                    let _ = req.reply.send(reply);
+                }
+                "burst" => {
+                    let reply = resize_burst(vm, arg);
+                    let _ = req.reply.send(reply);
+                }
+                "send" => {
+                    let reply = send_verb(vm, arg);
+                    let _ = req.reply.send(reply);
+                }
                 // The control channel's own exit path. `sprint_wg1_detail.md`
                 // records why it exists: closing is TWO events — `WM_CLOSE`
                 // destroys the window and `WM_DESTROY` should `PostQuitMessage`
@@ -394,6 +466,188 @@ mod app {
             Ok(()) => format!("OK resized to {w}x{h}"),
             Err(e) => format!("ERR SetWindowPos: {e}"),
         }
+    }
+
+    /// `drain` / `drain reset` / `drain now`: the flag-and-drain pass's own
+    /// instrument panel.
+    ///
+    /// `drain` reports the tallies — `requests` against `passes` IS the
+    /// coalescing ratio `tests_wg3.md` item 3 asks for, and `suppressed`
+    /// against `passes` is D2's. `drain now` forces one pass synchronously from
+    /// here (still outside every VM entry), which is what makes a gate line
+    /// read a number instead of sleeping and hoping the heartbeat has fired.
+    fn drain_verb(vm: &mut VmHandle, arg: &str) -> String {
+        match arg {
+            "" => format!("OK {}", win_wndproc::drain_line()),
+            "reset" => {
+                win_wndproc::reset_stats();
+                format!("OK {}", win_wndproc::drain_line())
+            }
+            "now" => {
+                // Requested, then pumped: exactly the path a real wake takes,
+                // so this verb tests the mechanism rather than bypassing it. A
+                // direct call to the pass would prove the pass runs, not that
+                // the wake reaches it — and, crucially, it would also run while
+                // TRACKING, which is the one state the gate most needs to see
+                // suppressed.
+                //
+                // `request_drain` rather than a bare post, because "service the
+                // drain" has to mean "there is work" — a heartbeat with no
+                // request costs no VM entry by design (that is what keeps
+                // `drainPasses` a measurement of the drain rather than of the
+                // clock), so a post on its own would be a no-op.
+                let hwnd = shell_hwnd(vm);
+                if hwnd.0.is_null() || !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
+                    return "ERR no window yet".into();
+                }
+                win_wndproc::request_drain(hwnd.0 as isize);
+                pump_pending(hwnd);
+                format!("OK {}", win_wndproc::drain_line())
+            }
+            other => format!("ERR unknown drain subcommand '{other}'"),
+        }
+    }
+
+    /// Dispatch every message already in this thread's queue, then return.
+    ///
+    /// The control drain runs *between* `GetMessageW` calls, so a message this
+    /// verb posts would not be delivered until the script's NEXT round trip —
+    /// which would make every gate line read the state before its own action.
+    /// `PeekMessageW(PM_REMOVE)` in a loop is the same dispatch the pump does,
+    /// on the same thread, and it stops when the queue empties rather than
+    /// blocking.
+    fn pump_pending(_hwnd: HWND) {
+        let mut msg = MSG::default();
+        // Bounded: a handler that posted a message per message would otherwise
+        // spin here forever, and a control verb that never answers is
+        // indistinguishable from a hang.
+        for _ in 0..4096 {
+            let got = unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE) }.as_bool();
+            if !got {
+                return;
+            }
+            if msg.message == WM_QUIT {
+                unsafe { PostQuitMessage(msg.wParam.0 as i32) };
+                return;
+            }
+            unsafe {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+    }
+
+    /// `send [<controlId>] <msg> <wParam> <lParam>` — one synthesised message,
+    /// from the one place in this process that is neither a VM entry nor a
+    /// wndproc.
+    ///
+    /// A control id of 0 (or omitted) targets the shell window itself; anything
+    /// else is resolved with `GetDlgItem`, which is a lookup and not a policy —
+    /// the host still creates nothing, styles nothing and decides nothing. This
+    /// is how `tests_wg3.md` item 6 clicks a button: `WM_COMMAND` with the
+    /// button's id and `BN_CLICKED` in the high word, arriving exactly as
+    /// Windows would deliver it.
+    fn send_verb(vm: &mut VmHandle, arg: &str) -> String {
+        let f: Vec<&str> = arg.split_whitespace().collect();
+        let (id, rest) = match f.len() {
+            3 => (0i32, &f[0..3]),
+            4 => match f[0].parse::<i32>() {
+                Ok(n) => (n, &f[1..4]),
+                Err(_) => return "ERR send: the first of four fields is a control id".into(),
+            },
+            _ => return "ERR send wants [<controlId>] <msg> <wParam> <lParam>".into(),
+        };
+        let (Ok(msg), Ok(wp), Ok(lp)) = (
+            parse_word(rest[0]),
+            parse_word(rest[1]),
+            rest[2].parse::<i64>(),
+        ) else {
+            return "ERR send: msg/wParam/lParam must be integers".into();
+        };
+        match send_to(vm, id, msg as u32, wp as usize, lp as isize) {
+            Ok(r) => format!("OK send lresult={r}"),
+            Err(e) => e,
+        }
+    }
+
+    /// Accepts decimal or `0x`/`16r` hex — message numbers read better in hex
+    /// and `WM_COMMAND`'s wParam is a packed pair.
+    fn parse_word(s: &str) -> Result<i64, std::num::ParseIntError> {
+        if let Some(h) = s.strip_prefix("0x").or_else(|| s.strip_prefix("16r")) {
+            i64::from_str_radix(h, 16)
+        } else {
+            s.parse::<i64>()
+        }
+    }
+
+    /// `SendMessageW` to the shell window or one of its controls, with the WG1
+    /// Δ 2 rule applied at both ends: a remembered HWND is not a window.
+    fn send_to(
+        vm: &mut VmHandle,
+        control_id: i32,
+        msg: u32,
+        wparam: usize,
+        lparam: isize,
+    ) -> Result<isize, String> {
+        let shell = shell_hwnd(vm);
+        if shell.0.is_null() || !unsafe { IsWindow(Some(shell)) }.as_bool() {
+            return Err("ERR no window yet".into());
+        }
+        let target = if control_id == 0 {
+            shell
+        } else {
+            let h = unsafe { GetDlgItem(Some(shell), control_id) }
+                .map_err(|e| format!("ERR GetDlgItem({control_id}): {e}"))?;
+            if h.0.is_null() {
+                return Err(format!("ERR no control with id {control_id}"));
+            }
+            h
+        };
+        let r = unsafe { SendMessageW(target, msg, Some(WPARAM(wparam)), Some(LPARAM(lparam))) };
+        Ok(r.0)
+    }
+
+    /// `burst <n> [<w0> <h0>]`: N `SetWindowPos` calls with **no pump turn
+    /// between them** — the only shape in which the drain's coalescing is
+    /// observable, and the shape a real storm has.
+    ///
+    /// One `gui resize` per round trip lets the pump service each wake, and a
+    /// 1:1 pass-to-message ratio is the CORRECT answer at that rate — the drain
+    /// is not meant to skip work that nothing is racing. What it is meant to do
+    /// is absorb a burst, so the burst has to be a burst.
+    fn resize_burst(vm: &mut VmHandle, arg: &str) -> String {
+        let mut it = arg.split_whitespace();
+        let Some(Ok(n)) = it.next().map(|s| s.parse::<i32>()) else {
+            return "ERR burst wants <count> [<w0> <h0>]".into();
+        };
+        let w0 = it.next().and_then(|s| s.parse::<i32>().ok()).unwrap_or(600);
+        let h0 = it.next().and_then(|s| s.parse::<i32>().ok()).unwrap_or(440);
+        let hwnd = shell_hwnd(vm);
+        if hwnd.0.is_null() || !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
+            return "ERR no window yet".into();
+        }
+        for i in 0..n {
+            let ok = unsafe {
+                SetWindowPos(
+                    hwnd,
+                    Some(HWND_TOP),
+                    0,
+                    0,
+                    w0 + i,
+                    h0 + i,
+                    SWP_NOMOVE | SWP_NOZORDER,
+                )
+            };
+            if let Err(e) = ok {
+                return format!("ERR SetWindowPos #{i}: {e}");
+            }
+        }
+        format!(
+            "OK burst {n} from {w0}x{h0} last={}x{} {}",
+            w0 + n - 1,
+            h0 + n - 1,
+            win_wndproc::drain_line()
+        )
     }
 
     /// The pump. D4's loop, with the −1 arm the naive form drops.
@@ -942,9 +1196,11 @@ mod app {
         /// number six is the design decision — "do not route every message" —
         /// and a seventh appearing silently is how that decision gets lost.
         #[test]
-        fn the_allowlist_is_the_six_messages_d1_names() {
+        fn the_allowlist_is_the_messages_d1_names() {
             use macvm::runtime::win_wndproc as door;
-            assert_eq!(door::ALLOWLIST.len(), 6);
+            // WG2's six, plus WG3's five: WM_NOTIFY (D3, how list/tree views
+            // speak) and the four modal-loop transitions D2 suppresses on.
+            assert_eq!(door::ALLOWLIST.len(), 11);
             for m in [
                 door::WM_CLOSE,
                 door::WM_DESTROY,
@@ -952,13 +1208,54 @@ mod app {
                 door::WM_COMMAND,
                 door::WM_KEYDOWN,
                 door::WM_CHAR,
+                door::WM_NOTIFY,
+                door::WM_ENTERSIZEMOVE,
+                door::WM_EXITSIZEMOVE,
+                door::WM_ENTERMENULOOP,
+                door::WM_EXITMENULOOP,
             ] {
                 assert!(door::ALLOWLIST.contains(&m));
             }
-            assert!(!door::ALLOWLIST.contains(&0x000F), "WM_PAINT is WG3/WG4's");
+            assert!(!door::ALLOWLIST.contains(&0x000F), "WM_PAINT is WG4's");
             assert!(
                 !door::ALLOWLIST.contains(&0x0200),
                 "WM_MOUSEMOVE arrives in storms and must never cross"
+            );
+            // The drain's own plumbing is handled by the trampoline BEFORE the
+            // allowlist and must never be routed to `WinShell`: a heartbeat
+            // that cost a VM entry would make the coalescing ratio a
+            // measurement of the timer.
+            assert!(!door::ALLOWLIST.contains(&door::WM_TIMER));
+            assert!(!door::ALLOWLIST.contains(&door::WM_APP_DRAIN));
+        }
+
+        /// WG3 D6: the manifest is embedded by the LINKER, from a file this
+        /// crate owns. Both halves are checkable without running the binary,
+        /// and both have to hold — a `build.rs` naming a file that is not there
+        /// fails the build, but a `build.rs` that stopped emitting the link
+        /// arguments would silently produce an unthemed app.
+        #[test]
+        fn the_visual_styles_manifest_is_embedded() {
+            let build = include_str!("../build.rs");
+            assert!(build.contains("/MANIFEST:EMBED"));
+            assert!(build.contains("/MANIFESTINPUT:"));
+            let manifest = include_str!("../macvm-winui.manifest");
+            assert!(
+                manifest.contains("Microsoft.Windows.Common-Controls")
+                    && manifest.contains("6.0.0.0"),
+                "the manifest must name common controls v6 — without it every \
+                 control renders in its Windows-95 skin and nothing else says so"
+            );
+            // DPI stays a runtime decision Smalltalk makes (WG1 D3); a manifest
+            // element here would silently win over it.
+            // The needle is the ELEMENT, not the word: the file's own comment
+            // explains at length why the element is absent, and a test that
+            // failed on its own rationale would be a funnier bug than a useful
+            // one (`capture_and_control_are_included_not_copied` splits its
+            // needles for the same reason).
+            assert!(
+                !manifest.contains("<dpiAware"),
+                "DPI awareness is SetProcessDpiAwarenessContext's, in Smalltalk"
             );
         }
     }

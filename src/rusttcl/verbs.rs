@@ -101,7 +101,7 @@ const TABLE: &[VerbDoc] = &[
     },
     VerbDoc {
         name: "gui",
-        usage: "gui connect ?port? | ping | eval <src> | doit <src> | view <name> | snap <path> | door ?on|off|reset? | resize \"<w> <h>\" | sleep <ms> | quit",
+        usage: "gui connect ?port? | ping | eval <src> | doit <src> | view <name> | snap <path> | door ?on|off|reset? | resize \"<w> <h>\" | drain ?reset|now? | track on|off | burst \"<n> ?w? ?h?\" | send \"?<id>? <msg> <wp> <lp>\" | sleep <ms> | quit",
         help: "Drive a running macvm-cocoa over its MACVM_COCOA_CTL control channel: run doits on its UI worker, switch views, capture window PNGs.",
     },
     VerbDoc {
@@ -541,8 +541,49 @@ fn verb_gui(_vm: &mut Vm<'_>, args: &[Value]) -> TclResult<Value> {
             let wh = arg.ok_or_else(|| TclError::runtime("usage: gui resize \"<w> <h>\""))?;
             gui_request(ctx, &format!("resize {wh}")).map(Value::new)
         }
+        // WINARM (WG3): the flag-and-drain pass's four script-facing controls,
+        // all of them answered by `macvm-winui` and unknown to the other two
+        // hosts.
+        //
+        // Every one exists because of the constraint WG2's Δ 3 made permanent:
+        // **a message that reaches Smalltalk must originate outside every VM
+        // entry**, so a doit cannot drive a control and the host's control
+        // drain is the only place in the process that qualifies.
+        //
+        // `gui drain`        report the pass tallies (requests against passes
+        //                    IS the coalescing ratio), `reset` them, or `now`
+        //                    to post a wake and pump it synchronously so a gate
+        //                    line reads a number instead of sleeping.
+        // `gui track on|off` send the real WM_ENTERSIZEMOVE/WM_EXITSIZEMOVE, so
+        //                    D2's suppression is proven through the message
+        //                    path a window drag uses rather than by poking a
+        //                    Rust flag.
+        // `gui burst <n>`    N resizes with NO pump turn between them — the
+        //                    only shape in which coalescing is observable, and
+        //                    the shape a real storm has.
+        // `gui send …`       one synthesised message to the window or to a
+        //                    child control by id: the user's mouse, in a
+        //                    script.
+        "drain" => {
+            let sub = arg.unwrap_or_default();
+            gui_request(ctx, format!("drain {sub}").trim()).map(Value::new)
+        }
+        "track" => {
+            let how = arg.ok_or_else(|| TclError::runtime("usage: gui track on|off"))?;
+            gui_request(ctx, &format!("track {how}")).map(Value::new)
+        }
+        "burst" => {
+            let spec = arg.ok_or_else(|| TclError::runtime("usage: gui burst \"<n> ?w? ?h?\""))?;
+            gui_request(ctx, &format!("burst {spec}")).map(Value::new)
+        }
+        "send" => {
+            let spec = arg.ok_or_else(|| {
+                TclError::runtime("usage: gui send \"?<controlId>? <msg> <wParam> <lParam>\"")
+            })?;
+            gui_request(ctx, &format!("send {spec}")).map(Value::new)
+        }
         other => Err(TclError::runtime(format!(
-            "gui: unknown subcommand '{other}' (connect/ping/rebuild/game/stopgame/gameclose/eval/doit/view/snap/door/resize/sleep/quit)"
+            "gui: unknown subcommand '{other}' (connect/ping/rebuild/game/stopgame/gameclose/eval/doit/view/snap/door/resize/drain/track/burst/send/sleep/quit)"
         ))),
     }
 }

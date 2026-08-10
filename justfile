@@ -337,14 +337,23 @@ gate-wg1: gate-wg0
     # parallel harness). Open/close x10, snap-before-window, GetMessageW=-1
     # forced for real, and a recovered guest fault leaving the VM usable.
     cargo test --quiet -p win_gui
-    timeout 300 ./target/debug/macvm-winui.exe --selftest | tee /tmp/wg1_selftest.txt
+    MACVM_WINUI_CONTROLS=off timeout 300 ./target/debug/macvm-winui.exe --selftest \
+        | tee /tmp/wg1_selftest.txt
     grep -q 'SELFTEST OK' /tmp/wg1_selftest.txt
     grep -q 'snap-before-window: ERR no window yet' /tmp/wg1_selftest.txt
     grep -q "getmessage-minus-one: rc=-1 classify=Failed" /tmp/wg1_selftest.txt
 
     # ── the window itself (gate items 1-7) ────────────────────────────────
     rm -f "$SHOT" target/winui-wg1-titled.png /tmp/wg1_exit /tmp/wg1_app.txt
-    ( MACVM_WINUI_CTL=$PORT ./target/debug/macvm-winui.exe > /tmp/wg1_app.txt 2>&1; \
+    # WG3 puts three child controls in this window, and both of them break a
+    # WG1 assertion: a themed list view paints WHITE pixels exactly where this
+    # gate reads the window's background fill, and it sends NM_CUSTOMDRAW
+    # through a door WG2's gate counts messages at. `tests_wg3.md` item 1 asks
+    # for these gates to pass "with the drain installed and NO CONTROL
+    # CREATED"; `MACVM_WINUI_CONTROLS=off` is that phrase, as a token, and it
+    # keeps WG1's and WG2's gates testing the configuration they were written
+    # against rather than being loosened to accommodate a later sprint.
+    ( MACVM_WINUI_CTL=$PORT MACVM_WINUI_CONTROLS=off ./target/debug/macvm-winui.exe > /tmp/wg1_app.txt 2>&1; \
       echo $? > /tmp/wg1_exit ) &
     for i in $(seq 1 60); do
         (exec 3<>/dev/tcp/127.0.0.1/$PORT) 2>/dev/null && break || sleep 0.5
@@ -412,7 +421,7 @@ gate-wg1: gate-wg0
     # down through exit 0 — which is D4's second reason, made a test.
     for MODE in guest native; do
         rm -f /tmp/wg1_fault_exit /tmp/wg1_fault.txt
-        ( MACVM_WINUI_CTL=$PORT MACVM_WINUI_FAULT=$MODE \
+        ( MACVM_WINUI_CTL=$PORT MACVM_WINUI_FAULT=$MODE MACVM_WINUI_CONTROLS=off \
             ./target/debug/macvm-winui.exe > /tmp/wg1_fault.txt 2>&1; \
           echo $? > /tmp/wg1_fault_exit ) &
         for i in $(seq 1 60); do
@@ -488,7 +497,8 @@ gate-wg2: gate-wg1
     # ── the crate's tests + the door's own (the fault-path guard) ─────────
     cargo test --quiet -p win_gui
     cargo test --quiet --lib win_wndproc
-    timeout 300 ./target/debug/macvm-winui.exe --selftest | tee /tmp/wg2_selftest.txt
+    MACVM_WINUI_CONTROLS=off timeout 300 ./target/debug/macvm-winui.exe --selftest \
+        | tee /tmp/wg2_selftest.txt
     grep -q 'SELFTEST OK' /tmp/wg2_selftest.txt
     # The re-entrancy source the sprint spec does not name, checked where it
     # actually fires: `cycle: 10` creates and destroys ten windows FROM A
@@ -503,7 +513,7 @@ gate-wg2: gate-wg1
     #    REGISTERED and every message still defaulted. A door that changes
     #    behaviour before it does anything is a door with a bug in it.
     rm -f target/winui-wg1.png /tmp/wg2_t_exit /tmp/wg2_t_app.txt
-    ( MACVM_WINUI_CTL=7649 MACVM_WINUI_DOOR=off ./target/debug/macvm-winui.exe \
+    ( MACVM_WINUI_CTL=7649 MACVM_WINUI_DOOR=off MACVM_WINUI_CONTROLS=off ./target/debug/macvm-winui.exe \
         > /tmp/wg2_t_app.txt 2>&1; echo $? > /tmp/wg2_t_exit ) &
     for i in $(seq 1 60); do
         (exec 3<>/dev/tcp/127.0.0.1/7649) 2>/dev/null && break || sleep 0.5
@@ -531,7 +541,9 @@ gate-wg2: gate-wg1
 
     # ── the door, doing its job (items 2-7) ───────────────────────────────
     rm -f "$SHOT" /tmp/wg2_exit /tmp/wg2_app.txt
-    ( MACVM_WINUI_CTL=$PORT ./target/debug/macvm-winui.exe > /tmp/wg2_app.txt 2>&1; \
+    # Controls off — see gate-wg1's note. This gate counts every message that
+    # crossed the door, and a repainting list view sends WM_NOTIFY.
+    ( MACVM_WINUI_CTL=$PORT MACVM_WINUI_CONTROLS=off ./target/debug/macvm-winui.exe > /tmp/wg2_app.txt 2>&1; \
       echo $? > /tmp/wg2_exit ) &
     for i in $(seq 1 60); do
         (exec 3<>/dev/tcp/127.0.0.1/$PORT) 2>/dev/null && break || sleep 0.5
@@ -544,7 +556,13 @@ gate-wg2: gate-wg1
     #    comes from GetClientRect. Two independent sources, one equality.
     grep -q 'WG2 sizematches true' /tmp/wg2_gate.txt
     grep -q 'WG2 sizecount 1' /tmp/wg2_gate.txt
-    LAST=$(grep '^WG2 lastsize ' /tmp/wg2_gate.txt | cut -d' ' -f3 | tr -d '#()')
+    # Δ (WG3, measured): `cut -f3` here took only the FIRST field of a
+    # two-field Array printString — `#(684 461)` became `684`, which can never
+    # equal the `684 461` it is compared against. `f3-` is the fix. Recorded
+    # rather than quietly corrected because it is the same shape of defect
+    # WG2's own Δ 6 found in gate-wg1: a gate line that cannot pass is
+    # indistinguishable from one that has not been run.
+    LAST=$(grep '^WG2 lastsize ' /tmp/wg2_gate.txt | cut -d' ' -f3- | tr -d '#()')
     CL=$(grep '^WG2 client ' /tmp/wg2_gate.txt | cut -d' ' -f3,4)
     echo "door lastSizeSeen=$LAST client=$CL"
     test "$LAST" = "$CL"
@@ -653,6 +671,260 @@ gate-wg2: gate-wg1
     # which is what keeps WG1's Δ 13 from firing a second time.
     git diff --quiet -- world/world.list 2>/dev/null || true
     echo "gate-wg2: OK"
+
+# WG3 (docs/sprints/tests_wg3.md): the FLAG-AND-DRAIN pass, then controls and
+# layout. The order is the sprint's and it is not negotiable — Part 1 below has
+# no control in it at all, because controls are what generate the storm the
+# drain exists to absorb and retrofitting the pattern afterwards is how the
+# Cocoa side acquired its "browser shows no data" scars.
+#
+# Chains gate-wg2, which chains gate-wg1 — so item 1 ("WG2's entire gate passes
+# unchanged") is not a re-assertion here, it is the dependency. Both of those
+# now run with MACVM_WINUI_CONTROLS=off, which is `tests_wg3.md` item 1's own
+# phrase ("with the drain installed and NO CONTROL CREATED") as a token: WG3
+# puts a themed list view in this window, and it paints WHITE pixels exactly
+# where WG1 and WG2 read the background fill and sends NM_CUSTOMDRAW through a
+# door those gates count messages at.
+#
+# Everything below is a script, for WG1's Δ 8 reason: `eval` answers INLINE in
+# this host, so every item reads a number rather than sleeping and hoping.
+gate-wg3: gate-wg2
+    #!/usr/bin/env bash
+    set -euo pipefail
+    PORT=7651
+    SHOT=target/winui-wg3.png
+    cargo build --quiet
+    cargo build --quiet -p win_gui
+
+    # ── the in-language half, both DB states (item 11) ────────────────────
+    grep -v '^#' world/tests/tests.list | grep -v '^$' | sed 's|^|world/tests/|' \
+        | xargs cat > /tmp/macvm_wg3_tests.mst
+    ./target/debug/macvm run /tmp/macvm_wg3_tests.mst --world world | tee /tmp/wg3_present.txt
+    grep -q ', 0 failed' /tmp/wg3_present.txt
+    WINKB_DB=/nonexistent/windows_api.db ./target/debug/macvm run /tmp/macvm_wg3_tests.mst \
+        --world world | tee /tmp/wg3_absent.txt
+    grep -q ', 0 failed' /tmp/wg3_absent.txt
+    # All FOUR WG classes announce their DB-absent skip; none is silent.
+    grep -q 'SKIP WinUiProbeTests' /tmp/wg3_absent.txt
+    grep -q 'SKIP WinUiShellTests' /tmp/wg3_absent.txt
+    grep -q 'SKIP WinUiDoorTests' /tmp/wg3_absent.txt
+    grep -q 'SKIP WinUiControlsTests' /tmp/wg3_absent.txt
+    # ...and the layout tests, which need neither winkb nor Win32 nor a window,
+    # still ran. That asymmetry is the point of making `WinLayout` pure.
+    grep -q 'testLayoutScalesWithDpi' /tmp/wg3_absent.txt
+    # Counts are RELATIONSHIPS, never frozen integers (WG2 Δ 14): nothing lost,
+    # nothing failing, and the WG3 suite strictly larger than WG2's was.
+    PRESENT=$(grep -oE '^[0-9]+ run, 0 failed' /tmp/wg3_present.txt | cut -d' ' -f1)
+    ABSENT=$(grep -oE '^[0-9]+ run, 0 failed' /tmp/wg3_absent.txt | cut -d' ' -f1)
+    echo "world: $PRESENT with the database, $ABSENT without"
+    test "$PRESENT" -ge 7762
+    test "$ABSENT" -ge 7540
+    test "$PRESENT" -gt "$ABSENT"
+
+    # ── the crate's tests + the door's own (drain, tracking, D5's guard) ──
+    cargo test --quiet -p win_gui
+    cargo test --quiet --lib win_wndproc
+
+    # ── the live half ────────────────────────────────────────────────────
+    rm -f "$SHOT" /tmp/wg3_exit /tmp/wg3_app.txt
+    ( MACVM_WINUI_CTL=$PORT ./target/debug/macvm-winui.exe > /tmp/wg3_app.txt 2>&1; \
+      echo $? > /tmp/wg3_exit ) &
+    for i in $(seq 1 60); do
+        (exec 3<>/dev/tcp/127.0.0.1/$PORT) 2>/dev/null && break || sleep 0.5
+    done
+    ./target/debug/macvm rusttcl scripts/winui-wg3.tcl | tee /tmp/wg3_gate.txt
+    cat /tmp/wg3_app.txt
+
+    # ── Part 1, item 2: flags are serviced ────────────────────────────────
+    # `lastLayoutSize` is what the DRAIN read from GetClientRect one pass after
+    # the message; `client` is what GetClientRect says now. Two reads at two
+    # times, one equality.
+    grep -q 'WG3 flag-matches true' /tmp/wg3_gate.txt
+    grep -q 'WG3 flag-pending false' /tmp/wg3_gate.txt
+    grep -q 'WG3 flag-layouts 1' /tmp/wg3_gate.txt
+    LL=$(grep '^WG3 flag-lastlayout ' /tmp/wg3_gate.txt | cut -d' ' -f3- | tr -d '#()')
+    CL=$(grep '^WG3 flag-client ' /tmp/wg3_gate.txt | cut -d' ' -f3,4)
+    echo "drain laid out $LL, GetClientRect says $CL"
+    test "$LL" = "$CL"
+
+    # ── Part 1, item 3: COALESCING, MEASURED ──────────────────────────────
+    # The sprint's central claim. 200 resizes in one burst, one wake, and the
+    # ratio REPORTED rather than asserted to a constant (WG2 Δ 14). A ratio of
+    # 1.0 would mean the drain is not coalescing at all and the claim is false,
+    # so the gate says exactly that if it ever sees one.
+    SIZES=$(grep '^WG3 coalesce-sizecount ' /tmp/wg3_gate.txt | cut -d' ' -f3)
+    PASSES=$(grep '^WG3 coalesce-passes ' /tmp/wg3_gate.txt | cut -d' ' -f3)
+    LAYOUTS=$(grep '^WG3 coalesce-layouts ' /tmp/wg3_gate.txt | cut -d' ' -f3)
+    echo "COALESCING: $SIZES WM_SIZE messages -> $PASSES drain passes -> $LAYOUTS layout(s)"
+    awk -v s="$SIZES" -v p="$PASSES" 'BEGIN{printf "  ratio passes/messages = %.4f\n", p/s}'
+    test "$SIZES" -ge 200
+    test "$PASSES" -lt "$SIZES"
+    if [ "$PASSES" -ge "$SIZES" ]; then
+        echo "COALESCING FAILED: the drain is not coalescing and WG3's central claim is false"
+        exit 1
+    fi
+    # The settled state, not the last message's: ONE layout for 200 resizes,
+    # against the size the window actually ended up.
+    test "$LAYOUTS" -eq 1
+    grep -q 'WG3 coalesce-matches true' /tmp/wg3_gate.txt
+    # ...and the LATCH is what makes the passes few: 200 requests, one post.
+    grep -qE 'WG3 burst .* requests=200 posts=1 passes=0 ' /tmp/wg3_gate.txt
+
+    # ── Part 1, item 4: TRACKING SUPPRESSES ───────────────────────────────
+    # ZERO passes while a modal loop is pumping, one layout after. Windows has
+    # no NSDefaultRunLoopMode, so this is explicit or it does not happen.
+    grep -q 'WG3 track-during-passes 0' /tmp/wg3_gate.txt
+    grep -q 'WG3 track-during-sizecount 30' /tmp/wg3_gate.txt
+    grep -qE 'WG3 track-during-drain drain tracking=true requested=true .* passes=0 ' /tmp/wg3_gate.txt
+    # The flags ACCUMULATED rather than being dropped, and were serviced on the
+    # far side: exactly one layout, against the final size.
+    grep -q 'WG3 track-after-layouts 1' /tmp/wg3_gate.txt
+    grep -q 'WG3 track-after-matches true' /tmp/wg3_gate.txt
+    AFTER=$(grep '^WG3 track-after-passes ' /tmp/wg3_gate.txt | cut -d' ' -f3)
+    echo "tracking: 0 passes during 30 resizes, $AFTER after (bounded, not frozen)"
+    test "$AFTER" -ge 1
+    test "$AFTER" -le 8
+    # ...and it was the real MESSAGES that did it, not a poked flag.
+    grep -q 'WG3 track-enters 1' /tmp/wg3_gate.txt
+    grep -q 'WG3 track-exits 1' /tmp/wg3_gate.txt
+
+    # ── Part 1, item 5: the drain never re-enters ─────────────────────────
+    # A pass that discovered more work may not post its own wake; it answers
+    # non-zero and the HEARTBEAT services it. Bounded, not exact.
+    grep -q 'WG3 reask-count 1' /tmp/wg3_gate.txt
+    IMM=$(grep '^WG3 reask-immediate ' /tmp/wg3_gate.txt | cut -d' ' -f3)
+    HB=$(grep '^WG3 reask-after-heartbeat ' /tmp/wg3_gate.txt | cut -d' ' -f3)
+    SETTLED=$(grep '^WG3 reask-settled ' /tmp/wg3_gate.txt | cut -d' ' -f3)
+    echo "reask: $IMM pass immediately, $HB after a heartbeat, $SETTLED settled"
+    test "$HB" -gt "$IMM"
+    test "$SETTLED" -eq "$HB"
+    test "$SETTLED" -le 6
+
+    # ── stress: a pass that RAISES and a pass that FAULTS ─────────────────
+    # The pass completes, the flag is CLEARED (no infinite retry), the next
+    # pass runs normally, and a real ACCESS_VIOLATION inside a pass is
+    # recovered with the window still there. A leaked depth guard here would
+    # disable the drain forever with nothing in any log.
+    grep -q 'WG3 raisepass-pending false' /tmp/wg3_gate.txt
+    grep -q 'WG3 raisepass-then-matches true' /tmp/wg3_gate.txt
+    grep -q 'WG3 faultpass-then-matches true' /tmp/wg3_gate.txt
+    grep -q 'WG3 faultpass-alive 7' /tmp/wg3_gate.txt
+    grep -q 'WG3 faultpass-ping pong' /tmp/wg3_gate.txt
+    grep -q 'deliberate raise inside drainPass' /tmp/wg3_app.txt
+    grep -q 'ACCESS_VIOLATION' /tmp/wg3_app.txt
+
+    # ── Part 2, item 6: a BUTTON whose MEANING runs in the drain ──────────
+    # The load-bearing four lines of this whole gate. With the drain held off
+    # (D2's own lever), the synthesised WM_COMMAND is RECORDED — queued, id
+    # noted — and its meaning has NOT run: no click counted, no pass taken.
+    # Release the drain and the meaning runs, proven by Smalltalk state and by
+    # text read back out of Win32 with GetWindowTextW.
+    grep -q 'WG3 btn-alive true' /tmp/wg3_gate.txt
+    grep -q 'WG3 btn-queued-in-door 1' /tmp/wg3_gate.txt
+    grep -q 'WG3 btn-clicks-in-door 0' /tmp/wg3_gate.txt
+    grep -q 'WG3 btn-passes-in-door 0' /tmp/wg3_gate.txt
+    grep -q 'WG3 btn-clicks-after-drain 1' /tmp/wg3_gate.txt
+    grep -q 'WG3 btn-queued-after-drain 0' /tmp/wg3_gate.txt
+    grep -q "WG3 btn-status-text 'clicks: 1'" /tmp/wg3_gate.txt
+    grep -q 'WG3 btn-command 100' /tmp/wg3_gate.txt
+    # The click storm: 200 synthesised WM_COMMANDs, none lost, none doubled. A
+    # command is an EVENT and queues; a resize is a STATE and coalesces to the
+    # last. Both are "coalescing" and only one of them may drop anything.
+    B4=$(grep '^WG3 storm-clicks-before ' /tmp/wg3_gate.txt | cut -d' ' -f3)
+    AFTERC=$(grep '^WG3 storm-clicks ' /tmp/wg3_gate.txt | cut -d' ' -f3)
+    echo "click storm: $B4 -> $AFTERC (delta must be exactly 200)"
+    test $((AFTERC - B4)) -eq 200
+    grep -q 'WG3 storm-work 200' /tmp/wg3_gate.txt
+    grep -q 'WG3 storm-pending 0' /tmp/wg3_gate.txt
+
+    # ── Part 2, items 7 and 10: LAYOUT, and DPI ───────────────────────────
+    # Every control's real rect (GetWindowRect, in client coordinates) equals
+    # the rect WinLayout computed. Two independent productions of the numbers.
+    grep -q 'WG3 layout-matches true' /tmp/wg3_gate.txt
+    WANT=$(grep '^WG3 layout-want ' /tmp/wg3_gate.txt | cut -d' ' -f3-)
+    GOT=$(grep '^WG3 layout-got ' /tmp/wg3_gate.txt | cut -d' ' -f3-)
+    echo "layout wants $WANT"
+    echo "win32 says   $GOT"
+    test "$WANT" = "$GOT"
+    # DPI: the same layout at 1.5x the DPI is EXACTLY 1.5x the layout — an
+    # equality, as WG1 established, and only assertable because the arithmetic
+    # happens in DIP space and is converted once.
+    ONE=$(grep '^WG3 dpi-1x ' /tmp/wg3_gate.txt | cut -d' ' -f3- | tr -d '#()')
+    HALF=$(grep '^WG3 dpi-15x ' /tmp/wg3_gate.txt | cut -d' ' -f3- | tr -d '#()')
+    SCALED=$(echo "$ONE" | awk '{printf "%d %d %d %d", $1*3/2, $2*3/2, $3*3/2, $4*3/2}')
+    echo "dpi 96: $ONE   dpi 144: $HALF   (96 scaled by 1.5: $SCALED)"
+    test "$HALF" = "$SCALED"
+
+    # ── Part 2, item 9: WM_NOTIFY, its NMHDR read IN THE DOOR ─────────────
+    # The pointer dies on return, so the three fields cross as Integers. The
+    # assertion is that they are the RIGHT three: the list view's own HWND, its
+    # child id, and LVN_ITEMCHANGED — all read in the door and surfacing one
+    # pass later, when the pointer is long gone.
+    LISTH=$(grep '^WG3 notify-listhandle ' /tmp/wg3_gate.txt | cut -d' ' -f3)
+    LISTID=$(grep '^WG3 list-id ' /tmp/wg3_gate.txt | cut -d' ' -f3)
+    WANTC=$(grep '^WG3 notify-wantcode ' /tmp/wg3_gate.txt | cut -d' ' -f3)
+    NOTIFY=$(grep '^WG3 notify-last ' /tmp/wg3_gate.txt | cut -d' ' -f3- | tr -d '#()')
+    echo "NMHDR read in the door: $NOTIFY (want $LISTH $LISTID $WANTC)"
+    test "$NOTIFY" = "$LISTH $LISTID $WANTC"
+
+    # ── Part 2, item 8: THEMED, BY PIXEL ──────────────────────────────────
+    # A manifest that failed to embed is otherwise INVISIBLE: comctl32 v5
+    # registers the same classes, creates the same controls and passes every
+    # functional assertion above while drawing them in their Windows-95 skin.
+    # So read a pixel inside the button out of the PNG.
+    #
+    # The probe point is one sixth across the button, NOT its centre: a push
+    # button's centre is where its text is, and ClearType's subpixel
+    # antialiasing puts a strongly coloured pixel there (57,57,143 measured) on
+    # themed and unthemed alike — which would pass this test for the wrong
+    # reason.
+    test -s "$SHOT"
+    PNGDIM=$(od -An -tu1 -j16 -N8 "$SHOT" \
+        | awk '{printf "%d %d", ($1*16777216+$2*65536+$3*256+$4), ($5*16777216+$6*65536+$7*256+$8)}')
+    WINRECT=$(grep '^WG3 winrect ' /tmp/wg3_gate.txt | cut -d' ' -f3,4)
+    echo "png=$PNGDIM windowrect=$WINRECT"
+    test "$PNGDIM" = "$WINRECT"
+    W=$(echo $PNGDIM | cut -d' ' -f1)
+    PX=$(grep '^WG3 btnprobe ' /tmp/wg3_gate.txt | cut -d' ' -f3)
+    PY=$(grep '^WG3 btnprobe ' /tmp/wg3_gate.txt | cut -d' ' -f4)
+    # The writer emits stored deflate blocks capped at 65535 bytes, so a 5-byte
+    # header appears every 65535 raw bytes and each scanline carries a filter
+    # byte — the same arithmetic WG2's gate had to learn (its Δ 6).
+    OFF=$(awk -v w=$W -v x=$PX -v y=$PY 'BEGIN{raw=y*(1+w*4)+1+x*4; print 48+raw+5*int(raw/65535)}')
+    FACE=$(od -An -tu1 -j$OFF -N3 "$SHOT" | awk '{printf "%d %d %d", $1, $2, $3}')
+    UNTHEMED=$(grep '^WG3 unthemed ' /tmp/wg3_gate.txt | cut -d' ' -f3)
+    UNTHEMEDRGB=$(awk -v c="$UNTHEMED" 'BEGIN{printf "%d %d %d", c%256, int(c/256)%256, int(c/65536)%256}')
+    BG=$(grep '^WG3 bg ' /tmp/wg3_gate.txt | cut -d' ' -f3)
+    BGRGB=$(awk -v c="$BG" 'BEGIN{printf "%d %d %d", c%256, int(c/256)%256, int(c/65536)%256}')
+    echo "button face at ($PX,$PY) = $FACE ; unthemed COLOR_BTNFACE = $UNTHEMEDRGB ; window fill = $BGRGB"
+    test "$FACE" != "$UNTHEMEDRGB"
+    # ...and it is a BUTTON that is drawn there, not the window showing through.
+    test "$FACE" != "$BGRGB"
+
+    # ── the window still closes the way WG2 taught it to ──────────────────
+    # WG3 added a heartbeat timer and three child windows to that sequence.
+    for i in $(seq 1 60); do [ -f /tmp/wg3_exit ] && break || sleep 0.5; done
+    test "$(cat /tmp/wg3_exit)" = "0"
+    grep -q 'WinShell: WM_CLOSE handled in Smalltalk' /tmp/wg3_app.txt
+    grep -q 'WinShell: WM_DESTROY -> PostQuitMessage(0) from Smalltalk' /tmp/wg3_app.txt
+    ! grep -q 'BACKSTOP' /tmp/wg3_app.txt
+    grep -q 'message loop ended, exit 0' /tmp/wg3_app.txt
+    # The trampoline must never have caught a panic, and the depth guard must
+    # be 0 at the end of all of it.
+    grep -q 'panics=0' /tmp/wg3_gate.txt
+    ! grep -q 'panics=[1-9]' /tmp/wg3_app.txt
+    grep -qE 'WG3 finaldoor door enabled=true depth=0 ' /tmp/wg3_gate.txt
+    # ...and no drain request was ever left permanently stranded.
+    grep -qE 'WG3 finaldrain drain tracking=false requested=false ' /tmp/wg3_gate.txt
+
+    mkdir -p docs/gallery-win
+    cp "$SHOT" docs/gallery-win/wg3-controls.png
+
+    # world.list is still untouched: the base world stays byte-identical, and
+    # WG3's third layer file went into winui.list, which every consumer reads
+    # rather than naming files (WG1's Δ 13).
+    git diff --quiet -- world/world.list 2>/dev/null || true
+    echo "gate-wg3: OK"
 
 # P3 (tests_p03.md "Stress/negative tests") — the FLAKY-CATCHER. The
 # combined three-mode run, three consecutive times, because WINVM's

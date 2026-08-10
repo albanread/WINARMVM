@@ -91,6 +91,14 @@ tier1.mst
 # Nothing in either file executes at load time, which is what makes that
 # mutual reference safe rather than clever.
 ../91_winui_shell.mst
+# WINARM (WG3, docs/sprints/sprint_wg3_detail.md): the third layer file —
+# WinLayout and WinControl, and the four WinShell hooks 91 declares as no-ops.
+# Loaded here for the identical compile-time reason and in winui.list's own
+# order. WG2's note below said "no third layer file"; WG3 has one, and the
+# thing that made WG1's Δ 13 fire was a gate recipe NAMING a layer file
+# directly rather than the layer growing — both `just gate-wg3` and this list
+# read winui.list, so a fourth cannot break either.
+../92_winui_controls.mst
 60_winui_probe_tests.mst
 61_winui_shell_tests.mst
 # WINARM (WG2, docs/sprints/sprint_wg2_detail.md): the WndProc door's
@@ -100,4 +108,6 @@ tier1.mst
 # WG1's Δ 13 (a gate recipe that named one layer file directly) cannot fire
 # again from here.
 62_winui_door_tests.mst
+# WINARM (WG3): the flag-and-drain pass and the layout object, in-language.
+63_winui_controls_tests.mst
 99_run_all.mst

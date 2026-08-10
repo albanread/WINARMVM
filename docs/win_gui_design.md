@@ -302,6 +302,31 @@ door stays shallow*. The moment a handler does real work it is no longer
 8.8 µs, and it is no longer safe. **WG3 onward: handlers flag; the drain
 works.**
 
+> **Addendum (WG3, built and measured).** This section is right, and three
+> things it does not say turned out to be load-bearing. See
+> `docs/sprints/sprint_wg3_detail.md`'s Δ for all twenty-two.
+>
+> * **The wake needs a LATCH.** "Post a `WM_APP+n`" alone coalesces the *work*
+>   and not the *passes*: N messages queue N wakes, N−1 of which find nothing
+>   to do. With a "a wake is already queued" bit, a burst of **200 `WM_SIZE`
+>   messages produces 1 post, 3 passes and exactly 1 layout** — a pass/message
+>   ratio of **0.015**, against the settled client rect.
+> * **A heartbeat with nothing to do must cost no VM entry**, or the pass count
+>   measures the timer rather than the drain. So the "deferred work exists" bit
+>   lives in Rust, next to the tracking flag, and the guest's way to ask for
+>   another pass is `drainPass` **answering non-zero** — which is also the only
+>   safe form of "more work", because a pass may never post its own wake.
+> * **The suppression table's Windows row is exactly right and needs a
+>   counter, not a flag**: a menu loop can open inside a size loop. Measured
+>   with the real messages: **zero passes during 30 resizes inside a modal
+>   loop, one layout after**, against the final size.
+>
+> The Cocoa lineage's own scars were not re-earned, and the reason is the
+> sprint order this section argued for: the drain landed, with its gate, before
+> the first control existed. The cost of the pattern is now quantified — a
+> coalesced 200-message burst spends ~9 µs in Smalltalk where per-message
+> layout would have spent 1.8 ms.
+
 ### 2.5 What is deliberately different from the Mac
 
 - **Labels under toolbar glyphs** (weakness #1). The Mac may adopt it back.

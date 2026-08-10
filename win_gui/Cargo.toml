@@ -6,6 +6,11 @@ description = "MACVM's Windows-native Smalltalk UI host — the message pump, an
 license = "BSD-2-Clause"
 publish = false
 
+# WG3 D6: embeds `macvm-winui.manifest`, which is the whole of what makes common
+# controls render in the current visual style rather than the Windows-95 one.
+# Two linker arguments, no new dependency — see build.rs.
+build = "build.rs"
+
 # `macvm-winui`, the name docs/win_gui_design.md §2 fixed before WG0 started.
 # The crate is `win_gui` and the binary is not; that asymmetry is the design's,
 # and matching `cocoa_gui`/`macvm-cocoa` exactly.

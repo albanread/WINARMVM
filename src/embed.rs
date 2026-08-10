@@ -194,6 +194,41 @@ pub struct VmHandle {
     error_policy: ErrorPolicy,
 }
 
+/// **WG3 D5.** Marks this thread as inside a HOST-INITIATED top-level VM entry,
+/// for as long as the returned guard lives.
+///
+/// This used to be the host's job: `win_gui/src/main.rs` bracketed every
+/// `eval`/`exec` by hand, and a source test counted the brackets to make sure
+/// nobody forgot. WG2's Δ 2 recorded why that is not good enough — *"that is a
+/// discipline, not a mechanism"* — and the bug it prevents is silent:
+/// `CreateWindowExW`, `SetWindowPos` and `DestroyWindow` **send** messages
+/// synchronously, so the WndProc door is entered from inside a live `eval` with
+/// its own depth counter legitimately 0; `deopt_trap::claim_jmp_slot` hands out
+/// one slot per thread, so the nested entry's `sigsetjmp` overwrites the outer
+/// `eval`'s recovery buffer and a later fault in that `eval` `longjmp`s into a
+/// returned frame.
+///
+/// So the flag is raised HERE, inside the entry points themselves, where no
+/// host can forget it — the `#[cfg(windows)]` on the module makes it compile to
+/// nothing everywhere else, and the counter is a thread-local increment on a
+/// path that already parses and compiles Smalltalk.
+///
+/// **What is deliberately NOT guarded**: [`VmHandle::dispatch_callback`]. That
+/// IS the door's own entry (and the Cocoa delegates'), it has its own
+/// re-entrancy guard (`callback_active`), and marking it busy would make the
+/// drain pass decline every message the layout it runs provokes for the wrong
+/// reason — the depth guard already declines them for the right one.
+#[cfg(windows)]
+#[inline]
+fn host_entry_guard() -> crate::runtime::win_wndproc::BusyGuard {
+    crate::runtime::win_wndproc::BusyGuard::enter()
+}
+
+/// Nothing to guard off Windows: there is no WndProc door to keep out.
+#[cfg(not(windows))]
+#[inline]
+fn host_entry_guard() {}
+
 /// A snapshot of the VM's clean, between-doits state — see
 /// [`VmHandle::idle_baseline`].
 #[derive(Clone, Copy, Default)]
@@ -877,6 +912,10 @@ impl VmHandle {
     /// transcript sink first.
     #[allow(unsafe_code)]
     pub fn eval(&mut self, source: &str) -> Result<String, GuestError> {
+        // WG3 D5 — see `host_entry_guard`. RAII, and it must be taken BEFORE the
+        // `sigsetjmp` slot is claimed: the whole point is that no message can
+        // reach the VM while this frame owns that slot.
+        let _busy = host_entry_guard();
         let slot = deopt_trap::claim_jmp_slot();
         // SAFETY: `sigsetjmp` is called directly, inline, at this exact call
         // site — its frame (this `eval` invocation) stays live for the whole
@@ -930,6 +969,8 @@ impl VmHandle {
     /// discards the value.
     #[allow(unsafe_code)]
     pub fn exec(&mut self, source: &str) -> Result<(), GuestError> {
+        // WG3 D5 — as `eval`.
+        let _busy = host_entry_guard();
         let slot = deopt_trap::claim_jmp_slot();
         // SAFETY: as `eval` — `sigsetjmp` inline at this call site, whose
         // frame stays live for the whole recovery window.
@@ -1099,6 +1140,10 @@ impl VmHandle {
     #[allow(unsafe_code)]
     pub fn render_fragment(&mut self, code: &str) -> Result<String, GuestError> {
         let source = format!("(Visual coerce: ([{code}] value)) htmlFragment.");
+        // WG3 D5 — as `eval`. D5 names `eval`/`exec`; there are SIX top-level
+        // entry points in this file that claim the one per-thread slot, and the
+        // hazard is identical in all of them.
+        let _busy = host_entry_guard();
         let slot = deopt_trap::claim_jmp_slot();
         // SAFETY: as `eval` — `sigsetjmp` inline at this call site, whose frame
         // stays live for the whole recovery window.
@@ -1157,6 +1202,8 @@ impl VmHandle {
         // text, so it needs no quoting — but guard the assumption cheaply.
         debug_assert!(action_id.bytes().all(|b| b.is_ascii_alphanumeric()));
         let source = format!("SmapplRegistry fire: '{action_id}'.");
+        // WG3 D5 — as `eval`.
+        let _busy = host_entry_guard();
         let slot = deopt_trap::claim_jmp_slot();
         // SAFETY: as `render_fragment` — `sigsetjmp` inline at this call site,
         // whose frame stays live for the whole recovery window.
@@ -1202,6 +1249,8 @@ impl VmHandle {
     #[allow(unsafe_code)]
     pub fn eval_to_string(&mut self, code: &str) -> Result<String, GuestError> {
         let source = format!("([{code}] value).");
+        // WG3 D5 — as `eval`.
+        let _busy = host_entry_guard();
         let slot = deopt_trap::claim_jmp_slot();
         // SAFETY: as `render_fragment` — `sigsetjmp` inline at this call site,
         // whose frame stays live for the whole recovery window.
@@ -1247,6 +1296,8 @@ impl VmHandle {
     #[allow(unsafe_code)]
     pub fn eval_to_bytes(&mut self, code: &str) -> Result<Vec<u8>, GuestError> {
         let source = format!("([{code}] value).");
+        // WG3 D5 — as `eval`.
+        let _busy = host_entry_guard();
         let slot = deopt_trap::claim_jmp_slot();
         // SAFETY: as `render_fragment` — `sigsetjmp` inline at this call site,
         // whose frame stays live for the whole recovery window.

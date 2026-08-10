@@ -32,7 +32,7 @@ backend) and the winsock lifecycle. Both are named in
 **In progress: [Phase WG](docs/win_gui_design.md)** — a Windows-native
 environment *written in Smalltalk*, the way the Mac one is: UI VM on the
 UI thread, messaging an independent Smalltalk GUI layer, driving Win32 and
-COM through the FFI. WG0 and WG1 have landed: `macvm-winui` boots a VM on
+COM through the FFI. WG0–WG3 have landed: `macvm-winui` boots a VM on
 the process's main thread, layers `world/winui.list`, and a guest Smalltalk
 doit registers a window class from winkb-queried struct offsets, opens a
 **visible** Windows-11 window — Mica backdrop attribute, system-themed
@@ -42,6 +42,20 @@ else. The window is scriptable rather than lookable-at: `MACVM_WINUI_CTL`
 arms the same control channel the web GUI uses, so `just gate-wg1` opens
 it, reads its client rect back through the FFI, captures a PNG and checks
 the PNG's own dimensions and pixels against it.
+
+Windows then learned to call **into** Smalltalk (WG2): a Rust wndproc
+trampoline forwards an allowlisted set of messages into the UI VM as
+top-level entries — `WinShell>>window:message:wParam:lParam:` — with a
+depth guard, a busy guard, and P2's fault recovery underneath, measured at
+**8.8 µs** per round trip against `DefWindowProcW`'s 57 ns. WG3 put the
+environment's real message architecture behind that door: handlers **flag
+and return**, and a separate drain pass — woken by a private `WM_APP`
+message, backstopped by a timer, and suppressed while a modal move/size or
+menu loop is pumping — does the work later, on a fresh top-level entry,
+against the settled state. Measured: a burst of **200 `WM_SIZE` messages
+produces one layout pass**. Real `BUTTON`/`EDIT`/`SysListView32` controls,
+created and laid out by Smalltalk (`world/92_winui_controls.mst`), notify
+through the same door and have their meaning run in the drain.
 
 ### Measured, on this machine (Snapdragon X / Oryon)
 

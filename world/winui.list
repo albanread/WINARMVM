@@ -26,3 +26,10 @@
 # an empty class runs only once the real one has landed.
 90_winui_probe.mst
 91_winui_shell.mst
+# WINARM (WG3, docs/sprints/sprint_wg3_detail.md): controls, layout and the
+# meaning of a control message. Loaded AFTER 91, and the order is the sprint's
+# own: 91 carries the whole flag-and-drain pass with four no-op hooks, and this
+# file overrides them. Part 1 of WG3's gate runs with this file making no
+# difference at all, which is how "the drain lands before the first control
+# exists" gets checked rather than claimed.
+92_winui_controls.mst

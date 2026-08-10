@@ -101,6 +101,11 @@ use crate::runtime::vm_state::VmState;
 #[link(name = "user32")]
 extern "system" {
     fn DefWindowProcW(hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> isize;
+    /// WG3 D1's wake. **`PostMessageW`, never `SendMessageW`** — a send would
+    /// call this very trampoline synchronously from inside itself, which is the
+    /// re-entrancy the whole flag-and-drain pattern exists to avoid.
+    /// `drain_wake_is_post_not_send` is the test that says so.
+    fn PostMessageW(hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> i32;
 }
 
 #[link(name = "kernel32")]
@@ -142,14 +147,52 @@ pub const WM_COMMAND: u32 = 0x0111;
 pub const WM_KEYDOWN: u32 = 0x0100;
 /// `WM_CHAR` — likewise.
 pub const WM_CHAR: u32 = 0x0102;
+/// `WM_NOTIFY` — WG3: how `SysListView32`/`SysTreeView32` speak to their
+/// parent. Its `lParam` is an `NMHDR*` that is valid **only during the call**;
+/// see [`read_nmhdr`].
+pub const WM_NOTIFY: u32 = 0x004E;
+/// `WM_ENTERSIZEMOVE` — WG3 D2: a modal move/size loop is starting, and it
+/// pumps the queue itself. Drains are suppressed until its twin arrives.
+pub const WM_ENTERSIZEMOVE: u32 = 0x0231;
+/// `WM_EXITSIZEMOVE` — tracking ends; the accumulated flags get **one** pass.
+pub const WM_EXITSIZEMOVE: u32 = 0x0232;
+/// `WM_ENTERMENULOOP` — the other modal pump Windows runs behind our back.
+pub const WM_ENTERMENULOOP: u32 = 0x0211;
+/// `WM_EXITMENULOOP` — likewise.
+pub const WM_EXITMENULOOP: u32 = 0x0212;
+/// `WM_TIMER` — the drain's **heartbeat**, not its wake (WG3's pitfall list:
+/// `WM_TIMER` is low-resolution and coalesces already). It catches a flag that
+/// was set with no message following, and a `drainPass` that asked to be run
+/// again. Never routed to `WinShell`: it is host machinery, and the guest's
+/// timer is only its clock.
+pub const WM_TIMER: u32 = 0x0113;
+
+/// The drain's **wake**: a private `WM_APP+n`, posted (never sent) by
+/// [`request_drain`]. `WM_APP` is 0x8000 and everything from there up is the
+/// application's own; +7 is arbitrary and reserved here so WG4's shell can pick
+/// its own numbers without colliding.
+pub const WM_APP_DRAIN: u32 = 0x8000 + 7;
+
+/// The wake must be in the application's own range. A number below `WM_APP`
+/// would collide with something Windows already means, and the symptom would be
+/// a window that behaves oddly rather than a drain that fails — so this is a
+/// BUILD error rather than a test.
+const _WM_APP_DRAIN_IS_PRIVATE: () = assert!(WM_APP_DRAIN >= 0x8000);
 
 /// **The closed set.** A message not named here never reaches the VM entry
 /// point, whatever `WinShell` may or may not implement — `allowlist_is_a_closed_set`
 /// is the test, and the probe counter it reads is [`vm_entries`].
 ///
-/// `WM_PAINT` is deliberately absent: WG2 keeps `DefWindowProcW`'s erase and
-/// painting is WG3/WG4's. Six messages, and the fact that it is six rather than
-/// "all of them" is the design decision, not an omission.
+/// `WM_PAINT` is deliberately absent: WG2 kept `DefWindowProcW`'s erase, and
+/// WG3's controls paint themselves (that is what visual styles v6 buys), so
+/// nothing here needs a paint handler yet. Eleven messages, and the fact that
+/// it is eleven rather than "all of them" is the design decision, not an
+/// omission.
+///
+/// `WM_TIMER` and [`WM_APP_DRAIN`] are **not** on it either, and that is a
+/// different kind of absence: they are handled by the trampoline itself,
+/// *before* the allowlist test, because they are the drain's own plumbing
+/// rather than messages whose meaning is Smalltalk's. See [`service_drain`].
 ///
 /// These are transcribed here rather than asked of winkb, and that is the one
 /// place in this layer where transcription is right: they are ABI-frozen
@@ -158,14 +201,33 @@ pub const WM_CHAR: u32 = 0x0102;
 /// `allowlist_matches_winkb` (world side, `62_winui_door_tests.mst`) checks
 /// every one of them against winkb when the database IS present — so a typo is
 /// caught by data rather than trusted to care.
-pub const ALLOWLIST: [u32; 6] = [
+pub const ALLOWLIST: [u32; 11] = [
     WM_CLOSE,
     WM_DESTROY,
     WM_SIZE,
     WM_COMMAND,
     WM_KEYDOWN,
     WM_CHAR,
+    WM_NOTIFY,
+    WM_ENTERSIZEMOVE,
+    WM_EXITSIZEMOVE,
+    WM_ENTERMENULOOP,
+    WM_EXITMENULOOP,
 ];
+
+/// The messages whose arrival **asks for a drain pass**.
+///
+/// This is the flag-and-drain split made concrete: the door records the
+/// message (a shallow VM entry that sets a Smalltalk flag and returns) and
+/// notes here that *some* deferred work now exists. The pass itself decides
+/// what that work is — Rust never knows.
+///
+/// It is a Rust-side set rather than a guest decision for one reason:
+/// `dispatch_callback` has a single `u64` return that is already spoken for by
+/// the LRESULT, so a handler cannot say "and drain me" in the same breath. The
+/// guest's escape hatch is the other end — `drainPass` answering non-zero means
+/// "there is more, run me again" — which is exactly the case Rust cannot know.
+pub const DRAIN_REQUESTING: [u32; 3] = [WM_SIZE, WM_COMMAND, WM_NOTIFY];
 
 /// Is `msg` one the door forwards? A plain linear scan over six `u32`s — this
 /// runs per message, and six compares is cheaper than any hash.
@@ -306,6 +368,175 @@ impl Drop for BusyGuard {
     }
 }
 
+// ── WG3 D1/D2: the drain ─────────────────────────────────────────────────────
+//
+// `win_gui_design.md` §2.4a is the specification, and its whole content is a
+// split: the DOOR records a flag and returns; a separate DRAIN pass, running
+// with the VM quiescent and provably not inside a callback, does the real work
+// with a fresh top-level entry. WG2's depth guard makes nesting SAFE; this
+// makes nesting NOT HAPPEN — which matters because the Cocoa side measured what
+// inline work costs (a refresh run inside a callback fails closed behind the
+// guard with nothing in any log, and once JIT-compiled corrupts the tier-link
+// invariant `walk_frames` asserts).
+//
+// Three thread-local bits carry it, and the difference between the first two is
+// the coalescing claim:
+//
+//   REQUESTED  "there is deferred work" — set by the door, cleared by the pass
+//   POSTED     "a WM_APP_DRAIN is already in the queue" — the latch that stops
+//              N messages from queueing N wakes. Without it the work would
+//              still coalesce but the PASSES would not, and `drainPasses <
+//              messages` is the gate.
+//   TRACKING   D2: a modal move/size or menu loop is pumping the queue itself.
+
+thread_local! {
+    /// Deferred work exists. Set by the door for a [`DRAIN_REQUESTING`]
+    /// message, and by a `drainPass` that answered non-zero ("run me again").
+    static DRAIN_REQUESTED: Cell<bool> = const { Cell::new(false) };
+    /// A `WM_APP_DRAIN` is in the queue and has not been consumed yet.
+    static DRAIN_POSTED: Cell<bool> = const { Cell::new(false) };
+    /// D2's suppression, as a COUNTER rather than a flag: a menu loop can open
+    /// inside a size loop, and a bool would be cleared by the inner one's exit
+    /// while the outer was still tracking.
+    static TRACKING: Cell<u32> = const { Cell::new(0) };
+}
+
+/// Is a modal move/size or menu loop pumping this thread's queue right now?
+///
+/// **Windows has no `NSDefaultRunLoopMode`.** Cocoa restricts its drain to that
+/// mode and therefore never runs one mid-tracking for free; here the modal loop
+/// runs its OWN `GetMessage`/`DispatchMessage`, so a posted `WM_APP_DRAIN` and a
+/// `WM_TIMER` are both delivered *inside* it. Without this flag a window drag
+/// would run a full layout pass per mouse-move, from inside a modal loop, with
+/// the VM entered from a stack frame the pump has never seen.
+pub fn tracking() -> bool {
+    TRACKING.with(Cell::get) > 0
+}
+
+/// Test/host hook: force the tracking state without a real modal loop. The gate
+/// drives the real thing (`WM_ENTERSIZEMOVE` sent from the control drain);
+/// this exists so `tracking_flag_suppresses_drain` needs neither a window nor a
+/// mouse.
+pub fn set_tracking(on: bool) {
+    TRACKING.with(|c| {
+        if on {
+            c.set(c.get() + 1)
+        } else {
+            c.set(c.get().saturating_sub(1))
+        }
+    });
+}
+
+/// Is there deferred work waiting for a pass?
+pub fn drain_requested() -> bool {
+    DRAIN_REQUESTED.with(Cell::get)
+}
+
+/// **The door's half of D1**: note that deferred work exists and, unless a wake
+/// is already queued or a modal loop is pumping, post one.
+///
+/// `PostMessageW` and never `SendMessageW`: a send would run this trampoline
+/// again, synchronously, from inside itself — the exact re-entrancy the pattern
+/// exists to avoid, and the reason `drain_wake_is_post_not_send` exists.
+pub fn request_drain(hwnd: isize) {
+    DRAIN_REQUESTED.with(|c| c.set(true));
+    bump(|c| c.drain_requests += 1);
+    if hwnd == 0 || tracking() || DRAIN_POSTED.with(Cell::get) {
+        return;
+    }
+    if unsafe { PostMessageW(hwnd, WM_APP_DRAIN, 0, 0) } != 0 {
+        DRAIN_POSTED.with(|c| c.set(true));
+        bump(|c| c.drain_posts += 1);
+    }
+}
+
+/// `WM_APP_DRAIN` (the wake) and `WM_TIMER` (the heartbeat) both land here.
+///
+/// Answers `true` when a `drainPass` actually ran. Everything else — tracking,
+/// nothing to do, the VM busy — is a cheap no-op that leaves the request
+/// standing, so the next wake or the next heartbeat services it. That is what
+/// makes this safe to call from inside a modal loop's dispatch: it declines.
+fn service_drain(hwnd: isize) -> bool {
+    // This wake has been consumed, whatever we do with it.
+    DRAIN_POSTED.with(|c| c.set(false));
+
+    // D2. The flags accumulate and ONE pass runs on exit — which is where
+    // `WM_EXITSIZEMOVE` posts a fresh wake. Deliberately does NOT re-post here:
+    // during a drag `request_drain` is already declining to post, so a
+    // suppressed pass that re-posted would spin the modal loop for nothing.
+    if tracking() {
+        bump(|c| c.drain_suppressed += 1);
+        return false;
+    }
+    if !drain_requested() {
+        // The heartbeat with nothing to do — the overwhelmingly common case, and
+        // it must not cost a VM entry. This is why `drainPasses` counts real
+        // work rather than clock ticks, which is what makes the coalescing ratio
+        // a measurement of the drain rather than of the timer.
+        bump(|c| c.drain_idle += 1);
+        return false;
+    }
+    // The same two guards the message door has, for the same two reasons: a
+    // pass is a top-level VM entry and must not be nested inside another one.
+    // Declining leaves REQUESTED set, so the heartbeat retries.
+    if depth() > 0 || vm_busy() {
+        bump(|c| c.drain_declined += 1);
+        return false;
+    }
+    let vmp = crate::embed::ui_vm();
+    if vmp.is_null() {
+        bump(|c| c.drain_declined += 1);
+        return false;
+    }
+    // Cleared BEFORE the pass, not after: a flag the handler sets while the
+    // pass is running is new work, and clearing afterwards would lose it. The
+    // pass's own non-zero answer is how it says so.
+    DRAIN_REQUESTED.with(|c| c.set(false));
+
+    let _guard = DepthGuard::enter();
+    bump(|c| c.drain_passes += 1);
+    // SAFETY: as `cross_into_smalltalk` — the handle is boxed and published by
+    // the host on this thread, and the depth guard above establishes that no
+    // other `&mut VmState` is live.
+    let handle: &mut crate::embed::VmHandle = unsafe { &mut *vmp };
+    let raw = handle.dispatch_callback(NOT_HANDLED, perform_drain_pass);
+    // The guest's escape hatch, and the answer to this sprint's own pitfall
+    // ("do not post the drain message from inside the drain"): a pass that
+    // discovered more work says so by ANSWERING non-zero, the request is left
+    // standing, and the HEARTBEAT services it. Posting from here would let a
+    // handler that always answers non-zero spin the pump.
+    if raw != NOT_HANDLED && raw != 0 {
+        DRAIN_REQUESTED.with(|c| c.set(true));
+        bump(|c| c.drain_reasked += 1);
+    }
+    let _ = hwnd;
+    true
+}
+
+/// Inside the recovery door, with a live `&mut VmState`: send
+/// `WinShell class>>drainPass`.
+///
+/// A `SmallInteger` answer is "how much is left" — non-zero means run me again.
+/// Anything else (no `WinShell`, no `drainPass`, a raise, a recovered fault) is
+/// [`NOT_HANDLED`], which the caller reads as "nothing more", so a pass that
+/// blows up is not retried forever. `tests_wg3.md`'s stress row asks for exactly
+/// that: the pass completes, the flag is cleared, the next pass runs normally.
+fn perform_drain_pass(vm: &mut VmState) -> u64 {
+    let Some(cls) = win_shell_class(vm) else {
+        return NOT_HANDLED;
+    };
+    let sel = vm.universe.intern(b"drainPass");
+    let k = crate::runtime::primitives::klass_of(vm, cls);
+    let Some(m) = crate::runtime::lookup::lookup(vm, k, sel) else {
+        return NOT_HANDLED;
+    };
+    let result = crate::interpreter::run_method_reentrant(vm, m, cls, &[]);
+    match SmallInt::try_from(result) {
+        Some(n) => n.value() as u64,
+        None => NOT_HANDLED,
+    }
+}
+
 /// RAII, and the reason is the whole of D4's third row: P2's recovery
 /// `longjmp`s and skips ordinary returns, so a hand-written decrement after the
 /// VM entry would leak the guard on every recovered fault and disable the door
@@ -370,6 +601,29 @@ struct Counters {
     /// message with the door switched off.
     base_ticks: u64,
     base_samples: u64,
+    // ── WG3's drain (D1/D2) ─────────────────────────────────────────────
+    /// Messages that asked for a pass. The DENOMINATOR of the coalescing
+    /// ratio, and deliberately counted here rather than in Smalltalk so the
+    /// two sides can be compared (WG2 Δ13's lesson pointed the other way for
+    /// tallies the GUEST owns; this one is the host's own mechanism).
+    drain_requests: u64,
+    /// Wakes actually posted. `drain_requests - drain_posts` is what the latch
+    /// saved.
+    drain_posts: u64,
+    /// Passes that entered the VM. The NUMERATOR. `drain_passes < sizeCount`
+    /// is `tests_wg3.md` item 3, and a ratio of 1.0 would mean this whole
+    /// mechanism is doing nothing.
+    drain_passes: u64,
+    /// Wakes/heartbeats declined because a modal loop was pumping (D2).
+    drain_suppressed: u64,
+    /// Heartbeats with nothing to do. Must not cost a VM entry.
+    drain_idle: u64,
+    /// Declined because the VM was already inside an entry. Retried by the
+    /// heartbeat; a number that grows without bound is a bug report.
+    drain_declined: u64,
+    /// Passes that answered "there is more" and were re-armed for the
+    /// heartbeat rather than re-posted.
+    drain_reasked: u64,
 }
 
 thread_local! {
@@ -377,6 +631,8 @@ thread_local! {
         vm_entries: 0, nested: 0, busy: 0, not_listed: 0, no_vm: 0,
         defaulted: 0, panics: 0,
         door_ticks: 0, door_samples: 0, base_ticks: 0, base_samples: 0,
+        drain_requests: 0, drain_posts: 0, drain_passes: 0,
+        drain_suppressed: 0, drain_idle: 0, drain_declined: 0, drain_reasked: 0,
     }) };
 }
 
@@ -413,6 +669,41 @@ pub fn defaulted() -> u64 {
 }
 pub fn panics_caught() -> u64 {
     counters().panics
+}
+pub fn drain_requests() -> u64 {
+    counters().drain_requests
+}
+pub fn drain_posts() -> u64 {
+    counters().drain_posts
+}
+pub fn drain_passes() -> u64 {
+    counters().drain_passes
+}
+pub fn drain_suppressed() -> u64 {
+    counters().drain_suppressed
+}
+pub fn drain_declined() -> u64 {
+    counters().drain_declined
+}
+
+/// One line the gate greps for the whole drain story — requests against
+/// passes is the coalescing ratio, and `suppressed`/`passes` during a drag is
+/// D2's.
+pub fn drain_line() -> String {
+    let c = counters();
+    format!(
+        "drain tracking={} requested={} requests={} posts={} passes={} suppressed={} \
+         idle={} declined={} reasked={}",
+        tracking(),
+        drain_requested(),
+        c.drain_requests,
+        c.drain_posts,
+        c.drain_passes,
+        c.drain_suppressed,
+        c.drain_idle,
+        c.drain_declined,
+        c.drain_reasked,
+    )
 }
 
 /// `(door ticks, door samples, baseline ticks, baseline samples, qpc hz)`.
@@ -495,6 +786,43 @@ pub fn door_address() -> i64 {
 /// FIRST, so a `WM_MOUSEMOVE` storm costs a scan and a call and touches nothing
 /// else — no thread-local read, no atomic, no VM.
 pub extern "system" fn macvm_wndproc(hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> isize {
+    // 0. WG3 D2. The tracking transitions are pure Rust and run BEFORE any
+    //    guard, because they must hold even when the VM is busy and the entry
+    //    below will be declined: the modal loop is starting whether or not
+    //    Smalltalk gets to hear about it, and a drain that ran inside it would
+    //    be the bug. `WM_EXITSIZEMOVE` re-posts, because `request_drain`
+    //    deliberately did not while tracking.
+    match msg {
+        WM_ENTERSIZEMOVE | WM_ENTERMENULOOP => set_tracking(true),
+        WM_EXITSIZEMOVE | WM_EXITMENULOOP => {
+            set_tracking(false);
+            if drain_requested() {
+                request_drain(hwnd);
+            }
+        }
+        _ => {}
+    }
+    // 0b. WG3 D1. The wake and the heartbeat, handled by the trampoline itself
+    //     rather than routed to `WinShell` — they are the drain's plumbing, not
+    //     messages whose meaning is Smalltalk's, and they must work identically
+    //     whether our own pump dispatched them or a modal loop did.
+    //
+    //     Inside `catch_unwind` for the same reason everything else is: a Rust
+    //     panic unwinding into Win32's dispatcher is UB.
+    if msg == WM_APP_DRAIN {
+        let _ = catch_unwind(AssertUnwindSafe(|| service_drain(hwnd)));
+        return 0;
+    }
+    if msg == WM_TIMER {
+        let _ = catch_unwind(AssertUnwindSafe(|| service_drain(hwnd)));
+        // ...and then the system default anyway. WG3 owns exactly one timer and
+        // treats every `WM_TIMER` as its heartbeat, which is affordable only
+        // because a heartbeat with nothing to do costs no VM entry (see
+        // `service_drain`). Falling through to `DefWindowProcW` keeps any OTHER
+        // timer — a `TIMERPROC` passed in `lParam`, which WG4+ may want — working
+        // exactly as it would have.
+        return default_proc(msg, hwnd, wparam, lparam);
+    }
     // 1. Off the list (or the door is switched off): the overwhelmingly common
     //    case, and the cheapest one. `DefWindowProcW` and nothing else.
     if !is_allowlisted(msg) {
@@ -614,7 +942,17 @@ fn cross_into_smalltalk(hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> 
     let sample = msg == WM_SIZE;
     let t0 = if sample { qpc() } else { 0 };
     let raw = handle.dispatch_callback(NOT_HANDLED, |vm| {
-        perform_window_message(vm, a_hwnd, a_msg, a_w, a_l)
+        if msg == WM_NOTIFY {
+            // D3's payload-lifetime constraint. `lParam` is an `NMHDR*` that is
+            // valid ONLY for the duration of this call, so the three fields are
+            // read HERE — inside the recovery window, so a bad pointer is a
+            // recovered fault rather than a process death — and handed to
+            // Smalltalk as values. Nothing stashes the pointer, because a
+            // stashed one is invisible until it corrupts something.
+            perform_notify(vm, a_hwnd, lparam)
+        } else {
+            perform_window_message(vm, a_hwnd, a_msg, a_w, a_l)
+        }
     });
     if sample {
         let dt = (qpc() - t0).max(0) as u64;
@@ -623,6 +961,14 @@ fn cross_into_smalltalk(hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> 
             c.door_samples += 1;
         });
     }
+    // WG3 D1: the door's OTHER half. The message has been recorded (whatever
+    // the handler answered, including a raise — the flag is Smalltalk's and it
+    // was set before any work could fail), so note that deferred work exists
+    // and wake the loop. The real work happens in `service_drain`, on a fresh
+    // top-level entry, with this frame long gone.
+    if DRAIN_REQUESTING.contains(&msg) {
+        request_drain(hwnd);
+    }
     if raw == NOT_HANDLED {
         return None;
     }
@@ -630,6 +976,86 @@ fn cross_into_smalltalk(hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> 
         GUEST_HANDLED_DESTROY.with(|c| c.set(true));
     }
     Some(raw as i64 as isize)
+}
+
+/// The three `NMHDR` fields, read out of a pointer that dies when this call
+/// returns: `hwndFrom` (offset 0), `idFrom` (8), `code` (16) on 64-bit Windows.
+///
+/// Transcribed offsets, and this is the same exception D2 makes for the
+/// allowlist and for the same reason — a Rust read cannot query SQLite, and the
+/// core crate must build on a machine with no `windows_api.db`. The
+/// compensating control is data: `testNotifyOffsetsMatchWinkb`
+/// (`63_winui_controls_tests.mst`) asks winkb for all three by name and asserts
+/// these literals, so a wrong one fails in-language rather than silently
+/// reading the wrong word.
+///
+/// # Safety
+/// `p` must be the `NMHDR*` Windows passed in `WM_NOTIFY`'s `lParam`, read
+/// during the call. Called only from inside `dispatch_callback`, so a bad
+/// pointer is a recovered fault rather than a dead process.
+unsafe fn read_nmhdr(p: isize) -> (isize, usize, u32) {
+    let base = p as *const u8;
+    let hwnd_from = std::ptr::read_unaligned(base as *const isize);
+    let id_from = std::ptr::read_unaligned(base.add(8) as *const usize);
+    let code = std::ptr::read_unaligned(base.add(16) as *const u32);
+    (hwnd_from, id_from, code)
+}
+
+/// The three `NMHDR` fields as `SmallInteger`s, or `None` if any of them will
+/// not fit one.
+///
+/// Split out of [`perform_notify`] precisely so it can be tested without a VM:
+/// Δ9 says a control id is a `u32` (and `idFrom` is in fact a `UINT_PTR`) that
+/// must be range-checked before `SmallInt::new` sees it, because that function
+/// PANICS out of range and a panic inside a wndproc is undefined behaviour.
+/// `control_id_range_checked` drives a fabricated `NMHDR` through this.
+fn notify_smis(lparam: isize) -> Option<[SmallInt; 3]> {
+    if lparam == 0 {
+        return None;
+    }
+    let (hwnd_from, id_from, code) = unsafe { read_nmhdr(lparam) };
+    Some([
+        // `hwndFrom` is an HWND — a pointer, reinterpreted signed exactly as
+        // the four words of `window:message:wParam:lParam:` are.
+        SmallInt::try_new(hwnd_from as i64)?,
+        // `idFrom` is a `UINT_PTR` and therefore UNSIGNED: `as i64` would turn
+        // an out-of-range id into a plausible negative one instead of refusing
+        // it, which is the exact shape of bug Δ9 is about. Two conversions, and
+        // both of them can say no.
+        SmallInt::try_new(i64::try_from(id_from as u64).ok()?)?,
+        // `code` is a `UINT` whose conventional values are negative constants
+        // cast unsigned (`LVN_ITEMCHANGED` is 4 294 967 195), which is also how
+        // winkb reports them — so it crosses unsigned and compares equal in
+        // Smalltalk against `WinApi constant:`.
+        SmallInt::try_new(code as i64)?,
+    ])
+}
+
+/// `WM_NOTIFY`, decoded: `WinShell class>>window:notifyFrom:id:code:`.
+///
+/// Four `SmallInteger`s and no pointer — the whole of D3's constraint in one
+/// signature. A control id is a `u32` and a notification code is a `UINT` whose
+/// conventional values are negative constants cast unsigned (`LVN_ITEMCHANGED`
+/// is 4 294 967 195), so all of them go through `try_new` (Δ9: `SmallInt::new`
+/// PANICS out of range, and a wndproc must never panic).
+fn perform_notify(vm: &mut VmState, hwnd: SmallInt, lparam: isize) -> u64 {
+    let Some([a_from, a_id, a_code]) = notify_smis(lparam) else {
+        return NOT_HANDLED;
+    };
+    let Some(cls) = win_shell_class(vm) else {
+        return NOT_HANDLED;
+    };
+    let sel = vm.universe.intern(b"window:notifyFrom:id:code:");
+    let k = crate::runtime::primitives::klass_of(vm, cls);
+    let Some(m) = crate::runtime::lookup::lookup(vm, k, sel) else {
+        return NOT_HANDLED;
+    };
+    let argv = [hwnd.oop(), a_from.oop(), a_id.oop(), a_code.oop()];
+    let result = crate::interpreter::run_method_reentrant(vm, m, cls, &argv);
+    match SmallInt::try_from(result) {
+        Some(n) => n.value() as u64,
+        None => NOT_HANDLED,
+    }
 }
 
 /// The "not an LRESULT" sentinel handed to `dispatch_callback` as its default.
@@ -831,7 +1257,10 @@ mod tests {
             let _busy = BusyGuard::enter();
             assert!(vm_busy());
             let answer = cross_into_smalltalk(0, WM_SIZE, 0, 0);
-            assert!(answer.is_none(), "a message sent from inside a doit defaults");
+            assert!(
+                answer.is_none(),
+                "a message sent from inside a doit defaults"
+            );
             assert_eq!(depth(), 0, "the busy arm must not take the depth guard");
         }
         assert!(!vm_busy(), "the RAII guard must release on scope exit");
@@ -1037,6 +1466,224 @@ mod tests {
             assert_eq!(macvm_wndproc(0, WM_SIZE, 0, 0), 0);
             assert_eq!(depth(), 0);
         });
+    }
+
+    // ── WG3: the drain (D1), tracking (D2) and the guard's new home (D5) ────
+
+    /// `tests_wg3.md`: **the wake is `PostMessageW`; a `SendMessageW` would
+    /// re-enter synchronously.** Not an opinion that can be checked by reading
+    /// — a send and a post have the same call shape — so this reads the source
+    /// of the one function that wakes the loop.
+    ///
+    /// The evidence is stronger than the grep suggests: `request_drain` is the
+    /// only place the wake is issued, `service_drain` is the only consumer, and
+    /// a `SendMessageW` there would call this very trampoline from inside
+    /// itself, which the depth guard would decline — so the drain would simply
+    /// never run and every WG3 gate item would fail at once. The grep catches
+    /// the change at the moment it is made instead.
+    #[test]
+    fn drain_wake_is_post_not_send() {
+        let src = include_str!("win_wndproc.rs");
+        let send = concat!("Send", "MessageW");
+        for line in src.lines() {
+            let l = line.trim();
+            if l.starts_with("//") || l.starts_with("///") || l.starts_with("//!") {
+                continue;
+            }
+            assert!(
+                !l.contains(send),
+                "the drain's wake must be a POST; a send re-enters this trampoline \
+                 synchronously — {l}"
+            );
+        }
+        assert!(
+            src.contains(concat!("Post", "MessageW(hwnd, WM_APP_DRAIN")),
+            "request_drain must post WM_APP_DRAIN"
+        );
+        // And the message really is a private application message, not
+        // something Windows already means by. (The `>= WM_APP` half is
+        // `_WM_APP_DRAIN_IS_PRIVATE` at the top of this file — a compile-time
+        // assertion, because a runtime one over two constants is a warning and
+        // a build error is a better answer anyway.)
+        assert!(!ALLOWLIST.contains(&WM_APP_DRAIN));
+        assert!(!ALLOWLIST.contains(&WM_TIMER));
+    }
+
+    /// D2, and `tests_wg3.md`'s unit row: **flag set ⇒ drain requests are
+    /// recorded but not serviced; cleared ⇒ exactly one pass.**
+    ///
+    /// Runs with no VM published, so "serviced" is measured by whether the pass
+    /// got as far as trying — `drain_suppressed` moves while tracking and
+    /// `drain_declined` moves after, and `drain_passes` moves in neither
+    /// because there is no VM. The three-way distinction is the point: a
+    /// suppressed drain and a declined one are different states and only one of
+    /// them means D2 is working.
+    #[test]
+    fn tracking_flag_suppresses_drain() {
+        reset_stats();
+        DRAIN_REQUESTED.with(|c| c.set(false));
+        DRAIN_POSTED.with(|c| c.set(false));
+        assert!(!tracking(), "no modal loop at rest");
+
+        // Tracking on: requests accumulate, nothing is posted, nothing runs.
+        let _ = macvm_wndproc(0, WM_ENTERSIZEMOVE, 0, 0);
+        assert!(tracking());
+        for _ in 0..10 {
+            request_drain(0);
+        }
+        assert_eq!(drain_requests(), 10);
+        assert_eq!(
+            drain_posts(),
+            0,
+            "a post while tracking would be dispatched by the modal loop's own pump"
+        );
+        let before = drain_suppressed();
+        // A wake that WAS already in the queue when the drag started still
+        // arrives — that is the case D2 exists for.
+        let _ = macvm_wndproc(0, WM_APP_DRAIN, 0, 0);
+        assert_eq!(drain_suppressed(), before + 1);
+        assert_eq!(drain_passes(), 0, "ZERO passes while tracking");
+        assert!(
+            drain_requested(),
+            "the flags accumulate, they are not dropped"
+        );
+
+        // Tracking off: the accumulated work gets exactly one attempt.
+        let _ = macvm_wndproc(0, WM_EXITSIZEMOVE, 0, 0);
+        assert!(!tracking());
+        let declined = drain_declined();
+        let _ = macvm_wndproc(0, WM_APP_DRAIN, 0, 0);
+        assert_eq!(
+            drain_declined(),
+            declined + 1,
+            "one attempt after tracking ends (declined here only because no VM \
+             is published on this test thread)"
+        );
+        assert_eq!(drain_suppressed(), before + 1, "and no further suppression");
+        DRAIN_REQUESTED.with(|c| c.set(false));
+    }
+
+    /// Nesting: a menu loop can open inside a size loop, and a plain bool would
+    /// be cleared by the inner one's exit while the outer was still dragging.
+    #[test]
+    fn tracking_nests() {
+        set_tracking(false); // normalise this worker thread
+        assert!(!tracking());
+        let _ = macvm_wndproc(0, WM_ENTERSIZEMOVE, 0, 0);
+        let _ = macvm_wndproc(0, WM_ENTERMENULOOP, 0, 0);
+        assert!(tracking());
+        let _ = macvm_wndproc(0, WM_EXITMENULOOP, 0, 0);
+        assert!(tracking(), "the outer size loop is still running");
+        let _ = macvm_wndproc(0, WM_EXITSIZEMOVE, 0, 0);
+        assert!(!tracking());
+    }
+
+    /// Δ9, and `tests_wg3.md`'s `control_id_range_checked`: an `NMHDR` field is
+    /// a `UINT_PTR`/`UINT` that must be refused before `SmallInt::new` sees it,
+    /// because that function PANICS out of range and a panic inside a wndproc is
+    /// undefined behaviour.
+    ///
+    /// Drives a FABRICATED `NMHDR` rather than a mocked one: the three offsets
+    /// this code reads (0, 8, 16) are exercised by writing at those offsets, so
+    /// a transcription error in `read_nmhdr` shows up here as well as in
+    /// `testNotifyOffsetsMatchWinkb`.
+    #[test]
+    fn control_id_range_checked() {
+        #[repr(C)]
+        struct FakeNmhdr {
+            hwnd_from: isize,
+            id_from: usize,
+            code: u32,
+            _pad: u32,
+        }
+        let ok = FakeNmhdr {
+            hwnd_from: 0x1234,
+            id_from: 4242,
+            code: 0xFFFF_FF9B, // LVN_ITEMCHANGED, i.e. (UINT)-101
+            _pad: 0,
+        };
+        let got = notify_smis(&ok as *const _ as isize).expect("in-range fields must pass");
+        assert_eq!(got[0].value(), 0x1234);
+        assert_eq!(got[1].value(), 4242);
+        assert_eq!(got[2].value(), 0xFFFF_FF9B);
+
+        // A control id that cannot be a SmallInteger: refused, not panicked.
+        let bad = FakeNmhdr {
+            hwnd_from: 0x1234,
+            id_from: usize::MAX,
+            code: 0,
+            _pad: 0,
+        };
+        assert!(
+            notify_smis(&bad as *const _ as isize).is_none(),
+            "an out-of-range idFrom must be refused before SmallInt::new sees it"
+        );
+        // And a null NMHDR — which a malformed WM_NOTIFY can carry — is not a
+        // dereference.
+        assert!(notify_smis(0).is_none());
+    }
+
+    /// **D5**: `busy_guard_is_inside_eval`. A direct `VmHandle::eval` sets the
+    /// busy flag without the caller doing anything, so the door declines a
+    /// message sent from inside it — which is the property WG2 achieved by
+    /// asking every host to remember, and WG3 makes structural.
+    ///
+    /// Measured from INSIDE a live `eval`, because that is where the hazard is.
+    /// A `TranscriptSink` is a Rust closure the VM calls while the entry is on
+    /// the stack — the same position `CreateWindowExW`'s synchronous `WM_SIZE`
+    /// arrives from — so the sink drives a real message through the real
+    /// trampoline and records what happened.
+    #[test]
+    fn busy_guard_is_inside_eval() {
+        use std::sync::{Arc, Mutex};
+
+        /// What the door looked like from inside the entry.
+        #[derive(Default)]
+        struct Seen {
+            busy: bool,
+            entries_moved: bool,
+            busy_declined_moved: bool,
+        }
+        struct Probe(Arc<Mutex<Seen>>);
+        impl crate::embed::TranscriptSink for Probe {
+            fn show(&mut self, _s: &str) {
+                let entries = vm_entries();
+                let declined = busy_declined();
+                // A message arriving from inside the entry, exactly as
+                // `CreateWindowExW`/`SetWindowPos` deliver one.
+                let _ = macvm_wndproc(0, WM_SIZE, 0, 0);
+                let mut s = self.0.lock().unwrap();
+                s.busy = vm_busy();
+                s.entries_moved = vm_entries() != entries;
+                s.busy_declined_moved = busy_declined() != declined;
+            }
+        }
+
+        set_door_enabled(true);
+        assert!(!vm_busy(), "no host entry live before the test");
+        let seen = Arc::new(Mutex::new(Seen::default()));
+        let mut vm = boot_with_shell("^7");
+        vm.set_transcript(Box::new(Probe(seen.clone())));
+        crate::embed::publish_ui_vm(&mut *vm as *mut _);
+        // NO `BusyGuard` written by this caller — that is the whole point.
+        let answer = vm.eval("Transcript showCr: 'inside'. 3 + 4.");
+        crate::embed::publish_ui_vm(std::ptr::null_mut());
+        answer.expect("the probe must not raise");
+        let s = seen.lock().unwrap();
+        assert!(
+            s.busy,
+            "D5: `eval` itself must raise the busy flag — no host cooperation"
+        );
+        assert!(
+            !s.entries_moved,
+            "a message sent from inside `eval` must NOT reach the VM"
+        );
+        assert!(
+            s.busy_declined_moved,
+            "...and must have been declined for that reason, not another"
+        );
+        drop(s);
+        assert!(!vm_busy(), "the guard must release when `eval` returns");
     }
 
     /// A VM with no `WinShell` at all — every process in this tree that is not

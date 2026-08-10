@@ -82,6 +82,13 @@ TestRunner run: ObjectProtocolGapsTests.
    when Windows calls the trampoline, so they live in `just gate-wg2` and in
    the door's own Rust tests, where there is one process, one thread and one
    real window.
+ - WinUiControlsTests: `== #windows` -- WG3's headless half: the
+   flag-and-drain pass as a METHOD (flags set, pass run, flags clear, work
+   counted once) and `WinLayout`, which is pure arithmetic and needs neither
+   winkb nor Win32 nor a window. Same layer, same line one sprint further:
+   coalescing under a real message storm, tracking suppression inside a modal
+   loop, a synthesised click and a live NMHDR are all claims about what
+   happens when Windows calls the trampoline, so they live in `just gate-wg3`.
 
  Guarded here rather than by dropping files from tests.list, because the
  files LOAD fine everywhere — only running them touches FFI — and the
@@ -109,6 +116,7 @@ Smalltalk platformName == #windows ifTrue: [ TestRunner run: WinIoTests ].
 Smalltalk platformName == #windows ifTrue: [ TestRunner run: WinUiProbeTests ].
 Smalltalk platformName == #windows ifTrue: [ TestRunner run: WinUiShellTests ].
 Smalltalk platformName == #windows ifTrue: [ TestRunner run: WinUiDoorTests ].
+Smalltalk platformName == #windows ifTrue: [ TestRunner run: WinUiControlsTests ].
 TestRunner run: IoStreamTests.
 TestRunner run: ScaledDecimalTests.
 Smalltalk platformName ~~ #windows ifTrue: [ TestRunner run: SocketTests ].

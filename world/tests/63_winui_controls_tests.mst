@@ -1,0 +1,281 @@
+"63_winui_controls_tests.mst — WinUiControlsTests, the headless half of WG3's
+ acceptance gate (docs/sprints/tests_wg3.md, 'In-language tests'). Exercises the
+ guest side of the flag-and-drain pass (world/91_winui_shell.mst) and of the
+ layout object (world/92_winui_controls.mst).
+
+ WHAT IS DELIBERATELY NOT HERE, and the line is the same one 61 and 62 drew:
+ anything that needs a WINDOW, a message PUMP, a modal loop or a real control.
+ Coalescing, tracking suppression, a synthesised click and a WM_NOTIFY carrying
+ a live NMHDR are all claims about what happens when WINDOWS calls the
+ trampoline, and Windows will not call a trampoline in a `cargo test` worker
+ thread with no window and no loop. Those live in `just gate-wg3`, driven
+ through MACVM_WINUI_CTL against one process with one thread and one real
+ window, and in the door's own Rust unit tests (src/runtime/win_wndproc.rs).
+
+ WHAT REMAINS is the half worth having in-language, and WG3's split was designed
+ so that it is a big half:
+
+   * `WinLayout` is PURE. A client size and a DPI in, a Dictionary of rects
+     out — no handle, no Win32, no window, and no winkb either. Its two tests
+     therefore run on every machine this suite runs on, including a Mac.
+   * `drainPass` is ORDINARY SMALLTALK. It can be SENT. Flags set, pass run,
+     flags clear, work counted once — the whole contract, as a method rather
+     than as a system.
+
+ THREE SKIP LEVELS, all announced:
+   * NOT WINDOWS — the runner never calls us (99_run_all.mst's guard).
+   * NO DATABASE — the parts that name a Win32 message ask winkb for its
+     number, so without windows_api.db they cannot run. The layout tests need
+     neither winkb nor Win32 and always do.
+
+ LOADING: as 62 — `WinShell`, `WinLayout` and `WinControl` live in the
+ conditional winui layer, so world/tests/tests.list names ../90, ../91 and ../92
+ above this file (WG0's Δ 6: an unresolved capitalised name in a method body is
+ a COMPILE error in this dialect, so a layered world's test file cannot guard
+ itself at run time)."
+
+TestCase subclass: WinUiControlsTests [
+
+    runAll [
+        "The layout is pure arithmetic and runs whatever else is true of this
+         machine — no database, no Win32, no window. It is also the piece D4
+         is actually about, so it goes first."
+        self runTest: #testLayoutComputesRects do: [ self testLayoutComputesRects ].
+        self runTest: #testLayoutScalesWithDpi do: [ self testLayoutScalesWithDpi ].
+        self runTest: #testLayoutRefusesTwoFillBands do: [ self testLayoutRefusesTwoFillBands ].
+        self runTest: #testControlWithoutWindowFailsCleanly
+             do: [ self testControlWithoutWindowFailsCleanly ].
+
+        WinApi winkbAvailable ifFalse: [
+            Transcript showCr:
+                '  SKIP WinUiControlsTests (5 of 9) — windows_api.db absent on this machine.'.
+            Transcript showCr:
+                '       The drain records messages by their winkb-queried numbers (it'.
+            Transcript showCr:
+                '       transcribes none), so testDrainClearsFlags, testDrainCoalesces,'.
+            Transcript showCr:
+                '       testDrainReaskIsOneShot, testNotifyOffsetsMatchWinkb and'.
+            Transcript showCr:
+                '       testWg3MessagesMatchWinkb cannot run. The database is a'.
+            Transcript showCr:
+                '       machine-local artifact, not a build input; nothing here is broken.'.
+            ^self ].
+
+        self runTest: #testDrainClearsFlags do: [ self testDrainClearsFlags ].
+        self runTest: #testDrainCoalesces do: [ self testDrainCoalesces ].
+        self runTest: #testDrainReaskIsOneShot do: [ self testDrainReaskIsOneShot ].
+        self runTest: #testNotifyOffsetsMatchWinkb do: [ self testNotifyOffsetsMatchWinkb ].
+        self runTest: #testWg3MessagesMatchWinkb do: [ self testWg3MessagesMatchWinkb ].
+    ]
+
+    "── D4: the layout object, pure ──────────────────────────────────────"
+
+    testLayoutComputesRects [
+        "A known client size in, known rects out. The numbers are written here
+         rather than derived, on purpose: a test that recomputed the layout
+         with the layout's own arithmetic would agree with any bug it had.
+
+         The shell layout is three bands with a 10-DIP margin — a command band
+         32 tall, a status band 26, and a list filling the rest — so at 900x600
+         and 96 dpi: x is the margin, width is the client width less two
+         margins, and each y is the previous y plus that band's height plus a
+         margin. The filler's height is what is left, and 600 - 4*10 - 32 - 26
+         is 502."
+        | r |
+        r := WinLayout shell rectsIn: 900 by: 600 dpi: 96.
+        self assert: (r at: #button) equals: #(10 10 880 32).
+        self assert: (r at: #status) equals: #(10 52 880 26).
+        self assert: (r at: #list) equals: #(10 88 880 502).
+        "Every band is inside the client area, which is the property a wrong
+         sign or a wrong subtraction would break while still producing four
+         plausible integers."
+        r keysAndValuesDo: [ :k :v |
+            self assert: (v at: 1) >= 0.
+            self assert: (v at: 2) >= 0.
+            self assert: ((v at: 1) + (v at: 3)) <= 900.
+            self assert: ((v at: 2) + (v at: 4)) <= 600 ].
+        "A window too small for its fixed bands clamps the filler at zero
+         rather than producing a negative height — SetWindowPos would take a
+         negative height and draw nothing, with no error anywhere."
+        self assert: (((WinLayout shell rectsIn: 200 by: 40 dpi: 96) at: #list) at: 4) equals: 0
+    ]
+
+    testLayoutScalesWithDpi [
+        "`tests_wg3.md`'s DPI row, and the reason `WinLayout` computes in DIP
+         space and scales once at the end rather than multiplying as it goes:
+         the same layout at 144 dpi must be EXACTLY 1.5x the layout at 96, not
+         1.5x plus a rounding error per band. WG1 established the environment's
+         DPI contract as an equality; this keeps it one."
+        | a b |
+        a := WinLayout shell rectsIn: 900 by: 600 dpi: 96.
+        b := WinLayout shell rectsIn: 1350 by: 900 dpi: 144.
+        a keysAndValuesDo: [ :k :v |
+            1 to: 4 do: [ :i |
+                self assert: ((b at: k) at: i) equals: (v at: i) * 3 // 2 ] ].
+        "...and at 96 the DIP and the pixel are the same number, which is what
+         `USER_DEFAULT_SCREEN_DPI` means and what makes the assertions above
+         readable."
+        self assert: ((a at: #button) at: 4) equals: 32
+    ]
+
+    testLayoutRefusesTwoFillBands [
+        "A layout object that accepted an arrangement it cannot compute would
+         answer four plausible integers for a band whose height nobody defined.
+         Refusing is cheaper than debugging that."
+        self assert: ((self errorFor: [ WinLayout new fill: #a; fill: #b ])
+             includesSubstring: 'only one fill band')
+    ]
+
+    "── D3: a control without a window ───────────────────────────────────"
+
+    testControlWithoutWindowFailsCleanly [
+        "`tests_wg3.md`'s fourth in-language row. Creating a control before
+         `openMain` must be a clean guest error NAMING the call — never
+         CreateWindowExW against a NULL parent, which answers NULL and leaves
+         a caller with no window, no control and no explanation.
+
+         Needs no database and no Win32: the check is above both."
+        | msg |
+        msg := self errorFor: [
+            WinControl name: #ghost class: 'BUTTON' text: 'x'
+                       style: 0 exStyle: 0 id: 1 in: 0 ].
+        self assert: (msg includesSubstring: 'ghost').
+        self assert: (msg includesSubstring: 'openMain')
+    ]
+
+    "── D1: the drain pass, as a method ──────────────────────────────────"
+
+    testDrainClearsFlags [
+        "The pass's whole contract: flags set, pass run, flags clear, work
+         recorded ONCE. Sent directly — no window, no pump, no trampoline —
+         because `drainPass` is ordinary Smalltalk and the interesting property
+         is not where it is called from but what it does with the flags.
+
+         The layout arm is exercised with no window open, which is a real state
+         (the drain outlives a close) and must be a no-op rather than a raise."
+        | passes |
+        WinShell resetDoorCounters.
+        passes := WinShell drainPasses.
+        self deny: WinShell pendingLayout.
+
+        "A WM_SIZE through the dispatcher sets the flag and NOTHING else — the
+         door is shallow, which is the entire architecture."
+        WinShell window: 0 message: (WinApi constant: 'WM_SIZE')
+                 wParam: 0 lParam: 16r02580190.
+        self assert: WinShell pendingLayout.
+        self assert: WinShell layoutCount equals: 0.
+        self assert: WinShell sizeCount equals: 1.
+
+        "The pass does the work and clears the flag."
+        self assert: WinShell drainPass equals: 0.
+        self assert: WinShell drainPasses equals: passes + 1.
+        self assert: WinShell layoutCount equals: 1.
+        self deny: WinShell pendingLayout.
+
+        "And a second pass with nothing pending does NOT repeat the work. That
+         is what 'clears them' has to mean, and a pass that re-laid-out on
+         every heartbeat would pass every other assertion in this file."
+        WinShell drainPass.
+        self assert: WinShell layoutCount equals: 1
+    ]
+
+    testDrainCoalesces [
+        "The sprint's central claim, in the one form that can be checked
+         without a message loop: TEN messages, ONE pass, ONE unit of work.
+
+         The real ratio is measured in `just gate-wg3` against a live pump and
+         reported rather than asserted (tests_wg3.md item 3 says so — a ratio
+         of 1.0 would mean the drain is not coalescing and the claim is false).
+         This is its in-language twin, and it is the half that says WHY: the
+         flag is a boolean, so the tenth message costs exactly what the second
+         one did."
+        WinShell resetDoorCounters.
+        1 to: 10 do: [ :i |
+            WinShell window: 0 message: (WinApi constant: 'WM_SIZE')
+                     wParam: 0 lParam: (i * 65536) + 400 ].
+        self assert: WinShell sizeCount equals: 10.
+        self assert: WinShell layoutCount equals: 0.
+        WinShell drainPass.
+        self assert: WinShell layoutCount equals: 1.
+        self assert: WinShell drainPasses < WinShell sizeCount.
+
+        "Commands coalesce differently and deliberately so: a click is an EVENT
+         and losing one would be a bug, so they QUEUE and the pass services
+         every one — while a resize is a STATE and only the last matters. Both
+         are 'coalescing'; only one of them may drop anything."
+        WinShell resetDoorCounters.
+        1 to: 5 do: [ :i |
+            WinShell window: 0 message: (WinApi constant: 'WM_COMMAND')
+                     wParam: 100 lParam: 0 ].
+        self assert: WinShell pendingCommandCount equals: 5.
+        WinShell drainPass.
+        self assert: WinShell drainWorkCount equals: 5.
+        self assert: WinShell pendingCommandCount equals: 0
+    ]
+
+    testDrainReaskIsOneShot [
+        "Work discovered DURING a pass. The pass may not post its own wake —
+         that is how a drain becomes a spin — so it answers non-zero instead
+         and the heartbeat picks it up. Bounded, not exact: the property is
+         that it stops."
+        WinShell resetDoorCounters.
+        WinShell askForAnotherPass.
+        self assert: WinShell drainPass equals: 1.
+        self assert: WinShell reaskCount equals: 1.
+        "The next pass answers 'nothing more' — one-shot, so a handler that
+         always asked again could not wedge the heartbeat."
+        self assert: WinShell drainPass equals: 0.
+        self assert: WinShell reaskCount equals: 1
+    ]
+
+    "── the two compensating controls for what Rust TRANSCRIBES ──────────"
+
+    testNotifyOffsetsMatchWinkb [
+        "WG3's own version of WG2's `testAllowlistMatchesWinkb`, and it exists
+         for exactly the same reason.
+
+         `runtime::win_wndproc::read_nmhdr` reads WM_NOTIFY's payload at
+         hard-coded byte offsets 0, 8 and 16, because a Rust pointer read
+         cannot query SQLite and the core crate must build on a machine with no
+         windows_api.db at all. That is the thing D2 forbids everywhere else,
+         so here is the compensating control: the SAME three offsets, asked of
+         winkb by name. A wrong one would read a plausible wrong word — a
+         control id that is really half a pointer — and nothing else would say
+         so.
+
+         The struct's SIZE is checked too, from a different database column, so
+         'the offsets agree with each other' and 'the offsets are right' stay
+         different claims."
+        self assert: (WinApi offsetOf: 'NMHDR' field: 'hwndFrom') equals: 0.
+        self assert: (WinApi offsetOf: 'NMHDR' field: 'idFrom') equals: 8.
+        self assert: (WinApi offsetOf: 'NMHDR' field: 'code') equals: 16.
+        self assert: (WinApi sizeOf: 'NMHDR') equals: 24
+    ]
+
+    testWg3MessagesMatchWinkb [
+        "The five numbers WG3 added to the Rust allowlist, plus the two the
+         trampoline handles itself. Same rule, same reason, same shape of
+         check as WG2's."
+        self assert: (WinApi constant: 'WM_NOTIFY') equals: 16r004E.
+        self assert: (WinApi constant: 'WM_ENTERSIZEMOVE') equals: 16r0231.
+        self assert: (WinApi constant: 'WM_EXITSIZEMOVE') equals: 16r0232.
+        self assert: (WinApi constant: 'WM_ENTERMENULOOP') equals: 16r0211.
+        self assert: (WinApi constant: 'WM_EXITMENULOOP') equals: 16r0212.
+        "The drain's own plumbing: the heartbeat's message, and the base the
+         private wake is offset from. `WM_APP_DRAIN` is WM_APP+7 in Rust, and
+         the only thing the guest needs to be sure of is that WM_APP is where
+         Windows says the application's own numbers start."
+        self assert: (WinApi constant: 'WM_TIMER') equals: 16r0113.
+        self assert: (WinApi constant: 'WM_APP') equals: 16r8000.
+        "The notification code the gate's list view produces, in the unsigned
+         form both winkb and NMHDR.code carry it in — LVN_ITEMCHANGED is
+         `(UINT)-101`, and comparing it against a NEGATIVE 101 anywhere in this
+         layer would silently never match."
+        self assert: (WinApi constant: 'LVN_ITEMCHANGED') equals: 4294967195.
+        self assert: (WinApi constant: 'NM_CUSTOMDRAW') equals: 4294967284
+    ]
+
+    errorFor: aBlock [
+        ^[ aBlock value. '<<no error>>' ] on: Error do: [ :e | e messageText ]
+    ]
+]
