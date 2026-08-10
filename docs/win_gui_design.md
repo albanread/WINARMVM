@@ -238,7 +238,7 @@ nothing in WG waits for P5's world-file settlements.**
 | # | title | size | needs | gate |
 |---|---|---|---|---|
 | WG0 | FFI probe: user32 by hand | S | P5 resolver | headless: `MessageBeep`, `GetSystemMetrics`, `RegisterClassW`+`CreateWindowExW`+`DestroyWindow` round-trip driven from a Smalltalk doit through winkb-resolved imports; struct-by-layout (`WNDCLASSW`) built via Alien + winkb struct offsets |
-| WG1 | the window + the loop | M | WG0 | a real top-level window with Mica + dark titlebar, `GetMessage` loop owned by the hosted UI VM on the main thread; clean close; `macvm-winui` binary exists; snap verb (`MACVM_WINUI_CTL`) captures a PNG — the gallery's own capture channel, ported |
+| WG1 | the window + the loop | M | WG0 | a real top-level window with Mica + dark titlebar, `GetMessage` loop owned by the hosted UI VM on the main thread; clean close; `macvm-winui` binary exists; **the control channel + `snap` INHERITED, not rebuilt** (see below) |
 | WG2 | the WndProc door | **L** | WG1, P2 (done) | the risky sprint, CG3's twin: `WM_COMMAND`/`WM_SIZE`/`WM_CLOSE` dispatch into `WinShell` methods as top-level entries; a raising handler answers `DefWindowProc` and the NEXT message still dispatches; a forced AV inside a handler recovers via the P2 layer and the loop continues; latency of the door measured and recorded |
 | WG3 | controls + layout | M | WG2 | Smalltalk creates child controls (`BUTTON`, `EDIT`, `SysListView32`, `SysTreeView32`, trackbar), receives their notifications through the door, lays them out on `WM_SIZE` via a Smalltalk layout class; visual styles v6 manifest in place |
 | WG4 | the shell: command bar, transcript, metrics | M | WG3 | the one-window grammar stands: custom-drawn view bar (Fluent glyphs + labels + accent underline), view switching with lazy build, docked collapsible Transcript, live metrics cluster reading `VmMetrics` off the primary; Do It/Print It enablement tracked by focus |
@@ -264,6 +264,40 @@ the Browser's source pane — fallback is an owner-drawn code pane from the
 start (the web GUI's editor model already defines the contract). (3)
 comctl6 + per-monitor DPI — declare `PerMonitorV2` in the manifest at WG1,
 not later; every custom-drawn element takes a DPI scale from day one.
+
+### 3.1 The capture channel already exists — WG1 inherits it
+
+Built and proven 2026-08-10, **before** WG1 needs it, against the WebView2
+GUI (`gui/src/control.rs`, `gui/src/shell/win.rs::snap_client_area`,
+`scripts/gui-snap.tcl`):
+
+- **`MACVM_GUI_CTL=<port>`** arms a loopback listener whose framed
+  `<len>\n<bytes>` protocol is **byte-identical to the Cocoa channel's**,
+  so `macvm rusttcl`'s existing `gui connect/ping/doit/view/snap/sleep`
+  verbs drive either app with no client-side branch. Verified end to end:
+  `gui connect` → `pong` → `doit` → `snap` → a PNG showing the running
+  environment.
+- **`snap` is `PrintWindow` + `PW_RENDERFULLCONTENT`, not WebView2's
+  `CapturePreview`.** That choice is what makes it reusable: it captures
+  *any* HWND's client area, so the native UI's window works unchanged,
+  and it is **synchronous** — no async COM, so none of the nested-message-
+  loop deadlock risk this module's header warns about. The PNG writer is
+  ~40 lines of stored-deflate by hand rather than a new dependency.
+- **`snap` never blocks the UI thread** even so: the UI thread captures
+  inline and answers; the LISTENER thread is the one that waits. Blocking
+  the right thread is the whole trick.
+
+So WG1's obligation is not "write a snap verb" but "point the existing one
+at the new window" — the pieces to lift are `control.rs` wholesale (it is
+already shell-agnostic) and `snap_client_area`/`capture_png`/`write_png`
+verbatim. The only WG1-specific decision is the env var's name, and
+`MACVM_WINUI_CTL` keeps the two apps independently drivable in one
+session.
+
+**This is also how WG's on-screen gates get tested at all.** Every later
+sprint's "does it look right" question becomes a script: switch view,
+sleep, snap, read the PNG — the same loop that produced this design's
+review of the Mac gallery.
 
 ## 4. Relationship to the other tracks
 

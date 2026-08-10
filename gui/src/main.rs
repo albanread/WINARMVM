@@ -10,6 +10,11 @@
 
 mod browser_render;
 mod canvas_render;
+// WINARM: the RUSTTCL control channel (`MACVM_GUI_CTL`) — the Cocoa app's
+// scripting drive, ported to the shell seam so it serves both hosts. See
+// `control.rs`'s header for the protocol and for why `snap` must not block
+// the UI thread.
+mod control;
 mod editor_render;
 // WINARM (P4): the native Metal game pane is macOS-only and off by default —
 // its MacGamePane path dependencies cannot even be *declared* on a machine
@@ -1921,7 +1926,76 @@ fn teardown_spawned_demo() {
 /// (not just one) — wakeups can coalesce in principle, and this is cheap and
 /// correct either way. That property is also what lets `main` flush the boot
 /// backlog with a single `shell::waker().notify()` once the window exists.
+/// The control channel's request queue, if `MACVM_GUI_CTL` armed it. Drained
+/// on the UI thread from `on_vm_drain` — the same wake, so a control request
+/// needs no second signalling path of its own.
+static CTL: std::sync::OnceLock<std::sync::Mutex<std::sync::mpsc::Receiver<control::CtlReq>>> =
+    std::sync::OnceLock::new();
+
+/// Serve every queued control request. Runs on the UI thread.
+///
+/// Each arm answers its `reply` channel exactly once, EXCEPT `snap`, which
+/// hands the channel to the capture's completion handler — see
+/// `shell::snap_client_area`. A dropped channel surfaces to the script as the
+/// listener's timeout rather than a hang, which is the honest failure mode.
+fn drain_control_requests() {
+    let Some(lock) = CTL.get() else { return };
+    let Ok(rx) = lock.lock() else { return };
+    while let Ok(req) = rx.try_recv() {
+        let cmd = req.cmd.trim().to_string();
+        let (verb, arg) = match cmd.split_once(' ') {
+            Some((v, a)) => (v, a.trim()),
+            None => (cmd.as_str(), ""),
+        };
+        match verb {
+            "ping" => {
+                let _ = req.reply.send("OK pong".into());
+            }
+            // `doit` is SUBMITTED, not awaited, and the reply says so.
+            //
+            // Unlike the Cocoa channel — where the UI VM is in-process on the
+            // main thread and can answer inline — this GUI's VM runs on a
+            // worker thread and answers asynchronously through
+            // `drain_responses`. Correlating a reply back to this request
+            // would need request IDs threaded through the whole `VmRequest`/
+            // `VmResponse` pair for one debugging verb. The honest protocol
+            // instead: submit, say `OK submitted`, and let the script use
+            // `sleep` then `snap` (or read the transcript) to observe the
+            // effect. `ERR` here means the request never left, which is the
+            // only failure this arm can truthfully report.
+            "doit" | "eval" => {
+                let reply = match VM.get() {
+                    Some(vm) => {
+                        vm.submit(vm_host::VmRequest::Doit {
+                            code: arg.to_string(),
+                        });
+                        "OK submitted".to_string()
+                    }
+                    None => "ERR no vm".into(),
+                };
+                let _ = req.reply.send(reply);
+            }
+            // Drive the page's own view switcher, so a script sees exactly
+            // what a click would produce — no second code path to drift.
+            "view" => {
+                eval_js(&format!(
+                    "if(window.macvmShowView)window.macvmShowView({})",
+                    js_string_literal(arg)
+                ));
+                let _ = req.reply.send("OK".into());
+            }
+            "snap" => shell::snap_client_area(arg, req.reply),
+            other => {
+                let _ = req
+                    .reply
+                    .send(format!("ERR unknown control verb '{other}'"));
+            }
+        }
+    }
+}
+
 pub(crate) fn on_vm_drain() {
+    drain_control_requests();
     let Some(vm) = VM.get() else { return };
     for response in vm.drain_responses() {
         match response {
@@ -2164,6 +2238,14 @@ fn main() {
     VM.set(vm_host::spawn(shell::waker()))
         .ok()
         .expect("VM.set called twice");
+
+    // WINARM: arm the RUSTTCL control channel before the window exists.
+    // Requests that land early simply queue — the listener wakes the UI
+    // thread, and `waker()` resolves its target at notify time (the P4 bug
+    // whose fix makes this safe), so nothing is lost to the startup race.
+    if let Some(rx) = control::start() {
+        CTL.set(std::sync::Mutex::new(rx)).ok();
+    }
 
     // The window must exist before the menu bar (Windows attaches the menu to
     // an HWND) and before the first navigation (there must be a web view to
