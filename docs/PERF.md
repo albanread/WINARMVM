@@ -1031,3 +1031,36 @@ file-out via `FileStream` instead of Pharo's `Stdio`,
   89–94 ms there (M4 wins the send-heavy aggregate). Consistent with the
   same-protocol table above: M4 leads send-heavy rows, Oryon takes
   float/alloc-shaped work.
+
+### The race, completed: richards and deltablue join (2026-08-10)
+
+`mst2st.py` ran under a fresh ARM64 Python 3.12 (winget); its 25 translated
+classes composed with the Squeak-dialect harness
+(`scripts/cog-bench-squeak.st` + `scripts/compose-cog-squeak.ps1`, both now
+in-repo so the race is reproducible). Checksums verified in-harness on both
+sides. Cog's micro rows reproduced within noise of the first run — the
+protocol is stable. The full seven, interleaved, same machine, both native:
+
+| bench | WINARM warm (µs) | Cog warm (µs) | WINARM is |
+|---|---|---|---|
+| arith | 2,031 | 10,821 | 5.3× faster |
+| fib | 15,300 | 30,186 | 2.0× faster |
+| sieve | 304 | 573 | 1.9× faster |
+| dict | 426 | 730 | 1.7× faster |
+| alloc | 557 | 4,165 (min 1,219) | 7.5× med / 2.2× best |
+| **richards** | **1,932** | **3,271** | **1.69× faster** |
+| **deltablue** | **211** | **357** | **1.69× faster** |
+
+- **Seven for seven.** The two macro benches — the ones that exercise real
+  send/dispatch/closure structure rather than one hot loop — both land at
+  exactly 1.69×, a tighter margin than the micros and remarkably consistent
+  with each other. The M4 pair for the same rows is 2.08×/2.00×: same
+  story, slightly narrower here, consistent with Cog's ARM64 codegen being
+  the same on both OSes while OUR backend meets a different memory
+  subsystem.
+- Composition notes for whoever reruns this (each cost one burned run):
+  pass the script to Squeak as a RELATIVE path (CodeLoader %-mangles
+  absolute Windows paths); Squeak's class-def keyword line is
+  `poolDictionaries:`+`category:`, never Pharo's `package:`; and the `.st`
+  must be BOM-FREE — PS 5.1's `Set-Content -Encoding utf8` writes a BOM
+  and Squeak's chunk reader dies at byte zero on it.
