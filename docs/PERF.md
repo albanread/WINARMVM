@@ -935,3 +935,54 @@ to break, exercised 140 thousand times on Windows without a single
 difference in the guest's output. `just bridge-stats-s11` asserts that
 counter is nonzero; `it_gc_jit::mid_loop_forced_scavenge`, the single most
 OS-layer-sensitive test in the suite, passes in every mode above.
+
+## Same-protocol head-to-head vs the M4 Mac (2026-08-10, post pin-fix cac9f79)
+
+The D4-step-7 table above uses `scripts/perf.sh` (whole-run wall time, cold
+included) and is NOT comparable to MACVM's canonical numbers, which come from
+the cog-bench protocol (`scripts/cog-bench.mst`: checksummed workloads,
+microsecond clock, warm = median with cold measured separately). This section
+is the first SAME-protocol row-for-row comparison — same driver file, same
+checksums, both VMs native on their own silicon:
+
+```sh
+MACVM_JIT=threshold=20 ./target/release/macvm run scripts/cog-bench.mst --world world
+```
+
+| bench | WINARM warm (ms)<br>Snapdragon X / Oryon, Windows | MACVM warm (ms)<br>Apple M4, macOS (2026-08-05 stamp) | faster side |
+|---|---|---|---|
+| arith | 2.033 | 1.428 | M4 1.42× |
+| fib | 15.371 | 9.052 | M4 1.70× |
+| sieve | 0.308 | 0.175 | M4 1.76× |
+| dict | 0.426 | 0.272 | M4 1.57× |
+| alloc | 0.556 | 0.609 | **Oryon 1.10×** |
+| richards | 1.930 | 1.076 | M4 1.79× |
+| deltablue | 0.210 | 0.138 | M4 1.52× |
+
+Reading, with the caveats that keep it honest:
+
+- **Different machines, same VM, same protocol.** This measures silicon +
+  OS, not the port's quality — the differential gate (D4 step 6, still
+  outstanding) is what would separate those. The Mac stamp is 2026-08-05,
+  a few days before this repo's seed; close enough for a first table, and
+  the row shapes (fib worst, alloc inverted) are the signal to trust over
+  the second decimal.
+- **The M4 leads six of seven at 1.4–1.8×** — consistent with the two cores'
+  single-thread reputations, and a spread (not a uniform factor) that says
+  the port is not paying a flat OS tax anywhere.
+- **Oryon WINS alloc by 1.10×.** The allocation path (eden bump + barrier +
+  scavenge cadence) is the one row where this machine's memory subsystem
+  beats the M4's. It was also MACVM's thinnest margin over Cog — worth
+  remembering when allocation-heavy workloads feel quick here.
+- **Context from the siblings' own records:** MACVM-on-M4 beats Cog-on-M4 on
+  all seven rows (1.18–3.88×, its 2026-08-05 stamp); WINVM-on-x64 reports
+  richards ~1.55× ahead of Cog-x64 on its machine (different host and
+  protocol — ratio quoted, absolute numbers not comparable). No Cog runs on
+  THIS machine yet: OpenSmalltalk ships native `win64ARMv8` VMs, and that
+  head-to-head is the remaining measurement this table wants (D5's arch
+  labelling already enforced by the harness).
+- The GUI's subjective "unusually fast" has a simpler explanation than any
+  row here: every other Smalltalk on this machine runs x64-EMULATED. This
+  one is native, and 98.6–99.8 % of executed bytecode-work runs compiled
+  (MACVM's coverage figure; same compiler, and the differential shows the
+  same behavior).
