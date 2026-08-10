@@ -986,3 +986,48 @@ Reading, with the caveats that keep it honest:
   one is native, and 98.6–99.8 % of executed bytecode-work runs compiled
   (MACVM's coverage figure; same compiler, and the differential shows the
   same behavior).
+
+## THE RACE: WINARM vs native Cog, same machine, same protocol (2026-08-10)
+
+The comparison D5 was built to make honest, now made. Opponent:
+**OpenSmalltalk Cog[Spur]** (`squeak.cog.spur_win64ARMv8`, release
+202606270913, `VMMaker.oscog-eem.3766`), running Squeak 6.0 #22148 —
+**PE-verified native ARM64** (`AA64`, both `Squeak.exe` and
+`SqueakConsole.exe`), so `cog=native-arm64`: no emulation term anywhere in
+this table. Same five checksummed micro workloads, same protocol (cold, 30
+discarded warm-ups, median of 41 single-rep µs samples), interleaved runs
+minutes apart on a quiet machine. The Cog side is
+`scratchpad/cograce/bench-squeak.st` — `scripts/cog-bench.st` ported to
+Squeak dialect (three seams: `poolDictionaries:` in the class definition,
+file-out via `FileStream` instead of Pharo's `Stdio`,
+`snapshot:andQuit:` instead of `exitSuccess`), bench bodies verbatim.
+
+| bench | WINARM warm (µs) | Cog warm (µs) | WINARM is |
+|---|---|---|---|
+| arith | 2,031 | 10,885 | **5.4× faster** |
+| fib | 15,300 | 30,171 | **2.0× faster** |
+| sieve | 304 | 572 | **1.9× faster** |
+| dict | 426 | 733 | **1.7× faster** |
+| alloc | 557 | 4,163 (mad 1,534; min 1,164) | **7.5× by median; 2.1× by Cog's best** |
+
+- **Five for five.** On this machine, against the only other native-ARM64
+  Smalltalk VM Windows has, WINARM wins every row. The standing target —
+  "at least as fast as Cog" — is met with a 1.7–5.4× margin (alloc quoted
+  conservatively at 2.1× against Cog's own best sample, since its median
+  carries a MAD of 1.5 ms — GC interference; ours is 2 µs).
+- **The pattern matches the M4 story.** MACVM-on-M4 beats Cog-on-M4 on the
+  same rows at 1.2–3.9×; the two tables have the same shape with the
+  margins wider here — consistent with Cog's win64ARMv8 port being young
+  while this VM's backend is its mature one. Fair context for Cog: its
+  ARM64-Windows target shipped in 2025-era releases; ours is where the
+  whole project's optimization effort lives.
+- **Missing rows, named:** richards/deltablue on the Cog side need
+  `mst2st.py` (python3 absent on this host) — the five micro rows are the
+  race v1; the macro rows join when a Python lands or the translation is
+  cached in-repo from the Mac side.
+- User-measured GUI datapoints from the same day, cross-machine (M4 GUI vs
+  this GUI, same VM): canvas Mandelbrot **18 ms here vs 22 ms on the M4**
+  (Oryon wins the float/NEON tile); full canvas suite ~120 ms here vs
+  89–94 ms there (M4 wins the send-heavy aggregate). Consistent with the
+  same-protocol table above: M4 leads send-heavy rows, Oryon takes
+  float/alloc-shaped work.
