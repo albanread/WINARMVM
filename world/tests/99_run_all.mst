@@ -33,23 +33,40 @@ TestRunner run: IdentityCollectionsTests.
 TestRunner run: DateTimeTests.
 TestRunner run: ReadWriteStreamTests.
 TestRunner run: ObjectProtocolGapsTests.
-"WINARM (P0 D3): a few suites below are guarded by `Smalltalk platformName`
- (prim 266). They are not skipped for tidiness — on Windows their FFI
- pragmas cannot resolve until sprint P5 (MIGRATION.md §3.5), the failure
- raises a guest error, and an unhandled guest error ABORTS the process
- until sprint P2 lands the recovery layer. One unrunnable assertion would
- therefore take the whole suite's report with it.
+"WINARM (P0 D3, settled per sprint P5 D5 — sprint_p05_detail.md): the
+ platformName (prim 266) guards below are the world runner's BOOKKEEPING:
+ every skip names its settlement, none is silent.
 
- Guarded here rather than by dropping the files from tests.list, because
- the files LOAD fine everywhere — only running them touches FFI — and
- because the test classes must stay declared for these very lines to
- compile. Written as a condition rather than deleted on one platform so
- MACVM and WINARM keep sharing this file verbatim.
+ As of P5 the Windows FFI resolver exists (winkb + GetProcAddress,
+ MIGRATION.md §3.5), so 'FFI cannot resolve' no longer gates anything.
+ What remains gated, and WHY (the D5 table + its Δ):
 
- Two different conditions, deliberately: `~~ #windows` marks a POSIX
- dependency (a Linux host would run it), `== #macos` marks something only
- macOS has at all -- Accelerate.framework and the Objective-C runtime."
-Smalltalk platformName ~~ #windows ifTrue: [ TestRunner run: FFIAlienTests ].
+ - FFIAlienTests: UN-GATED (D5 row 1) — getpid resolves via the
+   resolver's underscore alias; the mmap capstone carries a VirtualAlloc
+   branch. Runs everywhere.
+ - PosixIoTests: still `~~ #windows` — its substance is kqueue/kevent
+   readiness, which has NO Windows twin at any layer; the IoWorker needs
+   an IOCP (or WSAPoll) backend, scoped as its own post-P5 slice (D5 Δ).
+   The FILE-I/O half is twinned as WinIoTests below (D5 row 2).
+ - WinIoTests: `== #windows` — the win_io twin (59_win_io_tests.mst),
+   UCRT _open/_creat/_read/_write/_close over the underscore-alias probe.
+ - SocketTests: still `~~ #windows` — Darwin sockaddr layouts + the
+   winsock lifecycle (WSAStartup) belong to the winsock slice (D5 row 3;
+   the ws2_32 DNS trio itself RESOLVES, pinned in runtime::winkb).
+ - AccelTests: `== #macos`, PERMANENT (D5 row 4) — Accelerate.framework
+   is macOS; the NEON kernels (runtime/simd_kernels.rs) carry the arch
+   story with their own tests.
+ - ClockCompletionTests: UN-GATED (D4) — world/81 gained the Windows
+   offset arm (GetTimeZoneInformation); Time now / Date today are live on
+   both platforms.
+
+ Guarded here rather than by dropping files from tests.list, because the
+ files LOAD fine everywhere — only running them touches FFI — and the
+ test classes must stay declared for these very lines to compile. Written
+ as conditions so MACVM and WINARM keep sharing this file verbatim:
+ `~~ #windows` marks a POSIX dependency (a Linux host would run it),
+ `== #windows` a Win32 one, `== #macos` something only macOS has at all."
+TestRunner run: FFIAlienTests.
 TestRunner run: NilMacroTests.
 TestRunner run: NumberExtTests.
 TestRunner run: CollectionExtTests.
@@ -65,6 +82,7 @@ TestRunner run: CurtailmentTests.
 TestRunner run: RopeTests.
 TestRunner run: EditorSessionTests.
 Smalltalk platformName ~~ #windows ifTrue: [ TestRunner run: PosixIoTests ].
+Smalltalk platformName == #windows ifTrue: [ TestRunner run: WinIoTests ].
 TestRunner run: IoStreamTests.
 TestRunner run: ScaledDecimalTests.
 Smalltalk platformName ~~ #windows ifTrue: [ TestRunner run: SocketTests ].
@@ -73,7 +91,7 @@ TestRunner run: SupervisorTests.
 TestRunner run: ExceptionTests.
 TestRunner run: CollectionCompletionTests.
 TestRunner run: NumericCompletionTests.
-Smalltalk platformName ~~ #windows ifTrue: [ TestRunner run: ClockCompletionTests ].
+TestRunner run: ClockCompletionTests.
 TestRunner run: ExceptionVerbTests.
 TestRunner run: VmErrorTests.
 Smalltalk platformName == #macos ifTrue: [ TestRunner run: CocoaStringTests ].

@@ -132,6 +132,96 @@ minus four files" bookkeeping pattern).
 > gate — the same posture that kept the P2 trap layer from being tangled
 > into P1's loader.
 
+> **Δ (2026-08-10, P5 — BUILT; what measurement corrected, in the order
+> the plan stated it).**
+>
+> 1. **D2's f-row narrowed: `F` models `f64` ONLY.** The table said
+>    "float/double → SIMD reg → model (`f`)", but the marshal shape
+>    (`runtime::ffi::marshal_f`) is `f64::to_bits` into a full d-register,
+>    while an **f32 travels in the s-register** — the LOW 32 bits — so an
+>    f32 classified `F` passes the double's mantissa tail as the value,
+>    silently. WINVM's x64 classifier had the same latent hole (f32 → XMM
+>    low half) and never noticed because its DB test checked masks, not
+>    calls. f32 params AND returns now refuse naming the s-register rule;
+>    real exemplar pinned: `D2D1Vec3Length`. Same finding, return side,
+>    measured live: **the UCRT materialises C-`int` returns with
+>    w-register writes (zero-extend), so `_open`'s −1 reads as 4294967295
+>    through `ret: #g` — while Darwin's libc happens to sign-extend, which
+>    is the only reason world/61's `close(-1) = -1` works on macOS.**
+>    AAPCS64 leaves the upper half unspecified for 32-bit returns; the
+>    width is not expressible in the g/f vocabulary, so i32-returning
+>    Windows bindings narrow guest-side (`WinIo i32:`,
+>    `world/tests/59_win_io_tests.mst`'s header Δ).
+> 2. **D2's struct 9–16 B cell said "model"; v1 refuses.** One pragma
+>    token maps to one 64-bit slot, so a two-GPR composite is not
+>    expressible end to end without either a two-token convention or a new
+>    trampoline shape — and the sprint brief's own constraint ("the
+>    trampolines work; do not touch the emitters") decides that. The ABI
+>    fact itself (16-byte returns in x0:x1) stays execution-pinned by
+>    `it_codecache::struct16_return_in_x0_x1`; the classifier's refusal
+>    names the rule and that pin. tests_p05's `pin_struct16_roundtrip`
+>    row ("both halves intact via trampoline") is therefore satisfied at
+>    the published-A64 layer, not the `FfiStubs` layer, whose Rust-side
+>    contract returns one u64 by design.
+> 3. **The variadic belt cannot fire from this DB build:
+>    `is_variadic = 0` for ALL 18,271 rows** (`wsprintfA` — genuinely
+>    variadic — records fixed arity 2). The refusal stays as a belt for
+>    future builds; the LIVE guard is the strict arity cross-check in
+>    `resolve_ffi_symbol` (a tail-passing call site disagrees with the
+>    recorded fixed arity and refuses loudly). Pinned so a DB rebuild that
+>    starts carrying the mark flips a test.
+> 4. **HFA: refused, and the DB could not have modelled it anyway at ≤8 B
+>    without field-walking** — `D2D_POINT_2F` is a 64-bit struct whose
+>    fields (f32, f32) live in `struct_fields`; a size-only classifier
+>    (WINVM's shape) would have modelled it as one GPR while the callee
+>    reads s0/s1. The classifier therefore walks fields (recursively,
+>    `type_id` is fully populated — 0 NULLs of 66,708) and refuses ANY
+>    FP-bearing composite; FP-free ≤8 B structs (HANDLE, BOOL, PSTR,
+>    POINT, FILETIME) model as `G`.
+> 5. **D4's "the world file gains the Windows branch — the ONE world
+>    edit" was short by one file.** P0 already landed the clock-VALUE
+>    branch (world/30 → prim 267); what P5 actually had to add for
+>    `Time now`/`Date today` to be CORRECT is the ZONE OFFSET —
+>    world/81's `localOffsetSeconds` rides `localtime_r`+`tm_gmtoff`,
+>    neither of which exists on Windows (no UCRT `localtime_r`; struct tm
+>    has no `tm_gmtoff` AT ALL). The Windows arm is
+>    `GetTimeZoneInformation` (return value selects the active bias;
+>    offsets Bias@0/StandardBias@84/DaylightBias@168 pinned against the
+>    DB by `runtime::winkb`'s real-DB test). Verified against the host
+>    clock live (BST: +3600, daylight arm taken). Also: `mmap` grew a
+>    THIRD guarded branch (world/30's buffer + world/81's buffer + the
+>    alien capstone all allocate via `VirtualAlloc` on Windows). So the
+>    honest count is three world files with `platformName` branches plus
+>    the runner + the new twin file — all flagged for upstream
+>    cherry-pick. tests_p05's `filetime_conversion` row tests a guest-side
+>    FILETIME→epoch conversion that does not exist in this design (prim
+>    267 converts in Rust; P0's decision) — its intent (known instant →
+>    known date/time) is carried by ClockCompletionTests' fixed epoch-day
+>    vectors, which now run on Windows.
+> 6. **The D5 Δ's "reclaimed by the resolver alone" DNS row is half
+>    right.** The ws2_32 trio does resolve by name — pinned as a test
+>    (`winkb::resolve_export` finds `getaddrinfo`/`freeaddrinfo`/
+>    `inet_ntop` with no DB) — but the world's `Dns` path ALSO needs the
+>    winsock lifecycle (`getaddrinfo` fails WSANOTINITIALISED without
+>    `WSAStartup`), a `gai_strerror` twin (an inline function on Windows,
+>    not a ws2_32 export), and a non-mmap `NativeBuffer`. Those belong to
+>    the winsock slice; the embed DNS test's gate reason now says exactly
+>    that.
+> 7. **`GetLastError` discipline gained a measured clause: warm the
+>    binding first.** A binding's FIRST call runs resolution, and
+>    resolution itself performs Win32 calls (the winkb sqlite open,
+>    GetModuleHandle/LoadLibrary/GetProcAddress) that reset the thread's
+>    last-error — `fail(); GetLastError()` reads 0 on a cold binding.
+>    Warmed, the sequence reads the real code (pinned: `CloseHandle(0)` →
+>    6). Docs in `runtime::winkb`; guest-level pin in the win_io twin.
+> 8. **Phase-WG addendum (win_gui_design.md §2.2, added mid-sprint):
+>    function-pointer (`delegate`-kind) parameters classify `G`, never
+>    refuse** — WG passes Rust trampoline addresses (RegisterClassW's
+>    wndproc, SetTimer's TIMERPROC); pinned against the real `SetTimer`
+>    row. WG0's own first calls (`GetSystemMetrics`, `MessageBeep`) joined
+>    the D3 pinning set and user32/ws2_32 joined the no-DB probe list so
+>    both DB states behave identically.
+
 ## Implementation order
 
 1. winkb.rs + rusqlite dep; resolver-selection seam compiles both OSes;

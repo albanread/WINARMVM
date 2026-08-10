@@ -2115,11 +2115,13 @@ mod tests {
     /// aborted the process. Under `Threshold(1)` the second call runs the
     /// compiled `millisecondClockValue` (which calls an FFI primitive), so a
     /// clean return proves the stack is balanced.
+    // WINARM (P5, un-gated): P2 landed the trap layer and P5 the resolver. On
+    // Windows `Time millisecondClockValue` answers via prim 267 (the world's
+    // own platform branch), so this exercises the sp-balance contract for a
+    // primitive-bearing compiled callee; the FFI-flavoured twin with a REAL
+    // Win32 import under the JIT is `win32_ffi_under_jit_keeps_the_operand_
+    // stack_balanced` below.
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "P5: needs the Win32 FFI resolver (§3.5); its uncommon trap also aborts until P2 (§3.2)"
-    )]
     fn ffi_primitive_under_jit_keeps_the_operand_stack_balanced() {
         let mut vm = boot_test_vm(JitMode::Threshold(1));
         let out = vm
@@ -3006,7 +3008,7 @@ mod tests {
     #[test]
     #[cfg_attr(
         windows,
-        ignore = "P5: binds a POSIX symbol through the FFI resolver, macOS-only until P5 (MIGRATION.md §3.5)"
+        ignore = "IoWorker rides kqueue, which has NO Windows twin — needs an IOCP (or WSAPoll) readiness backend, its own post-P5 slice (sprint_p05_detail.md D5 Δ); the P5 resolver alone cannot reclaim this"
     )]
     fn ioworker_multiplexes_a_pipe_read_back_to_the_primary() {
         let mut vm = boot_worker_primary();
@@ -3060,7 +3062,7 @@ mod tests {
     #[test]
     #[cfg_attr(
         windows,
-        ignore = "P5: binds a POSIX symbol through the FFI resolver, macOS-only until P5 (MIGRATION.md §3.5)"
+        ignore = "IoWorker rides kqueue, which has NO Windows twin — needs an IOCP (or WSAPoll) readiness backend, its own post-P5 slice (sprint_p05_detail.md D5 Δ); the P5 resolver alone cannot reclaim this"
     )]
     fn ioworker_infinite_pump_is_woken_by_a_mid_sleep_watch() {
         let mut vm = boot_worker_primary();
@@ -3108,7 +3110,7 @@ mod tests {
     #[test]
     #[cfg_attr(
         windows,
-        ignore = "P5: binds a POSIX symbol through the FFI resolver, macOS-only until P5 (MIGRATION.md §3.5)"
+        ignore = "IoWorker rides kqueue, which has NO Windows twin — needs an IOCP (or WSAPoll) readiness backend, its own post-P5 slice (sprint_p05_detail.md D5 Δ); the P5 resolver alone cannot reclaim this"
     )]
     fn ioworker_tcp_echo_server_round_trips() {
         let mut vm = boot_worker_primary();
@@ -3173,7 +3175,7 @@ mod tests {
     #[test]
     #[cfg_attr(
         windows,
-        ignore = "P5: binds a POSIX symbol through the FFI resolver, macOS-only until P5 (MIGRATION.md §3.5)"
+        ignore = "IoWorker rides kqueue, which has NO Windows twin — needs an IOCP (or WSAPoll) readiness backend, its own post-P5 slice (sprint_p05_detail.md D5 Δ); the P5 resolver alone cannot reclaim this"
     )]
     fn ioworker_udp_echo_recovers_peer_and_round_trips() {
         let mut vm = boot_worker_primary();
@@ -3238,7 +3240,7 @@ mod tests {
     #[test]
     #[cfg_attr(
         windows,
-        ignore = "P5: binds a POSIX symbol through the FFI resolver, macOS-only until P5 (MIGRATION.md §3.5)"
+        ignore = "IoWorker rides kqueue, which has NO Windows twin — needs an IOCP (or WSAPoll) readiness backend, its own post-P5 slice (sprint_p05_detail.md D5 Δ); the P5 resolver alone cannot reclaim this"
     )]
     fn ioworker_icmp_ping_reply_is_a_continuation() {
         let mut vm = boot_worker_primary();
@@ -3293,7 +3295,7 @@ mod tests {
     #[test]
     #[cfg_attr(
         windows,
-        ignore = "P5: binds a POSIX symbol through the FFI resolver, macOS-only until P5 (MIGRATION.md §3.5)"
+        ignore = "IoWorker rides kqueue, which has NO Windows twin — needs an IOCP (or WSAPoll) readiness backend, its own post-P5 slice (sprint_p05_detail.md D5 Δ); the P5 resolver alone cannot reclaim this"
     )]
     fn ping_via_ioworker_reports_loopback_replies() {
         struct VecSink(Arc<Mutex<Vec<String>>>);
@@ -3354,7 +3356,7 @@ mod tests {
     #[test]
     #[cfg_attr(
         windows,
-        ignore = "P5: binds a POSIX symbol through the FFI resolver, macOS-only until P5 (MIGRATION.md §3.5)"
+        ignore = "IoWorker rides kqueue, which has NO Windows twin — needs an IOCP (or WSAPoll) readiness backend, its own post-P5 slice (sprint_p05_detail.md D5 Δ); the P5 resolver alone cannot reclaim this"
     )]
     fn iostream_line_echo_server_reassembles_split_lines() {
         let mut vm = boot_worker_primary();
@@ -3883,7 +3885,7 @@ mod tests {
     #[test]
     #[cfg_attr(
         windows,
-        ignore = "P5: binds a POSIX symbol through the FFI resolver, macOS-only until P5 (MIGRATION.md §3.5)"
+        ignore = "IoWorker rides kqueue, which has NO Windows twin — needs an IOCP (or WSAPoll) readiness backend, its own post-P5 slice (sprint_p05_detail.md D5 Δ); the P5 resolver alone cannot reclaim this"
     )]
     fn supervised_ioworker_recovers_after_a_crash_and_resumes_delivering_data() {
         let mut vm = boot_worker_primary();
@@ -4004,7 +4006,7 @@ mod tests {
     #[test]
     #[cfg_attr(
         windows,
-        ignore = "P5: binds a POSIX symbol through the FFI resolver, macOS-only until P5 (MIGRATION.md §3.5)"
+        ignore = "the ws2_32 trio RESOLVES here (pinned in runtime::winkb), but the world's Dns path additionally needs the winsock lifecycle (WSAStartup), a gai_strerror twin (not a ws2_32 export) and a non-mmap NativeBuffer — the winsock slice, not the P5 resolver (sprint_p05_detail.md D5 Δ)"
     )]
     fn dns_service_resolves_on_a_supervised_worker() {
         // The docs/dns_design.md gate: DnsService ships the hostname to its
@@ -5944,11 +5946,11 @@ mod tests {
     /// answers `Err` with the named cause, and the same VM keeps serving.
     /// (The old `#[should_panic]` gates in `runtime/ffi.rs` moved here —
     /// a bare test VM has no jmp slot and cannot observe the recovery.)
+    // WINARM (P5, un-gated): every case is now platform-neutral — the typo'd
+    // symbol reports through the widened not-found message (whose "no symbol
+    // named" phrasing this test pins), and `#getpid` resolves on Windows via
+    // the resolver's `_getpid` underscore alias.
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "P5: binds a POSIX symbol through the FFI resolver, macOS-only until P5 (MIGRATION.md §3.5)"
-    )]
     fn ffi_guest_mistakes_recover_as_errors_not_host_panics() {
         let mut vm = boot_test_vm(JitMode::Off);
 
@@ -6047,6 +6049,237 @@ mod tests {
 
         // After all four recovered guest fatals: still byte-for-byte alive.
         assert_eq!(vm.eval("3 + 4.").unwrap(), "7");
+    }
+
+    /// WINARM (P5, tests_p05.md gate items 1–2 + D3): the execution pins for
+    /// every MODELLED classifier row, each one a REAL Win32 import called end
+    /// to end through pragma → winkb (or probe) → trampoline → kernel32/
+    /// user32 — the WINVM discipline: ABI facts are pinned by execution,
+    /// never by reading specs (their hidden-pointer bug produced "a pointer
+    /// plus garbage with nothing failing at the point of error").
+    ///
+    /// Row coverage, by real exemplar:
+    /// - g return, zero args: `GetTickCount64` (plausible AND monotonic
+    ///   across two calls — the acceptance gate's own wording);
+    /// - three g args: `MulDiv` (distinct positional weights);
+    /// - pointer out-param + BOOL(struct≤8B)-as-g return:
+    ///   `QueryPerformanceCounter` fills caller-owned memory;
+    /// - pointer out-param + VOID return: `GetSystemTimeAsFileTime` fills a
+    ///   FILETIME whose value is provably current-era;
+    /// - enum param + g return, user32 (win_gui_design.md's WG0 set):
+    ///   `GetSystemMetrics(SM_CXSCREEN)`, `MessageBeep`;
+    /// - the memory the out-params fill is itself guest-obtained via
+    ///   `VirtualAlloc` (4 g args) — GC-stable by construction.
+    /// The f64 row's pins are `runtime::ffi`'s own `fabs` test (guest level)
+    /// and `ffi_stubs`' local-fn tests; Win32 offers no clean f64 export in
+    /// the core DLLs (D3 anticipated exactly this: local exemplars where
+    /// Win32 lacks one). REFUSED rows are pinned in `runtime::winkb`'s
+    /// fixture/real-DB tests (reason-naming errors, never calls).
+    #[cfg(windows)]
+    #[test]
+    fn win32_ffi_pins_call_real_kernel32_and_user32_end_to_end() {
+        let mut vm = boot_test_vm(JitMode::Off);
+        vm.exec(
+            "Object subclass: WinPin [ \
+               <classVars: Buf> \
+               WinPin class >> tick [ <primitive: FFI function: #GetTickCount64 ret: #g args: #()> ] \
+               WinPin class >> mulDiv: a by: b div: c [ <primitive: FFI function: #MulDiv ret: #g args: #(g g g)> ] \
+               WinPin class >> qpc: p [ <primitive: FFI function: #QueryPerformanceCounter ret: #g args: #(g)> ] \
+               WinPin class >> fileTimeInto: p [ <primitive: FFI function: #GetSystemTimeAsFileTime ret: #v args: #(g)> ] \
+               WinPin class >> metric: i [ <primitive: FFI function: #GetSystemMetrics ret: #g args: #(g)> ] \
+               WinPin class >> beep: t [ <primitive: FFI function: #MessageBeep ret: #g args: #(g)> ] \
+               WinPin class >> valloc: a size: s type: t protect: p [ <primitive: FFI function: #VirtualAlloc ret: #g args: #(g g g g)> ] \
+               WinPin class >> allocBuf [ Buf := self valloc: 0 size: 4096 type: 12288 protect: 4 ] \
+               WinPin class >> buf [ ^Buf ] \
+             ]",
+        )
+        .expect("the pinning bindings compile");
+
+        // GetTickCount64: plausible (an up-machine has been alive >1s and
+        // <10 years) and monotonic across two calls.
+        let t1: i64 = vm.eval("WinPin tick.").expect("tick 1").trim().parse().unwrap();
+        let t2: i64 = vm.eval("WinPin tick.").expect("tick 2").trim().parse().unwrap();
+        assert!(t1 > 1_000, "GetTickCount64 must be plausible, got {t1}");
+        assert!(t1 < 10 * 365 * 24 * 3600 * 1000, "implausibly large: {t1}");
+        assert!(t2 >= t1, "GetTickCount64 went backwards: {t1} -> {t2}");
+
+        // MulDiv rounds (6*7)/4 = 10.5 to 11 — the rounding proves the REAL
+        // function ran, not a truncating reimplementation anywhere between.
+        assert_eq!(vm.eval("WinPin mulDiv: 6 by: 7 div: 4.").unwrap().trim(), "11");
+        assert_eq!(vm.eval("WinPin mulDiv: 6 by: 7 div: 3.").unwrap().trim(), "14");
+
+        // One guest-owned page for the out-params.
+        vm.exec("WinPin allocBuf.").expect("VirtualAlloc a page");
+        let buf: i64 = vm.eval("WinPin buf.").expect("buf").trim().parse().unwrap();
+        assert!(buf > 0x1_0000, "VirtualAlloc must answer a real address, got {buf}");
+
+        // QueryPerformanceCounter fills the buffer and answers nonzero BOOL.
+        let ok = vm
+            .eval("WinPin qpc: WinPin buf.")
+            .expect("QueryPerformanceCounter");
+        assert_ne!(ok.trim(), "0", "QPC must succeed");
+        let qpc: i64 = vm
+            .eval("(Alien forAddress: WinPin buf size: 8) signedLongAt: 1.")
+            .expect("read counter")
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(qpc > 0, "the counter must have been WRITTEN, got {qpc}");
+
+        // GetSystemTimeAsFileTime: void return, pointer out-param; the
+        // FILETIME (100ns ticks since 1601) must land between 2020-01-01
+        // and 2100-01-01 — a garbage or unwritten buffer cannot.
+        vm.exec("WinPin fileTimeInto: WinPin buf.").expect("GetSystemTimeAsFileTime");
+        let ft: i64 = vm
+            .eval("(Alien forAddress: WinPin buf size: 8) signedLongAt: 1.")
+            .expect("read filetime")
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(
+            (132_223_104_000_000_000..157_469_184_000_000_000).contains(&ft),
+            "FILETIME out-param implausible: {ft}"
+        );
+
+        // user32 (WG0's first calls — win_gui_design.md): SM_CXSCREEN is
+        // positive on any interactive session; MessageBeep(0xFFFFFFFF)
+        // answers nonzero BOOL.
+        let cx: i64 = vm.eval("WinPin metric: 0.").expect("GetSystemMetrics").trim().parse().unwrap();
+        assert!(cx > 0, "SM_CXSCREEN must be positive, got {cx}");
+        assert_ne!(
+            vm.eval("WinPin beep: 4294967295.").expect("MessageBeep").trim(),
+            "0",
+            "MessageBeep must succeed"
+        );
+    }
+
+    /// WINARM (P5, the sprint doc's `GetLastError` pitfall, as shipped): v1
+    /// does NO implicit capture — the discipline is that guest code binds
+    /// `GetLastError` as its own import and calls it as the IMMEDIATELY next
+    /// FFI call **through an already-warmed binding**. The second clause is a
+    /// MEASURED addition: a binding's FIRST call runs resolution, and
+    /// resolution itself performs Win32 calls (the winkb sqlite open,
+    /// GetModuleHandle/LoadLibrary/GetProcAddress), which clobber the
+    /// thread's last-error — this test's first draft read 0 instead of 6 for
+    /// exactly that reason. So the pinned discipline is: warm both bindings
+    /// once, then fail-then-read works, because the interpreter path between
+    /// two CACHED FFI sends performs no Win32 call. A discipline, not a
+    /// guarantee — the hazard docs live in `runtime::winkb` and the world
+    /// binding (`world/tests/59_win_io_tests.mst`).
+    #[cfg(windows)]
+    #[test]
+    fn win32_get_last_error_reads_the_failing_calls_code() {
+        let mut vm = boot_test_vm(JitMode::Off);
+        vm.exec(
+            "Object subclass: WinErr [ \
+               WinErr class >> closeHandle: h [ <primitive: FFI function: #CloseHandle ret: #g args: #(g)> ] \
+               WinErr class >> lastError [ <primitive: FFI function: #GetLastError ret: #g args: #()> ] \
+             ]",
+        )
+        .expect("bindings compile");
+        // Warm both bindings: the first call through each resolves, and
+        // RESOLUTION ITSELF performs Win32 calls that reset last-error.
+        vm.eval("WinErr lastError.").expect("warm GetLastError");
+        assert_eq!(
+            vm.eval("WinErr closeHandle: 0.").expect("CloseHandle(0)").trim(),
+            "0",
+            "CloseHandle(NULL) must fail with BOOL 0"
+        );
+        assert_eq!(
+            vm.eval("WinErr lastError.").expect("GetLastError").trim(),
+            "6",
+            "the next FFI call through a WARMED binding must read ERROR_INVALID_HANDLE"
+        );
+    }
+
+    /// WINARM (P5, tests_p05.md stress row 1): an FFI call that FAULTS — a
+    /// deliberate bad pointer through a real out-param import
+    /// (`QueryPerformanceCounter(8)`: kernel32 writes to unmapped low
+    /// memory) — recovers via P2's foreign-AV path as a report, not a crash,
+    /// ×100 for recovery-slot soundness. The faulting PC is inside
+    /// KERNEL32.DLL itself, which is precisely what "foreign" means; the
+    /// alien-deref recovery tests cover the in-process flavour, this covers
+    /// the inside-a-foreign-module one. After round 1 the descriptor's
+    /// address cache is warm, so rounds 2..100 also pin that the CACHED fast
+    /// path faults and recovers identically.
+    #[cfg(windows)]
+    #[test]
+    fn win32_ffi_fault_recovers_via_foreign_av_path_100x() {
+        let mut vm = boot_test_vm(JitMode::Off);
+        vm.exec(
+            "Object subclass: WinFault [ \
+               WinFault class >> qpc: p [ <primitive: FFI function: #QueryPerformanceCounter ret: #g args: #(g)> ] \
+             ]",
+        )
+        .expect("binding compiles");
+        let base_sp = vm.vm.stack.sp;
+        let base_arena = vm.vm.handle_arena.len();
+        for round in 0..100 {
+            let err = vm
+                .eval("WinFault qpc: 8.")
+                .expect_err("writing FILETIME to address 8 must fault");
+            assert!(
+                matches!(err, GuestError::NativeFault { .. }),
+                "round {round}: expected NativeFault, got {err:?}"
+            );
+            assert_eq!(vm.vm.stack.sp, base_sp, "round {round}: sp leaked");
+            assert_eq!(
+                vm.vm.handle_arena.len(),
+                base_arena,
+                "round {round}: handle arena leaked"
+            );
+        }
+        // Still serving, and the SAME binding still works with a GOOD
+        // pointer through its (cached) resolution.
+        vm.exec(
+            "Object subclass: WinFaultAlloc [ \
+               <classVars: Buf> \
+               WinFaultAlloc class >> valloc: a size: s type: t protect: p [ \
+                 <primitive: FFI function: #VirtualAlloc ret: #g args: #(g g g g)> ] \
+               WinFaultAlloc class >> allocBuf [ Buf := self valloc: 0 size: 4096 type: 12288 protect: 4 ] \
+               WinFaultAlloc class >> buf [ ^Buf ] ]",
+        )
+        .expect("alloc binding");
+        vm.exec("WinFaultAlloc allocBuf.").expect("page");
+        assert_ne!(
+            vm.eval("WinFault qpc: WinFaultAlloc buf.").expect("good call").trim(),
+            "0",
+            "the identical binding must succeed once handed a valid pointer"
+        );
+        assert_eq!(vm.eval("6 * 7.").unwrap(), "42");
+    }
+
+    /// WINARM (P5, tests_p05.md gate item 6's shape): a REAL Win32 FFI call
+    /// under a COMPILED caller. FFI methods themselves are permanently
+    /// interpreter-only (`runtime::ffi`'s module doc), so the JIT dimension
+    /// is the CALLER: at `Threshold(1)` the block's second evaluation runs
+    /// compiled and re-enters `dispatch_ffi_primitive` from compiled frames
+    /// — the exact sp-balance seam the prim-267 twin above pins, here with
+    /// the full Windows resolve→trampoline→kernel32 path in the middle.
+    #[cfg(windows)]
+    #[test]
+    fn win32_ffi_under_jit_keeps_the_operand_stack_balanced() {
+        let mut vm = boot_test_vm(JitMode::Threshold(1));
+        vm.exec(
+            "Object subclass: WinJitPin [ \
+               WinJitPin class >> tick [ <primitive: FFI function: #GetTickCount64 ret: #g args: #()> ] \
+               WinJitPin class >> spin [ | t | 1 to: 5 do: [ :i | t := WinJitPin tick ]. ^t ] \
+             ]",
+        )
+        .expect("bindings compile");
+        for _ in 0..3 {
+            let out = vm
+                .eval("WinJitPin spin.")
+                .expect("a compiled caller's FFI call must not corrupt the stack");
+            assert!(
+                out.trim().parse::<i64>().map(|n| n > 1_000).unwrap_or(false),
+                "expected a plausible tick count, got {out:?}"
+            );
+        }
+        assert!(
+            vm.vm.stats.compilations > 0,
+            "Threshold(1) must actually have compiled the caller"
+        );
     }
 
     /// Mono-SUPER c2i staleness (2026-07 review, formerly filed-unfixed): a

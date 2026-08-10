@@ -4586,21 +4586,18 @@ mod tests {
     /// test uses, live, against a DB-booted VM (the real Workspace/browser
     /// path — `live_compile`), and checks a real OS pid comes back.
     ///
-    /// **macOS-only until P5.** The `<primitive: FFI …>` symbol resolver is
-    /// `dlsym` against `RTLD_DEFAULT`, which has no Windows counterpart yet;
-    /// the VM says so itself and names the sprint ("Windows FFI resolution —
-    /// the `winkb` knowledge base + LoadLibraryA/GetProcAddress,
-    /// MIGRATION.md §3.5 — arrives in sprint P5"). Nothing about the GUI seam
-    /// is implicated: the test reaches a VM capability this platform has not
-    /// been given yet, so gating it here is the same call `MIGRATION.md` M1
-    /// already records for the FFI-dependent world test files. **P5 must
-    /// remove this gate**, and it is the natural acceptance test for that
-    /// sprint's resolver landing.
+    /// WINARM (P5, un-gated — this was the sprint's flagged natural
+    /// acceptance test): the resolver now exists on Windows (`runtime::
+    /// winkb` + `resolve_export`'s LoadLibraryA/GetProcAddress probe), and
+    /// `#getpid` resolves there via the probe's `_getpid` underscore alias —
+    /// the SAME pragma text on both platforms, against a DB-booted VM
+    /// through the live-compile path. Passes with `windows_api.db` present
+    /// AND absent (getpid is a CRT name, never in Win32Metadata — the probe
+    /// is its path in both states).
     ///
     /// (Its sibling `time_millisecond_clock_value_works_through_a_db_booted_vm`
-    /// needs no such gate here, unlike in WINVM — this repo's world reaches
-    /// the millisecond clock without an FFI pragma, and it passes on Windows.)
-    #[cfg(target_os = "macos")]
+    /// needed no gate here even before P5 — this repo's world reaches
+    /// the millisecond clock without an FFI pragma.)
     #[test]
     fn ffi_works_through_a_db_booted_vm() {
         let world_dir = test_world_dir();

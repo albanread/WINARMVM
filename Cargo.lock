@@ -118,6 +118,7 @@ dependencies = [
  "anyhow",
  "cc",
  "libc",
+ "rusqlite",
  "smallvec",
 ]
 

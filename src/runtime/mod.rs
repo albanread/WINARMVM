@@ -27,6 +27,7 @@ pub mod probe;
 pub mod recompile;
 pub mod simd_kernels; // SIMD level 2: explicit hand-written NEON bulk kernels (docs/SIMD.md Part E)
 pub mod vm_state;
+pub mod winkb; // WINARM (P5): the Windows API knowledge-base FFI resolver + MS-ARM64 classifier (MIGRATION.md §3.5)
 pub mod workers; // primary/worker registry + channels — workers M1 (docs/multi-smalltalk-worker.md §3)
 
 pub use vm_state::{

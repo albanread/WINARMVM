@@ -857,19 +857,15 @@ mod tests {
     /// indirect Alien via `forAddress:size:`, genuinely reads and writes
     /// REAL mapped memory through this module's raw-pointer path — not a
     /// mock, not a direct-mode-only round trip.
-    // WINARM (P0 D3, gate row 3): `mmap` is POSIX, and the `<primitive: FFI …>`
-    // symbol resolver is still `dlsym`-only here — sprint_p00_detail.md gates
-    // this whole group to P5, when the winkb resolver + LoadLibraryA/
-    // GetProcAddress land (MIGRATION.md §3.5). It has to be `ignore`d rather
-    // than merely left failing: the unresolved symbol raises a GUEST-FATAL,
-    // and outside an embedded `VmHandle` no recovery slot is registered, so
-    // `raise_guest_fatal` takes its `fatal_exit(1)` arm and exits the PROCESS
-    // — killing the rest of this test binary. macOS runs it unchanged.
+    // WINARM (P0 D3, gate row 3 → **P5, settled as a cfg + twin**): `mmap` is
+    // POSIX and has NO Windows spelling at any layer — this is OS-coupled,
+    // not blocked on a sprint, so P0's P5-sprint ignore mark converts to the
+    // `#[cfg]` P0's own D3 note prescribes for OS-coupled tests, and the
+    // Windows twin below (`virtualalloc_capstone_…`) runs the IDENTICAL
+    // pipeline against kernel32's allocator through the P5 resolver. macOS
+    // runs this original unchanged.
+    #[cfg(target_os = "macos")]
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "P5: no Win32 FFI symbol resolver yet; the guest-fatal exits the process (MIGRATION.md §3.5)"
-    )]
     fn mmap_capstone_indirect_alien_reads_writes_real_mapped_memory() {
         let mut vm = test_vm();
         // Real macOS/arm64 flag values (verified against `/usr/include/
@@ -900,6 +896,46 @@ mod tests {
         assert_eq!(
             got, 42,
             "indirect Alien must read back what it wrote to real mapped memory"
+        );
+    }
+
+    /// WINARM (P5): the mmap capstone's Windows twin — the same
+    /// S20-steps-1-through-5 span, with kernel32's allocator standing where
+    /// POSIX `mmap` stood: a REAL `VirtualAlloc(NULL, 4096, MEM_COMMIT|
+    /// MEM_RESERVE = 0x3000, PAGE_READWRITE = 4)` resolved through the P5
+    /// winkb/GetProcAddress path (kernel32 is in both the knowledge base and
+    /// the no-DB probe list, so this passes in BOTH gate states), its
+    /// returned address wrapped as an indirect Alien, and a real byte written
+    /// and read through real committed memory. The flag values are the same
+    /// ones `vendor/wfasm/native_winarm64.rs` declares from winbase.h — not
+    /// guessed — and the world-level sibling
+    /// (`world/tests/30_ffi_alien_tests.mst`) uses the identical call.
+    #[cfg(windows)]
+    #[test]
+    fn virtualalloc_capstone_indirect_alien_reads_writes_real_mapped_memory() {
+        let mut vm = test_vm();
+        let result = install_and_run(
+            &mut vm,
+            "Object subclass: FFIVirtualAllocCapstone [ \
+                FFIVirtualAllocCapstone class >> vallocAddr: a1 size: a2 type: a3 protect: a4 [ \
+                    <primitive: FFI function: #VirtualAlloc ret: #g args: #(g g g g)> \
+                ] \
+                run [ \
+                    | addr a | \
+                    addr := FFIVirtualAllocCapstone \
+                        vallocAddr: 0 size: 4096 type: 12288 protect: 4. \
+                    a := Alien forAddress: addr size: 4096. \
+                    a byteAt: 1 put: 42. \
+                    ^a byteAt: 1 \
+                ] \
+            ]",
+        );
+        let got = SmallInt::try_from(result)
+            .expect("expected a SmallInt result")
+            .value();
+        assert_eq!(
+            got, 42,
+            "indirect Alien must read back what it wrote to real VirtualAlloc'd memory"
         );
     }
 }

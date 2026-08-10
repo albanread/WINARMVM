@@ -215,6 +215,39 @@ gate-p04: gate-p03
     cargo test --no-fail-fast -- --skip mandelvm
     cargo test -p image_store
 
+# P5 (tests_p05.md) — FFI on Windows ARM64: winkb + the MS-ARM64 classifier.
+# Chains gate-p03 (P4 is independent — deliberately NOT chained, per the
+# sprint doc's implementation order). The one thing this recipe cannot do
+# for you: gate item 5's DB-ABSENT run renames a ~90 MB machine-local
+# artifact aside and back, so it is written defensively — if the DB is
+# already absent, the whole gate IS the absent-state run and the rename
+# pair no-ops.
+gate-p05: gate-p03
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # item 7 discipline: no stale P5 gating marks left anywhere (the
+    # IoWorker/winsock marks deliberately name their FOLLOW-ON slice, not P5).
+    ! grep -rn 'ignore = "P5' src/ tests/ gui/src/
+    # items 1-3 + 6: the full suite, which now contains the pinning tests
+    # (embed::tests::win32_*), the classifier suite (runtime::winkb), the
+    # un-gated ffi/alien/world tests and the wall-clock world branch. Debug
+    # (debug_assert! lives here); env threshold=1 floors to 20 (P3's Δ).
+    MACVM_JIT=threshold=1 cargo test --no-fail-fast -- --skip mandelvm
+    # item 5: the SAME suite with the DB ABSENT — the fallback contract is
+    # load-bearing (absence is not an error; the probe resolver carries the
+    # world alone). If the DB is already absent, the run above WAS the
+    # absent-state run and this block no-ops. Restore even on failure.
+    DB="${WINKB_DB:-C:/projects/windows_api/windows_api.db}"
+    if [ -f "$DB" ]; then
+        mv "$DB" "$DB.p5-aside"
+        MACVM_JIT=threshold=1 cargo test --no-fail-fast -- --skip mandelvm \
+            || { mv "$DB.p5-aside" "$DB"; exit 1; }
+        mv "$DB.p5-aside" "$DB"
+    fi
+    # item 4's Rust-side half: the gui acceptance test P4 flagged for this
+    # sprint (FFI through a DB-booted VM, the live-compile path).
+    cargo test -p macvm-gui --bin macvm-gui -- ffi_works_through_a_db_booted_vm
+
 # P3 (tests_p03.md "Stress/negative tests") — the FLAKY-CATCHER. The
 # combined three-mode run, three consecutive times, because WINVM's
 # card-boundary bug was found by run-to-run variance and not by any single

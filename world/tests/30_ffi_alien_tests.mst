@@ -9,11 +9,22 @@
  method, exactly like any real POSIX binding ffi_gen would generate."
 
 Object subclass: FFIAlienPosix [
+    "getpid resolves on BOTH platforms unchanged: macOS via dlsym, Windows
+     via the P5 resolver's underscore-alias probe (getpid -> _getpid in the
+     UCRT) — sprint_p05_detail.md D5 row 1, the same posture P0 set when it
+     renamed rather than gated."
     FFIAlienPosix class >> getpid [
         <primitive: FFI function: #getpid ret: #g args: #()>
     ]
     FFIAlienPosix class >> mmapAddr: a1 length: a2 prot: a3 flags: a4 fd: a5 offset: a6 [
         <primitive: FFI function: #mmap ret: #g args: #(g g g g g g)>
+    ]
+    "WINARM (P5, D5 row 1): mmap has no Windows spelling at any layer; the
+     page-allocation exercise re-targets kernel32's own allocator. The two
+     bindings coexist -- only the platform's own one is ever CALLED, and an
+     FFI pragma resolves at call time, so the foreign binding is inert text."
+    FFIAlienPosix class >> winVirtualAllocAddr: a1 size: a2 type: a3 protect: a4 [
+        <primitive: FFI function: #VirtualAlloc ret: #g args: #(g g g g)>
     ]
 ]
 
@@ -72,16 +83,21 @@ TestCase subclass: FFIAlienTests [
         self assert: result == a.
     ]
 
-    "The capstone: a REAL mmap syscall (S20 step 4) wrapping its returned
-     address as an indirect Alien (S20 step 5), writing and reading a real
-     byte through real mapped memory — spanning S20 steps 1 through 5 in
-     one call, now proven via the real world-loaded test harness rather
-     than only a Rust-side cargo test. PROT_READ|PROT_WRITE = 3,
-     MAP_PRIVATE|MAP_ANON = 4098 (0x1002) — real macOS/arm64 flag values."
+    "The capstone: a REAL page-granting syscall (S20 step 4) wrapping its
+     returned address as an indirect Alien (S20 step 5), writing and reading
+     a real byte through real mapped memory — spanning S20 steps 1 through 5
+     in one call, now proven via the real world-loaded test harness rather
+     than only a Rust-side cargo test. macOS: mmap with PROT_READ|PROT_WRITE
+     = 3, MAP_PRIVATE|MAP_ANON = 4098 (0x1002) — real macOS/arm64 flag
+     values. Windows (WINARM P5, D5 row 1): the same span over kernel32's
+     VirtualAlloc — MEM_COMMIT|MEM_RESERVE = 12288 (0x3000), PAGE_READWRITE
+     = 4, real winbase.h values, the identical call the Rust-side twin
+     (runtime::alien virtualalloc_capstone) proves."
     testMmapIndirectAlienReadsWritesRealMemory [
         | addr a |
-        addr := FFIAlienPosix
-            mmapAddr: 0 length: 4096 prot: 3 flags: 4098 fd: -1 offset: 0.
+        addr := Smalltalk platformName == #windows
+            ifTrue: [ FFIAlienPosix winVirtualAllocAddr: 0 size: 4096 type: 12288 protect: 4 ]
+            ifFalse: [ FFIAlienPosix mmapAddr: 0 length: 4096 prot: 3 flags: 4098 fd: -1 offset: 0 ].
         a := Alien forAddress: addr size: 4096.
         a byteAt: 1 put: 42.
         self assert: (a byteAt: 1) = 42.

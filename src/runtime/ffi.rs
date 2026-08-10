@@ -183,6 +183,12 @@ pub(crate) fn dispatch_ffi_primitive(vm: &mut VmState, m: MethodOop, argc: u8) -
     let mut argv_f = [0u64; 8];
     let mut next_g = 0usize;
     let mut next_f = 0usize;
+    // WINARM (P5): bit i set ⇔ the pragma declares argument i float-class —
+    // built here (the loop already walks tokens in signature position order)
+    // and handed to `resolve_ffi_symbol`, whose Windows arm cross-checks it
+    // against the knowledge base's own mask before the first call. Unused by
+    // the macOS arm.
+    let mut float_mask = 0u32;
     for i in 0..argc_usize {
         let arg_oop = vm.stack.get(base + 1 + i);
         let tok = sym_text(args_desc.at(i));
@@ -217,6 +223,7 @@ pub(crate) fn dispatch_ffi_primitive(vm: &mut VmState, m: MethodOop, argc: u8) -
                 let Some(word) = marshal_f(arg_oop) else {
                     return PrimitiveOutcome::Fallthrough;
                 };
+                float_mask |= 1 << i;
                 if next_f >= argv_f.len() {
                     // Same reasoning as the "g" arm above, for the FPR
                     // register file.
@@ -267,7 +274,7 @@ pub(crate) fn dispatch_ffi_primitive(vm: &mut VmState, m: MethodOop, argc: u8) -
         let result = vm.ffi_stubs.invoke(ret_class, target, &argv_g, &argv_f);
         return unmarshal_ret(vm, ret_class, result, &name);
     }
-    let Some(target) = resolve_ffi_symbol(vm, &name) else {
+    let Some(target) = resolve_ffi_symbol(vm, &name, argc_usize, float_mask, ret_class) else {
         // A `ffi_gen`-generated binding names only functions verified to
         // exist in the real ABI database (docs/FFI.md) — but bindings are
         // also HAND-authored every day (all of world/61's Posix surface, a
@@ -275,11 +282,17 @@ pub(crate) fn dispatch_ffi_primitive(vm: &mut VmState, m: MethodOop, argc: u8) -
         // here on first call. That is a guest-program mistake: loud, named,
         // fatal to the doit — and recoverable when embedded, instead of a
         // Rust panic taking down the whole GUI for a misspelled binding.
+        //
+        // WINARM (P5): reachable on BOTH platforms now, so the message names
+        // each platform's real search. The "no symbol named {name}" phrasing
+        // is load-bearing — embed's ffi_guest_mistakes gate asserts it.
         crate::runtime::error::guest_fatal(
             vm,
             format!(
-                "FFI: dlsym found no symbol named {name:?} in the process-global namespace \
-                 (RTLD_DEFAULT) — check the function: name in the pragma"
+                "FFI: no symbol named {name:?} was found — dlsym/RTLD_DEFAULT on macOS; \
+                 winkb + GetProcAddress over ucrtbase/msvcrt/kernel32/user32/ws2_32 (with \
+                 the _underscore CRT alias) on Windows. Check the function: name in the \
+                 pragma (Windows text APIs are CreateFileW/CreateFileA, never CreateFile)"
             ),
         );
     };
@@ -301,43 +314,135 @@ pub(crate) fn dispatch_ffi_primitive(vm: &mut VmState, m: MethodOop, argc: u8) -
 /// an unsupported shape token), which is strictly better diagnostics than
 /// refusing the whole primitive at entry would give.
 ///
-/// The mac arm is the original call, verbatim.
+/// WINARM (P5): the seam widened by three parameters — the pragma's declared
+/// arity, float-position mask and return class — because the Windows arm
+/// cross-checks the hand-authored pragma against the `winkb` knowledge base
+/// before the first call (a pragma that disagrees with the recorded signature
+/// would mis-marshal SILENTLY, the exact failure mode the whole FFI path is
+/// built to refuse). The mac arm's BEHAVIOUR is the original call, verbatim;
+/// it ignores the extra parameters (dlsym carries no type information to
+/// check against).
 #[cfg(target_os = "macos")]
-fn resolve_ffi_symbol(_vm: &mut VmState, name: &str) -> Option<u64> {
+fn resolve_ffi_symbol(
+    _vm: &mut VmState,
+    name: &str,
+    _argc: usize,
+    _float_mask: u32,
+    _ret_class: crate::codecache::ffi_stubs::FfiRetClass,
+) -> Option<u64> {
     crate::vendor::wfasm::native_macos::dlsym_resolve(None, name)
 }
 
-/// WINARM (P0 D2#7): Windows has no `dlsym`, and its replacement is NOT a
-/// drop-in — sprint P5 resolves FFI symbols through the `winkb` knowledge
-/// base plus `LoadLibraryA`/`GetProcAddress` (MIGRATION.md §3.5), which needs
-/// the per-DLL export mapping `dlsym`'s process-global namespace does not
-/// have, and an ABI classifier re-derived for AArch64. None of that exists in
-/// P0, so resolution refuses rather than guesses.
+/// WINARM (P5, MIGRATION.md §3.5): the Windows resolver — `winkb`-first, then
+/// the `LoadLibraryA`/`GetProcAddress` probe (`winkb::resolve_export`, the
+/// dlsym twin P1's Δ moved to this sprint).
 ///
-/// This is `guest_fatal`, matching every other "missing runtime/feature
-/// support" condition in [`dispatch_ffi_primitive`] (Tier 2 dispatch, an
-/// unsupported return-shape token, a symbol that fails to resolve) — see this
-/// module's header for why that bucket must NOT be `PrimitiveOutcome::
-/// Fallthrough`: an FFI pragma's generated method body is otherwise EMPTY, so
-/// a Fallthrough would answer the receiver and masquerade as quiet success.
-/// Loud at the GUEST level and not a Rust `panic!`, for the same reason the
-/// header gives: a `<primitive: FFI …>` pragma is hand-authorable Smalltalk,
-/// so reaching here is a guest program's doing and must cost that doit, not
-/// the embedding host. Diverges (`-> !` coerced to `Option`), so the
-/// caller's own not-found arm — whose "check the function: name" advice would
-/// be wrong here — is never reached on this platform.
+/// The lookup path, in order:
+///
+/// 1. **Knowledge base** (when `windows_api.db` is present): the exact
+///    export's DLL comes from the DB — which matters because the fallback
+///    probe only searches a handful of well-known modules and would never
+///    find, say, a d2d1.dll export. Before the address is used, the pragma is
+///    CROSS-CHECKED against the recorded signature: arity must match exactly
+///    (this is also the live guard for the variadic hole — the DB records
+///    only the fixed params, so a call site passing tail arguments disagrees
+///    here and refuses; see winkb's module-doc Δ on `is_variadic` being
+///    all-zero in this build), float positions must match, and the return
+///    class must match. Any disagreement is a LOUD guest fatal naming both
+///    sides — never a best-effort call. A signature the MS-ARM64 classifier
+///    refuses (f32, HFA/FP structs, two-GPR composites, x8-indirect returns,
+///    variadic, x86 conventions) is likewise a guest fatal carrying the
+///    classifier's own reason.
+/// 2. **Probe** (DB absent, or the symbol not in it — CRT names like
+///    `_getpid` are not Win32Metadata's population): `resolve_export(None)`
+///    over ucrtbase/msvcrt/kernel32/user32/ws2_32 with the underscore-alias
+///    retry. This arm is the whole story when the DB is missing — "absence is
+///    not an error" (the module's founding contract; tests_p05 gate item 5
+///    runs the full suite in both states).
+///
+/// Failure handling matches this module's header contract: a resolution MISS
+/// returns `None` so the caller's own arm reports it (its message must keep
+/// naming the symbol — `embed::tests::ffi_guest_mistakes_recover_as_errors_
+/// not_host_panics` asserts the text); every REFUSAL diverges here as a guest
+/// fatal (recoverable when embedded, never a Rust panic).
 #[cfg(not(target_os = "macos"))]
-fn resolve_ffi_symbol(vm: &mut VmState, name: &str) -> Option<u64> {
-    crate::runtime::error::guest_fatal(
-        vm,
-        format!(
-            "FFI: cannot resolve native symbol {name:?} — the `<primitive: FFI …>` symbol \
-             resolver is macOS-only in this build (it is `dlsym` against RTLD_DEFAULT). \
-             Windows FFI resolution (the `winkb` knowledge base + LoadLibraryA/GetProcAddress, \
-             MIGRATION.md §3.5) arrives in sprint P5; until then no FFI pragma can be called \
-             on this platform"
-        ),
-    )
+fn resolve_ffi_symbol(
+    vm: &mut VmState,
+    name: &str,
+    argc: usize,
+    float_mask: u32,
+    ret_class: crate::codecache::ffi_stubs::FfiRetClass,
+) -> Option<u64> {
+    use crate::runtime::winkb;
+
+    if winkb::available() {
+        match winkb::lookup_function(name) {
+            Ok(sig) => {
+                if sig.params.len() != argc {
+                    crate::runtime::error::guest_fatal(
+                        vm,
+                        format!(
+                            "FFI: function {name:?}'s pragma declares {argc} argument(s) but \
+                             {dll} records {real} fixed parameter(s) — a mismatched binding \
+                             mis-marshals without faulting, so it is refused. (If the extra \
+                             arguments are a variadic tail: variadic calls are refused in v1 — \
+                             MS ARM64 passes variadic floats in GPRs, which these trampolines \
+                             do not model; winkb D2)",
+                            dll = sig.dll,
+                            real = sig.params.len(),
+                        ),
+                    );
+                }
+                if sig.class_mask() != float_mask {
+                    crate::runtime::error::guest_fatal(
+                        vm,
+                        format!(
+                            "FFI: function {name:?}'s pragma declares float positions \
+                             {float_mask:#b} but {} really takes {:#b} — a mismatched token \
+                             list passes a float's bits in an integer register (or vice \
+                             versa) without faulting",
+                            sig.dll,
+                            sig.class_mask()
+                        ),
+                    );
+                }
+                let declared_ret = match ret_class {
+                    crate::codecache::ffi_stubs::FfiRetClass::G => winkb::ArgClass::G,
+                    crate::codecache::ffi_stubs::FfiRetClass::F => winkb::ArgClass::F,
+                    crate::codecache::ffi_stubs::FfiRetClass::V => winkb::ArgClass::V,
+                };
+                if sig.ret != declared_ret {
+                    crate::runtime::error::guest_fatal(
+                        vm,
+                        format!(
+                            "FFI: function {name:?}'s pragma declares return class \
+                             {declared_ret:?} but {} records {:?} — reading the wrong return \
+                             register produces garbage without faulting",
+                            sig.dll, sig.ret
+                        ),
+                    );
+                }
+                // The DB names the exporting DLL; a stale row whose export
+                // vanished falls through to the probe rather than failing
+                // the call outright.
+                if let Some(addr) = winkb::resolve_export(Some(&sig.dll), name) {
+                    return Some(addr);
+                }
+            }
+            // Not in the DB (CRT names never are), or no DB at all — the
+            // probe below is the answer either way ("absence is not an
+            // error").
+            Err(winkb::WinkbError::NotFound(_)) | Err(winkb::WinkbError::DbMissing(_)) => {}
+            // The classifier REFUSED it (or the DB itself misbehaved):
+            // loud, naming the rule — never a garbage call. Guest-level,
+            // recoverable when embedded (this module's header contract).
+            Err(e) => crate::runtime::error::guest_fatal(
+                vm,
+                format!("FFI: {name:?} cannot be called: {e}"),
+            ),
+        }
+    }
+    winkb::resolve_export(None, name)
 }
 
 /// The return-value unmarshal, shared by the cached-address fast path and
@@ -419,21 +524,15 @@ fn sym_text(o: Oop) -> String {
 }
 
 #[cfg(test)]
-// WINARM (P0 D2#7, sprint_p00_detail.md §D3 row 3 "real-FFI tests
-// (`mmap`/`getpid`), alien POSIX → gate to `target_os = "macos"` → comes back
-// in P5 as Win32 twins"): every test below calls a REAL libc symbol
-// (`getpid`, `llabs`, `fabs`) end to end through `dispatch_ffi_primitive`, so
-// each one needs both a POSIX C library AND the `dlsym` resolver this sprint
-// just gated. `#[cfg]` rather than `#[ignore]` is right here (contrast D3's
-// last row): these are OS-coupled, not merely blocked on a later sprint's
-// loader — `getpid` is not a Windows symbol at all (`_getpid` is), so there
-// is nothing for them to keep compiling against. P5 re-introduces them as
-// Win32 twins over `winkb`. The Windows-side contract meanwhile — an FFI
-// pragma guest-fatals cleanly instead of panicking — is asserted where the
-// recovery machinery lives (`embed::tests`), for the reason the notes at the
-// end of this module already give: a bare `test_vm()` cannot observe a
-// `guest_fatal` without killing the test process.
-#[cfg(target_os = "macos")]
+// WINARM (P0 D2#7 → **P5, un-gated**): P0 gated this module to macOS because
+// every test calls a REAL libc symbol (`getpid`, `llabs`, `fabs`) and no
+// Windows resolver existed. P5's resolver closes exactly that gap, and its
+// underscore-alias probe (`winkb::resolve_export`: `getpid` → `_getpid` in
+// ucrtbase; `llabs`/`fabs` are plain UCRT exports) means the SAME Smalltalk
+// sources resolve on both platforms — the P0 posture of renaming rather than
+// gating, now inside the resolver where every binding benefits. Only the
+// Rust-side cross-check extern needs a `link_name` attribute, exactly as
+// `ffi_stubs.rs`'s own `getpid` test already does.
 // This test module only (not `dispatch_ffi_primitive` or its helpers
 // above, which contain no `unsafe` at all): the `getpid` cross-check test
 // below needs a raw `extern "C"` call to compare against, exactly the
@@ -516,6 +615,11 @@ mod tests {
     #[test]
     fn ffi_getpid_zero_args_ret_g_matches_real_getpid() {
         extern "C" {
+            // WINARM (P5): the UCRT spells it `_getpid` — same rename
+            // `ffi_stubs.rs`'s own test carries. The GUEST binding below
+            // stays `#getpid` on both platforms; the resolver's underscore
+            // alias covers it there.
+            #[cfg_attr(windows, link_name = "_getpid")]
             fn getpid() -> i32;
         }
         let mut vm = test_vm();

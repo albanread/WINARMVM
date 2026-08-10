@@ -40,20 +40,39 @@ Object subclass: Time [
         ^self millisecondClockValue // 1000
     ]
 
-    "A 64-byte scratch region: an 8-byte time_t at offset 0, then the
-     56-byte struct tm at offset 8. mmap'd for the same reason world/30's
-     clock buffer is — memory handed OUT to native code as a pointer must
-     live outside the GC heap, where it can never move mid-call. Allocated
-     once, reused forever."
+    "A scratch region for the platform's zone query. mmap'd (macOS) or
+     VirtualAlloc'd (Windows) for the same reason world/30's clock buffer
+     is — memory handed OUT to native code as a pointer must live outside
+     the GC heap, where it can never move mid-call. Allocated once, reused
+     forever. macOS needs 64 bytes (an 8-byte time_t then the 56-byte
+     struct tm); Windows needs 172 (TIME_ZONE_INFORMATION) — each arm
+     allocates its own platform's size."
     Time class >> tmBufferAddress ^ <Integer> [
         TmBuffer isNil ifTrue: [
-            "PROT_READ|PROT_WRITE=3, MAP_PRIVATE|MAP_ANON=4098 — the real
-             macOS/arm64 flag values world/30 already proves."
-            TmBuffer := self ffiMmapAddr: 0 length: 64 prot: 3 flags: 4098 fd: -1 offset: 0 ].
+            Smalltalk platformName == #windows
+                ifTrue: [
+                    "WINARM (P5, sprint_p05_detail.md D4): kernel32
+                     VirtualAlloc — MEM_COMMIT|MEM_RESERVE=12288 (0x3000),
+                     PAGE_READWRITE=4, the values world/tests/30's capstone
+                     already proves end to end."
+                    TmBuffer := self winVirtualAllocAddr: 0 size: 4096 type: 12288 protect: 4 ]
+                ifFalse: [
+                    "PROT_READ|PROT_WRITE=3, MAP_PRIVATE|MAP_ANON=4098 — the
+                     real macOS/arm64 flag values world/30 already proves."
+                    TmBuffer := self ffiMmapAddr: 0 length: 64 prot: 3 flags: 4098 fd: -1 offset: 0 ] ].
         ^TmBuffer
     ]
     Time class >> ffiLocaltimeR: timePtr <Integer> tm: tmPtr <Integer> [
         <primitive: FFI function: #localtime_r ret: #g args: #(g g)>
+    ]
+    "WINARM (P5): the Windows twins. localtime_r does not exist in the UCRT
+     and struct tm there carries no tm_gmtoff at all — the zone query is
+     kernel32's GetTimeZoneInformation instead (fixed-arity, one pointer)."
+    Time class >> winVirtualAllocAddr: a1 <Integer> size: a2 <Integer> type: a3 <Integer> protect: a4 <Integer> [
+        <primitive: FFI function: #VirtualAlloc ret: #g args: #(g g g g)>
+    ]
+    Time class >> ffiGetTimeZoneInformation: tzPtr <Integer> [
+        <primitive: FFI function: #GetTimeZoneInformation ret: #g args: #(g)>
     ]
 
     "This machine's offset from UTC right now, in seconds — POSITIVE east of
@@ -62,6 +81,7 @@ Object subclass: Time [
      fails, so a clock question can never be the thing that raises."
     Time class >> localOffsetSeconds ^ <Integer> [
         | addr buf |
+        Smalltalk platformName == #windows ifTrue: [ ^self winLocalOffsetSeconds ].
         addr := self tmBufferAddress.
         addr isNil ifTrue: [ ^0 ].
         buf := Alien forAddress: addr size: 64.
@@ -71,6 +91,38 @@ Object subclass: Time [
         "tm_gmtoff: offset 40 within struct tm, so 8 + 40 = 48 from the base;
          1-based byte 49."
         ^buf signedLongAt: 49
+    ]
+
+    "WINARM (P5, D4): the Windows offset arm. GetTimeZoneInformation fills a
+     TIME_ZONE_INFORMATION and its RETURN says which bias is active NOW
+     (0 = no DST rule, 1 = standard, 2 = daylight; 4294967295 = failed).
+     UTC = local + Bias(+ActiveBias) MINUTES, so local-east-positive seconds
+     is the negated sum times 60. Struct offsets Bias@0, StandardBias@84,
+     DaylightBias@168 come from winkb (windows_api.db struct_fields) and are
+     pinned against the live DB by runtime::winkb's real-DB test — probed,
+     not assumed, the same discipline the tm_gmtoff arm above records."
+    Time class >> winLocalOffsetSeconds ^ <Integer> [
+        | addr buf ret bias active |
+        addr := self tmBufferAddress.
+        (addr isNil or: [ addr = 0 ]) ifTrue: [ ^0 ].
+        buf := Alien forAddress: addr size: 172.
+        ret := self ffiGetTimeZoneInformation: addr.
+        ret = 4294967295 ifTrue: [ ^0 ].
+        bias := self winI32Of: buf at: 0.
+        active := ret = 2
+            ifTrue: [ self winI32Of: buf at: 168 ]
+            ifFalse: [ ret = 1 ifTrue: [ self winI32Of: buf at: 84 ] ifFalse: [ 0 ] ].
+        ^(bias + active) * -60
+    ]
+    "Compose a SIGNED little-endian i32 from Alien bytes (Alien natively
+     does 1- and 8-byte only — the exact accessor-width gap world/30
+     recorded; the bias fields are 4-byte LONGs, negative east of
+     Greenwich). `off` is the 0-based C offset."
+    Time class >> winI32Of: anAlien at: off <Integer> ^ <Integer> [
+        | v |
+        v := (anAlien byteAt: off + 1) + ((anAlien byteAt: off + 2) * 256)
+            + ((anAlien byteAt: off + 3) * 65536) + ((anAlien byteAt: off + 4) * 16777216).
+        ^v >= 2147483648 ifTrue: [ v - 4294967296 ] ifFalse: [ v ]
     ]
 
     Time class >> localSecondsSinceEpoch ^ <Integer> [

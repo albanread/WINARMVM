@@ -66,4 +66,9 @@ tier1.mst
 57_string_completion_tests.mst
 58_object_stream_tests.mst
 55_exception_resume_tests.mst
+# WINARM (P5, sprint_p05_detail.md D5 row 2): the win_io twin of the POSIX
+# file-I/O slice — UCRT _open/_creat/_read/_write/_close via the resolver's
+# underscore alias. Loads everywhere (FFI pragmas resolve at call time);
+# RUNS only on Windows (the platformName guard in 99_run_all.mst).
+59_win_io_tests.mst
 99_run_all.mst

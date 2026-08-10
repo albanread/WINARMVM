@@ -80,6 +80,18 @@ anyhow = "1"
 # capacity avoids a heap allocation on the common path.
 smallvec = "1"
 
+# WINARM (P5, MIGRATION.md §3.5): the `winkb` FFI resolver's SQLite driver,
+# Windows-only (`src/runtime/winkb.rs` — the knowledge base replacing
+# macOS's `cocoa_data`). `bundled` compiles sqlite3 with the proven C
+# toolchain rather than depending on a system library — same pin WINVM
+# carries. Deliberately deferred from P0 (zero-dependency interpreter
+# bring-up); lands here with its one consumer. The DATABASE itself
+# (`windows_api.db`, ~90 MB) is a machine-local artifact, never a build
+# input: absence is not an error (`WinkbError::DbMissing` → pragma
+# fallback), and the suite must stay green without it.
+[target.'cfg(windows)'.dependencies]
+rusqlite = { version = "0.31", features = ["bundled"] }
+
 # Codegen backend is an OPEN DECISION (see docs/DESIGN.md §4). Backends are
 # selected by feature so the compiler front end never hard-depends on one.
 [features]

@@ -1,0 +1,244 @@
+"59_win_io_tests.mst — WinIoTests: the Windows twin of the POSIX file-I/O
+ slice (WINARM sprint P5, sprint_p05_detail.md D5 row 2: 'TWIN as win_io
+ over msvcrt's _open/_read/_write/_close'). Runs ONLY on Windows (guarded
+ in 99_run_all.mst); loads everywhere — an FFI pragma resolves at call
+ time, so on macOS these classes are inert definitions, exactly like the
+ kqueue surface is on Windows.
+
+ Scope, honestly drawn: this twins the FILE surface of PosixIoTests
+ (create/write/read/seek/unlink + errno), which is what the CRT offers a
+ clean fixed-arity path for. It does NOT twin the kqueue/readiness half —
+ kqueue has no Windows equivalent at all; that is the IoWorker's own
+ post-P5 slice (IOCP or WSAPoll — sprint_p05_detail.md's D5 Δ), not a
+ file-I/O question.
+
+ Every binding is fixed-arity. The UCRT spells POSIX names with a leading
+ underscore (_open, _read, ...); the bindings below use the PLAIN names
+ and the P5 resolver's underscore-alias probe finds the real export — the
+ same posture P0 set when it renamed a Rust-side binding rather than
+ gating the test. Notably _open's optional third argument is VARIADIC
+ (like Darwin's open), so creation goes through _creat + _setmode, both
+ fixed 2-arity — the same split world/61 uses (open-existing vs creat),
+ for the same reason.
+
+ GetLastError discipline (winkb's module doc, pinned in embed::tests):
+ bind it as its own import, WARM the binding once (first-call RESOLUTION
+ itself performs Win32 calls that reset the thread's last-error), then
+ read it as the immediately-next FFI call after the failing one.
+
+ Δ (P5, MEASURED here): a C-`int`-returning UCRT call's -1 arrives as
+ 4294967295 through `ret: #g`. AAPCS64 leaves x0's upper half UNSPECIFIED
+ for a 32-bit return; the UCRT materialises results with w-register
+ writes, which ZERO-extend — while Darwin's libc happens to sign-extend,
+ which is the only reason world/61's `close(-1) = -1` assertion works on
+ macOS. So every i32-returning Windows binding narrows guest-side
+ (`WinIo i32:` below); only genuinely-64-bit returns (_lseeki64) read x0
+ raw. Neither library is wrong — the width is simply not expressible in
+ the g/f token vocabulary, and the binding author owns it."
+
+"── WinIo: raw class-side CRT/kernel32 bindings, all fixed-arity ──────────"
+Object subclass: WinIo [
+    "kernel32: one committed page — the mmap analogue for GC-stable memory
+     handed to native code. MEM_COMMIT|MEM_RESERVE = 12288 (0x3000),
+     PAGE_READWRITE = 4 (the values world/tests/30's capstone proves)."
+    WinIo class >> virtualAllocAddr: a size: s type: t protect: p [
+        <primitive: FFI function: #VirtualAlloc ret: #g args: #(g g g g)>
+    ]
+    WinIo class >> allocPage [ ^self virtualAllocAddr: 0 size: 4096 type: 12288 protect: 4 ]
+
+    "UCRT file I/O (resolver finds _open, _creat, ... via the underscore
+     alias). open is the 2-arg no-mode form: NEVER pass O_CREAT through it
+     — the third (mode) argument is variadic; create with creat: instead."
+    WinIo class >> openPath: p flags: f [
+        <primitive: FFI function: #open ret: #g args: #(g g)>
+    ]
+    WinIo class >> creatPath: p mode: m [
+        <primitive: FFI function: #creat ret: #g args: #(g g)>
+    ]
+    "_setmode(fd, _O_BINARY=32768): byte-exact I/O — the CRT defaults to
+     text mode, which rewrites 0x0A on the way through."
+    WinIo class >> setmodeFd: fd mode: m [
+        <primitive: FFI function: #setmode ret: #g args: #(g g)>
+    ]
+    WinIo class >> read: fd into: b count: n [
+        <primitive: FFI function: #read ret: #g args: #(g g g)>
+    ]
+    WinIo class >> write: fd from: b count: n [
+        <primitive: FFI function: #write ret: #g args: #(g g g)>
+    ]
+    WinIo class >> close: fd [
+        <primitive: FFI function: #close ret: #g args: #(g)>
+    ]
+    "_lseeki64 — the 64-bit-offset seek (plain _lseek returns a 32-bit
+     long on Windows)."
+    WinIo class >> lseekFd: fd offset: o whence: w [
+        <primitive: FFI function: #lseeki64 ret: #g args: #(g g g)>
+    ]
+    WinIo class >> unlinkPath: p [
+        <primitive: FFI function: #unlink ret: #g args: #(g)>
+    ]
+    "errno lives behind _errno() — a 0-arg function answering int*, the
+     exact shape of Darwin's __error() that Posix errno composes."
+    WinIo class >> errnoAddress [
+        <primitive: FFI function: #errno ret: #g args: #()>
+    ]
+    WinIo class >> errno [
+        | a |
+        a := Alien forAddress: self errnoAddress size: 4.
+        ^(a byteAt: 1) + ((a byteAt: 2) * 256)
+            + ((a byteAt: 3) * 65536) + ((a byteAt: 4) * 16777216)
+    ]
+
+    "kernel32: temp directory (so the round-trip file never lands in the
+     repo checkout), plus the GetLastError pair for the discipline test."
+    WinIo class >> tempPathMax: n into: buf [
+        <primitive: FFI function: #GetTempPathA ret: #g args: #(g g)>
+    ]
+    WinIo class >> closeHandle: h [
+        <primitive: FFI function: #CloseHandle ret: #g args: #(g)>
+    ]
+    WinIo class >> getLastError [
+        <primitive: FFI function: #GetLastError ret: #g args: #()>
+    ]
+
+    "── constants: UCRT values, NOT Darwin's (O_CREAT is 256 here, 512
+     there; O_BINARY has no Darwin counterpart at all) ──"
+    WinIo class >> oRdOnly [ ^0 ]
+    WinIo class >> oWrOnly [ ^1 ]
+    WinIo class >> oBinary [ ^32768 ]
+    WinIo class >> seekSet [ ^0 ]
+    WinIo class >> seekEnd [ ^2 ]
+    WinIo class >> defaultMode [ ^384 ]     "_S_IREAD|_S_IWRITE = 0x180"
+
+    "Narrow a C-`int` return read raw from x0 (this file's header Δ: the
+     UCRT zero-extends via w-register writes, so -1 reads as 4294967295)."
+    WinIo class >> i32: v [
+        ^v >= 2147483648 ifTrue: [ v - 4294967296 ] ifFalse: [ v ]
+    ]
+]
+
+"── NativeBuffer reopened: a VirtualAlloc-backed page ─────────────────────
+ NativeBuffer's own initPage rides Posix mmapPage, which cannot resolve on
+ Windows; winPage is the twin constructor over kernel32, reusing every
+ accessor (byteAt:, u16At:, u32At:, i64At:, zero:at:) unchanged — the
+ reopen-after-defining pattern world/61 itself uses for Posix."
+Object subclass: NativeBuffer [
+    NativeBuffer class >> winPage [ ^self basicNew initWinPage ]
+    initWinPage [
+        addr := WinIo allocPage.
+        alien := Alien forAddress: addr size: 4096.
+        ^self
+    ]
+]
+
+TestCase subclass: WinIoTests [
+    runAll [
+        self runTest: #testCreateWriteReadRoundTrip do: [ self testCreateWriteReadRoundTrip ].
+        self runTest: #testLseekEndReportsSize do: [ self testLseekEndReportsSize ].
+        self runTest: #testOpenMissingFileFailsWithErrno do: [ self testOpenMissingFileFailsWithErrno ].
+        self runTest: #testUnlinkRemoves do: [ self testUnlinkRemoves ].
+        self runTest: #testGetLastErrorDiscipline do: [ self testGetLastErrorDiscipline ].
+    ]
+
+    "Stage the temp-dir path + `name` as a NUL-terminated C string at the
+     buffer head; answer the staged path's address. GetTempPathA answers
+     the copied LENGTH (trailing backslash included) and needs no
+     GetLastError on this success path."
+    stagePath: name in: buf [
+        | len |
+        len := WinIo tempPathMax: 300 into: buf address.
+        self assert: len > 0.
+        self assert: len < 300.
+        1 to: name size do: [ :i |
+            buf byteAt: len + i - 1 put: (name basicByteAt: i) ].
+        buf byteAt: len + name size put: 0.
+        ^buf address
+    ]
+
+    "create -> write 5 bytes (0x0A included: binary mode must not rewrite
+     it) -> close -> open -> read back -> byte-exact compare."
+    testCreateWriteReadRoundTrip [
+        | buf path fd wrote got |
+        buf := NativeBuffer winPage.
+        path := self stagePath: 'macvm_p5_winio.tmp' in: buf.
+        fd := WinIo i32: (WinIo creatPath: path mode: WinIo defaultMode).
+        self assert: fd >= 0.
+        WinIo setmodeFd: fd mode: WinIo oBinary.
+        buf byteAt: 512 put: 87.    "W"
+        buf byteAt: 513 put: 73.    "I"
+        buf byteAt: 514 put: 78.    "N"
+        buf byteAt: 515 put: 10.    "LF — the byte text mode would rewrite"
+        buf byteAt: 516 put: 90.    "Z"
+        wrote := WinIo write: fd from: buf address + 512 count: 5.
+        self assert: wrote = 5.
+        self assert: (WinIo close: fd) = 0.
+
+        fd := WinIo i32: (WinIo openPath: path flags: WinIo oRdOnly).
+        self assert: fd >= 0.
+        WinIo setmodeFd: fd mode: WinIo oBinary.
+        got := WinIo read: fd into: buf address + 600 count: 5.
+        self assert: got = 5.
+        self assert: (buf byteAt: 600) = 87.
+        self assert: (buf byteAt: 601) = 73.
+        self assert: (buf byteAt: 602) = 78.
+        self assert: (buf byteAt: 603) = 10.
+        self assert: (buf byteAt: 604) = 90.
+        WinIo close: fd.
+        WinIo unlinkPath: (self stagePath: 'macvm_p5_winio.tmp' in: buf).
+    ]
+
+    testLseekEndReportsSize [
+        | buf path fd |
+        buf := NativeBuffer winPage.
+        path := self stagePath: 'macvm_p5_winio2.tmp' in: buf.
+        fd := WinIo i32: (WinIo creatPath: path mode: WinIo defaultMode).
+        self assert: fd >= 0.
+        WinIo setmodeFd: fd mode: WinIo oBinary.
+        buf byteAt: 512 put: 65. buf byteAt: 513 put: 66. buf byteAt: 514 put: 67.
+        self assert: (WinIo write: fd from: buf address + 512 count: 3) = 3.
+        self assert: (WinIo lseekFd: fd offset: 0 whence: WinIo seekEnd) = 3.
+        "seek back and re-read one byte to prove the cursor really moved"
+        self assert: (WinIo lseekFd: fd offset: 1 whence: WinIo seekSet) = 1.
+        self assert: (WinIo read: fd into: buf address + 700 count: 1) = 1.
+        self assert: (buf byteAt: 700) = 66.
+        WinIo close: fd.
+        WinIo unlinkPath: (self stagePath: 'macvm_p5_winio2.tmp' in: buf).
+    ]
+
+    "A missing file answers -1 and errno = ENOENT (2) — negative returns
+     and the errno channel both cross the FFI, the twin of PosixIoTests'
+     testNegativeReturnComesThrough/testErrnoReadable pair. (close(-1) is
+     deliberately NOT the probe here: the UCRT routes an invalid fd
+     through its parameter-validation machinery, which is a different
+     contract than Darwin's EBADF return.)"
+    testOpenMissingFileFailsWithErrno [
+        | buf path fd |
+        buf := NativeBuffer winPage.
+        path := self stagePath: 'macvm_p5_winio_no_such_file.tmp' in: buf.
+        WinIo unlinkPath: path.
+        fd := WinIo i32: (WinIo openPath: path flags: WinIo oRdOnly).
+        self assert: fd = -1.
+        self assert: WinIo errno = 2.
+    ]
+
+    testUnlinkRemoves [
+        | buf path fd |
+        buf := NativeBuffer winPage.
+        path := self stagePath: 'macvm_p5_winio3.tmp' in: buf.
+        fd := WinIo i32: (WinIo creatPath: path mode: WinIo defaultMode).
+        self assert: fd >= 0.
+        WinIo close: fd.
+        self assert: (WinIo unlinkPath: path) = 0.
+        self assert: (WinIo i32: (WinIo openPath: path flags: WinIo oRdOnly)) = -1.
+    ]
+
+    "The v1 GetLastError discipline end to end from guest code: warm both
+     bindings (first-call resolution performs Win32 calls that reset the
+     per-thread error), fail CloseHandle(NULL), read 6 =
+     ERROR_INVALID_HANDLE as the immediately-next FFI call."
+    testGetLastErrorDiscipline [
+        WinIo getLastError.
+        self assert: (WinIo closeHandle: 0) = 0.
+        self assert: WinIo getLastError = 6.
+    ]
+]
