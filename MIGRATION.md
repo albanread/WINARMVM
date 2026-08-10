@@ -33,6 +33,40 @@ AArch64-Windows glue: an icache-flushing JIT loader, a VEH that decodes A64
 `brk`, and an AArch64 setjmp/longjmp. Rough shape: **~95 % carries; ~5 % is
 new code, and most of that is a port-of-a-port.**
 
+> **Δ (2026-08-10, the author's revision of the thesis itself — read this
+> before trusting any "unchanged" cell below).** The paragraph above
+> over-claims, and the author has corrected it directly: *"This is a
+> different system. We can't expect the entire Mac compiler to just work
+> here — that was an incorrect expectation in the first place. It is a good
+> starting point; we are using it to create the Windows compiler. Different
+> OS, different chip."*
+>
+> The revised thesis: **WINARM is the Windows-ARM64 compiler being created
+> from the Mac one as seed**, not a mirror obligated to stay source-identical
+> to it. "The ISA carries over" bought the first 95 % in a day — P0–P4's
+> measured results stand — but the remaining failures live exactly where the
+> two systems genuinely differ, and both axes are real and already measured:
+> the **OS** (Mach exception delivery vs the VEH; `mmap(MAP_JIT)` vs
+> `VirtualAlloc`; signal `ucontext` vs `CONTEXT`) and the **chip** (Qualcomm
+> Oryon vs Apple Silicon — DIC/IDC cache-coherency behavior differs, and
+> `CTR_EL0` is not even readable at EL0 here).
+>
+> Consequences, binding from this date:
+> - Windows-specific changes in `src/compiler/`, `src/runtime/deopt.rs`, and
+>   the trap/materializer contract are **legitimate work-product**, not
+>   contamination. Divergence is recorded (`// WINARM:` + rationale), never
+>   smuggled.
+> - §2's source-of-truth rule is demoted from invariant to convenience:
+>   shared-file identity with MACVM is kept **while it costs nothing**, and
+>   abandoned deliberately where this system needs different code.
+>   Cherry-picking to MACVM becomes selective, case-by-case — not an assumed
+>   bidirectional flow.
+> - "The Mac passes this test" establishes what the *Mac system* does. It is
+>   evidence about a different machine, not an arbitration of correctness
+>   here — the first two casualties of the old framing were the deopt
+>   divergences being mis-filed as "mainline defects" on source-identity
+>   grounds while the Mac demonstrably runs clean.
+
 ---
 
 ## 1. What this port is NOT (the WINVM contrast)
@@ -71,12 +105,21 @@ impossible here (one ISA end to end) or already pinned by WINVM's tests.
 | Trap layer (VEH for `brk`) | **NEW** glue over existing pieces (§3.2) | VEH shape from WINVM + `decode_deopt_brk` from this repo |
 | Non-unwinding setjmp/longjmp | **NEW** AArch64 `global_asm!` twin (§3.3) | ~60 instructions |
 
-**Source-of-truth rule (binding).** WINVM was seeded 2026-07-21 and its copies
-of shared files are **stale** (this repo carries the Aug 2026 regalloc/codegen
+**Source-of-truth rule (amended 2026-08-10 — see the thesis Δ above).** The
+WINVM half stands unchanged: WINVM was seeded 2026-07-21 and its copies of
+shared files are **stale** (this repo carries the Aug 2026 regalloc/codegen
 gains). Never overwrite a shared file with WINVM's copy — port WINVM's
 **Windows-specific additions** over as patches onto current files. When a
 WINVM file is Windows-only (`winkb.rs`, `shell/win.rs`, `native_windows.rs`
 as a template), taking it wholesale is fine.
+
+The MACVM half is **demoted from invariant to default**: identity with MACVM
+is the starting posture, kept while it costs nothing — but this repo is
+creating the Windows compiler, and where this OS or this silicon needs
+different code (delivery contracts, deopt materialization, memory-model
+assumptions), the divergence is made here, marked, and explained. MACVM
+remains the reference for *intent*; it is no longer the arbiter of
+*correctness on this machine*.
 
 ## 3. The five seams
 
