@@ -748,16 +748,50 @@ impl Image {
                 stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
             it.collect::<rusqlite::Result<Vec<_>>>()?
         };
+        if pending.is_empty() {
+            return Ok(0);
+        }
+        // WINARM (P4): ONE transaction and ONE prepared statement for the
+        // whole backfill.
+        //
+        // This is not a micro-optimisation. Outside an explicit transaction
+        // SQLite commits every `INSERT` separately, and a commit is an fsync:
+        // the world's ~1,300 methods send tens of thousands of selectors, so
+        // the unbatched form asks the OS to flush the DB to disk tens of
+        // thousands of times. On macOS that is merely slow (fsync there does
+        // not force a device-level flush); on Windows/NTFS — with a real
+        // flush per commit, and a virus scanner watching the file — the same
+        // loop takes minutes, which is indistinguishable from a hang.
+        //
+        // That is exactly how it presented in WINVM: the GUI's VM worker
+        // calls this on the boot path (`vm_host::open_or_seed_image`), so the
+        // whole environment appeared to start and then never serve a single
+        // request. Batching makes it one commit, and helps macOS too.
         let mut inserted = 0usize;
-        for (version_id, source) in pending {
-            for selector in crate::mst::sent_selectors(&source) {
-                inserted += self.conn.execute(
-                    "INSERT OR IGNORE INTO method_sends (method_version_id, selector) VALUES (?1, ?2)",
-                    params![version_id, selector],
-                )?;
+        self.conn.execute_batch("BEGIN")?;
+        let result = (|| -> rusqlite::Result<()> {
+            let mut stmt = self.conn.prepare(
+                "INSERT OR IGNORE INTO method_sends (method_version_id, selector) VALUES (?1, ?2)",
+            )?;
+            for (version_id, source) in pending {
+                for selector in crate::mst::sent_selectors(&source) {
+                    inserted += stmt.execute(params![version_id, selector])?;
+                }
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(inserted)
+            }
+            Err(e) => {
+                // Leave no open transaction behind on this connection — a
+                // later write would otherwise fail or silently join it.
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(e)
             }
         }
-        Ok(inserted)
     }
 
     /// Whether a method is live / a deletion tombstone / absent
@@ -1763,6 +1797,135 @@ mod tests {
         )
         .unwrap();
         img
+    }
+
+    /// WINARM (P4) — the NTFS boot-path stall, pinned by counting COMMITs.
+    ///
+    /// `backfill_method_sends` used to run one `INSERT` per (method, selector)
+    /// edge outside any transaction, and SQLite commits every statement that
+    /// is not in one. A commit is an fsync; the real world has ~16,400 send
+    /// edges. On macOS that is merely slow (fsync there does not force a
+    /// device-level flush); on Windows/NTFS it took MINUTES — and because the
+    /// GUI's VM worker calls this on its boot path, the whole environment
+    /// appeared to start and then never serve a request.
+    ///
+    /// So the property under test is not "it is fast" (a timing assertion
+    /// would be flaky) but the thing that made it slow: how many times it
+    /// commits. One transaction means exactly one, no matter how many edges.
+    /// An image with methods but no send index — rows in `method_versions`,
+    /// nothing in `method_sends`. This is not a contrived state: `add_method`
+    /// is the BULK SEED path (it writes `method_versions` directly and does
+    /// not index), which is exactly why `import_world_dir` calls
+    /// `backfill_method_sends` once after seeding (`import.rs`). The
+    /// interactive edit paths go through `insert_method_version`, which does
+    /// index as it writes.
+    ///
+    /// The `DELETE` is belt-and-braces: it keeps the fixture in the
+    /// un-indexed state this test needs even if `add_method` ever starts
+    /// indexing too.
+    fn seeded_without_send_index() -> Image {
+        let img = seeded();
+        img.add_method(
+            "Collection",
+            Side::Instance,
+            "report",
+            "printing",
+            "report\n\t| s |\n\ts := WriteStream on: String new.\n\ts nextPutAll: self printString.\n\t^s contents",
+        )
+        .unwrap();
+        img.add_method(
+            "Collection",
+            Side::Instance,
+            "sum",
+            "math",
+            "sum\n\t^self inject: 0 into: [:a :b | a + b]",
+        )
+        .unwrap();
+
+        img.conn.execute("DELETE FROM method_sends", []).unwrap();
+        img
+    }
+
+    fn send_edge_count(img: &Image) -> usize {
+        img.conn
+            .query_row("SELECT COUNT(*) FROM method_sends", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap() as usize
+    }
+
+    #[test]
+    fn backfill_single_transaction() {
+        let img = seeded_without_send_index();
+        assert_eq!(send_edge_count(&img), 0, "fixture must start un-indexed");
+
+        // Count only the backfill's commits — the fixture's own writes are done.
+        let commits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        {
+            let c = commits.clone();
+            img.conn.commit_hook(Some(move || {
+                c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                false // false == allow the commit
+            }));
+        }
+
+        let inserted = img.backfill_method_sends().unwrap();
+        img.conn.commit_hook(None::<fn() -> bool>);
+
+        // If the fixture ever stops producing several edges this test has
+        // stopped proving anything, so assert that too rather than assume it.
+        assert!(
+            inserted > 1,
+            "fixture must produce more than one send edge for this test to mean anything, got {inserted}"
+        );
+        assert_eq!(
+            send_edge_count(&img),
+            inserted,
+            "every edge the backfill reported must actually be committed — a \
+             rolled-back transaction would report work it did not persist"
+        );
+        let commits = commits.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            commits, 1,
+            "the whole backfill must be ONE transaction — {inserted} edges committed \
+             {commits} times means it is back to one fsync per edge"
+        );
+
+        // And it must leave no transaction open behind it, or a later write on
+        // this connection would silently join it.
+        assert!(
+            img.conn.is_autocommit(),
+            "backfill must not leave an open transaction on the connection"
+        );
+    }
+
+    /// The backfill is documented as idempotent — re-running it inserts
+    /// nothing, because every live method version now has rows. The early
+    /// return also means a no-op run opens no transaction at all, which is
+    /// what keeps it cheap on the GUI's boot path once the image is current.
+    #[test]
+    fn backfill_is_idempotent_and_opens_no_transaction_when_there_is_nothing_to_do() {
+        let img = seeded_without_send_index();
+        assert!(img.backfill_method_sends().unwrap() > 0);
+
+        let commits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        {
+            let c = commits.clone();
+            img.conn.commit_hook(Some(move || {
+                c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                false
+            }));
+        }
+        let second = img.backfill_method_sends().unwrap();
+        img.conn.commit_hook(None::<fn() -> bool>);
+
+        assert_eq!(second, 0, "a second backfill must insert nothing");
+        assert_eq!(
+            commits.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "with nothing pending the backfill must not commit at all"
+        );
+        assert!(img.conn.is_autocommit());
     }
 
     #[test]

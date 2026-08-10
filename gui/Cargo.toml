@@ -11,13 +11,8 @@ name = "macvm-gui"
 path = "src/main.rs"
 
 [dependencies]
-# Deliberately zero external crates for the Cocoa/AppKit/WebKit bridge: a
-# minimal dlopen/dlsym/objc_msgSend layer (src/objc.rs), the same proven,
-# dependency-free approach already used in the sibling MacModula2 project
-# (src/newm2-runtime/src/objc.rs, shipping in MacM2 IDE.app) instead of the
-# objc2/objc2-app-kit/objc2-web-kit crate ecosystem PLAN.md's D-G2 first
-# considered — same "Rust owns the shell, no Swift/Xcode target" outcome,
-# fewer moving parts, no external API-surface risk from an evolving crate.
+# The web assets, the page pipeline, and the VM worker are all portable; only
+# the shell (src/shell/) is platform-specific — see src/shell/mod.rs.
 #
 # macvm-mock-vm still backs the Browser/Canvas views (S21 step 3: only the
 # Workspace's Doit/WorkspacePrintIt moved to the real VmHandle below — see
@@ -31,14 +26,89 @@ image_store = { path = "../image_store" }
 # The real VM (SPEC A18/§16.2) — VmHandle/eval/TranscriptSink for the
 # Workspace's Doit/WorkspacePrintIt (S21 step 3).
 macvm = { path = ".." }
-# MacGamePane game engine (docs/gamepane_design.md). The GUI crate owns AppKit,
-# so the native Metal game pane is built in here. Path dep to the sibling repo
-# for the M0 coupling proof (a vendor-vs-path decision is deferred — §6). `metal`
-# is a NEW MACVM dependency, pinned to 0.33 to match MacGamePane's boundary types
-# (metal::Device / CommandBufferRef / TextureRef) so the handles type-match.
-macgamepane-graphics = { path = "../../MacGamePane/graphics" }
-macgamepane-audio = { path = "../../MacGamePane/audio" }
-metal = "0.33"
-# CGSize for CAMetalLayer::set_drawable_size (same version the graphics crate
-# and the metal crate already use).
-core-graphics-types = "0.2"
+
+# ── macOS shell (src/shell/mac.rs) ─────────────────────────────────────────
+# Deliberately zero external crates for the Cocoa/AppKit/WebKit bridge: a
+# minimal dlopen/dlsym/objc_msgSend layer (src/objc.rs), the same proven,
+# dependency-free approach already used in the sibling MacModula2 project
+# (src/newm2-runtime/src/objc.rs, shipping in MacM2 IDE.app) instead of the
+# objc2/objc2-app-kit/objc2-web-kit crate ecosystem PLAN.md's D-G2 first
+# considered — same "Rust owns the shell, no Swift/Xcode target" outcome,
+# fewer moving parts, no external API-surface risk from an evolving crate.
+
+# ── Windows shell (src/shell/win.rs) — WINARM (P4) ─────────────────────────
+# WebView2 (MIGRATION.md §2 / risk table) plus hand-rolled Win32 for the
+# window, menu bar, timers, and the worker->UI-thread wakeup.
+#
+# `webview2-com` 0.39 and `windows` 0.62 are a MATCHED PAIR — webview2-com-sys
+# depends on exactly this `windows` version, so the COM interface types are
+# the same types. Bumping one without the other produces type mismatches on
+# every `ICoreWebView2*` handle, so they move together or not at all.
+#
+# Both compile for `aarch64-pc-windows-msvc`: COM vtables are arch-neutral
+# Rust over the windows crate's own aarch64 implementations, and WebView2's
+# Evergreen runtime is native ARM64 on Win11-ARM (verify with the PE machine
+# type — `AA64` — not the `Program Files (x86)` install path, which is a
+# naming convention and says nothing about architecture).
+[target.'cfg(windows)'.dependencies]
+webview2-com = "0.39"
+
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.62"
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_System_DataExchange",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+]
+
+[features]
+default = []
+# The native Metal game pane (docs/gamepane_design.md) and the game demos —
+# macOS-only, and NOT buildable from this checkout as it stands.
+#
+# `MIGRATION.md` §1 defers the game demos on Windows (D3D11/XAudio2 would be
+# their counterpart), so the Windows port does not need them; `src/game_pane.rs`
+# and its call sites are gated on this feature and simply compile out.
+#
+# Re-enabling it on macOS takes two steps, because a cargo path dependency's
+# manifest must be READABLE for the workspace to resolve *at all* — even when
+# the dependency is `optional` and target-gated, and even when building for
+# another platform. Leaving them declared here is therefore not a no-op on
+# Windows: it breaks `cargo build` for the whole workspace, not just this
+# crate. That is exactly why P0 had to drop `gui` from the workspace members
+# list in the first place.
+#
+# WINARM (P4) — CORRECTION to the note P0 left. The reason is NOT that
+# MacGamePane is absent from this machine: a full checkout is sitting at
+# `WINARM/MacGamePane/` (graphics, audio, objc). What was actually broken is
+# the PATH: `../../MacGamePane/...` resolves from `gui/` to
+# `C:\projects\MacGamePane`, one level above this repo, and *that* does not
+# exist. In this layout the path wants to be `../MacGamePane/...`.
+#
+# Fixing the path would still not make the feature buildable here, which is
+# why it stays off: `macgamepane-graphics` depends on `metal`, so the game
+# pane is Metal/AppKit and macOS-only by construction, exactly as
+# `MIGRATION.md` §1 assumes. The path correction matters only for whoever
+# restores this on a Mac — following the old note verbatim would fail again.
+#
+#   1. Restore the dependencies. Check the relative path against the actual
+#      MacGamePane location first (in THIS repo's layout it is
+#      `../MacGamePane`, not `../../MacGamePane`):
+#        [target.'cfg(target_os = "macos")'.dependencies]
+#        macgamepane-graphics  = { path = "../MacGamePane/graphics", optional = true }
+#        macgamepane-audio     = { path = "../MacGamePane/audio",    optional = true }
+#        metal                 = { version = "0.33", optional = true }   # pinned to
+#        core-graphics-types   = { version = "0.2",  optional = true }   # MacGamePane's
+#      (`metal` is pinned to 0.33 to match MacGamePane's boundary types —
+#       metal::Device / CommandBufferRef / TextureRef — so the handles type-match.
+#       `core-graphics-types` supplies CGSize for CAMetalLayer::set_drawable_size.)
+#   2. Add them to this feature:
+#        gamepane = ["dep:macgamepane-graphics", "dep:macgamepane-audio",
+#                    "dep:metal", "dep:core-graphics-types"]
+gamepane = []

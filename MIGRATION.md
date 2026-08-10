@@ -65,7 +65,7 @@ impossible here (one ISA end to end) or already pinned by WINVM's tests.
 | `src/runtime/probe.rs` stack-bounds read | WINVM (this repo's uses `pthread_get_stackaddr_np`/`pthread_get_stacksize_np`, probe.rs:662) | take WINVM's Windows path |
 | `build.rs` | WINVM (gates the objc-shim compile to macOS) | take verbatim |
 | `src/runtime/winkb.rs` + `[target.'cfg(windows)'.dependencies] rusqlite` | WINVM | take; **re-derive its ABI classification for ARM64** (§3.5) |
-| `gui/src/shell/{mod,mac,win}.rs` seam | WINVM (M6) | re-extract on current gui code (this repo's `gui/` has NO shell seam and is newer than WINVM's — Monitor tab, debugger panes) |
+| `gui/src/shell/{mod,mac,win}.rs` seam | WINVM (M6) | **done in P4.** This repo's `gui/` had no shell seam, but it was NOT meaningfully newer than WINVM's: `assets/`, `browser_render.rs`, `canvas_render.rs`, `editor_render.rs`, `workspace_render.rs` and `objc.rs` are byte-identical, `reference/` differs only by CRLF, and `vm_host.rs`/`preprocess.rs` differ *only* by WINVM's own seam edits. The Monitor tab and labeled debugger panes live in **`cocoa_gui/`**, a different crate that stays out (row below). So the seam ported nearly wholesale; the only genuine reconciliation was the macOS-only game-pane demos (Galaxigans, CocoaPad, parallel/spawned Mandel) landing main-side behind the `gamepane` feature. |
 | Cocoa bridge, `cocoa_gui/`, `abc_player/`, MacGamePane, AppleScript | this repo, **gated out** on Windows | WINVM's clean-fail stub pattern |
 | JIT loader (`native_*`), W^X + icache | **NEW** — `native_winarm64.rs` (§3.1) | ~250 LoC, shaped like both siblings |
 | Trap layer (VEH for `brk`) | **NEW** glue over existing pieces (§3.2) | VEH shape from WINVM + `decode_deopt_brk` from this repo |

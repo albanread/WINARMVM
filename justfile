@@ -178,6 +178,40 @@ gate-p03: gate-p02
     cargo build --release
     just diff-p03
 
+# P4 (tests_p04.md) — the GUI shell seam. HEADLESS PARTS ONLY: items 4-9 of
+# that test plan are an on-screen checklist a person has to run and observe,
+# and this recipe deliberately does not pretend to cover them.
+#
+# The seam IS the deliverable, so item 2's grep is the load-bearing check
+# here — not a lint. `main.rs` owning even one platform call means the next
+# platform's shell has to re-derive the boundary instead of implementing it.
+gate-p04: gate-p03
+    # item 2a: main.rs contains ZERO platform calls. Comment-blind (the same
+    # discipline gate-p03's marker grep uses): the file legitimately *names*
+    # these APIs in comments explaining which shell owns what, so strip `//`
+    # to the end of line before matching, and fail if any CODE hit survives.
+    #
+    # `! grep -q` — grep exits 1 when it finds nothing, which is success here.
+    ! sed -e 's://.*::' gui/src/main.rs | grep -qE 'objc_msgSend|objc::|windows::|webview2|\bsel\('
+    # item 2b: and nothing outside gui/src/shell/ reaches for a platform crate
+    # either. `gui/src/objc.rs` is the named exclusion — it IS the macOS
+    # bridge the mac shell is built on. (`game_pane.rs` is also AppKit code,
+    # but it is a macOS-only, off-by-default feature module that talks to that
+    # bridge rather than to a platform crate, so these patterns correctly do
+    # not fire on it. The point of this gate is the PORTABLE files.)
+    ! find gui/src -name '*.rs' -not -path 'gui/src/shell/*' -not -name 'objc.rs' \
+        -exec sed -e 's://.*::' {} + | grep -qE 'objc_msgSend|windows::|webview2_com'
+    # item 1: the Windows shell compiles and the gui unit suite is green.
+    # Includes item 2's `preprocess` URL-form tests, item 3's waker test, the
+    # shim-shape test and the eval_js fire-and-forget shape test.
+    cargo build -p macvm-gui
+    cargo test -p macvm-gui
+    # The core must not move. P3 finished at 1065 passed / 0 failed / 15
+    # ignored and this sprint touches image_store (the backfill batching), so
+    # re-prove it rather than assume it.
+    cargo test --no-fail-fast -- --skip mandelvm
+    cargo test -p image_store
+
 # P3 (tests_p03.md "Stress/negative tests") — the FLAKY-CATCHER. The
 # combined three-mode run, three consecutive times, because WINVM's
 # card-boundary bug was found by run-to-run variance and not by any single

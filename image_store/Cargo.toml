@@ -21,7 +21,14 @@ path = "src/bin/import_world.rs"
 # stance, just via a normal crates.io dependency rather than the GUI
 # crate's zero-dependency Cocoa bridge (that one avoids objc2 specifically
 # for its evolving macro API, not external crates on principle).
-rusqlite = { version = "0.31", features = ["bundled"] }
+#
+# WINARM (P4): `hooks` adds `Connection::commit_hook`, which is pure Rust over
+# an existing sqlite3 C entry point (no change to the bundled build). It is
+# here for ONE reason: `backfill_single_transaction` counts actual COMMITs, so
+# the "one transaction, not one per send-edge" fix is pinned by observing the
+# thing that was slow rather than by reading the code. Nothing outside this
+# crate uses rusqlite, so this feature cannot reach the VM's own build.
+rusqlite = { version = "0.31", features = ["bundled", "hooks"] }
 # world_boot.rs (moved from gui/, docs/package_aware_editing_design.md M2):
 # replaying a stored image into a VmHandle needs the VM type it replays
 # into. The constraint only ever ran the other direction — macvm itself
