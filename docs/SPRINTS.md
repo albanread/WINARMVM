@@ -423,6 +423,33 @@ P5 branches after P2 and is independent of P3/P4. Mac-only tracks (CG, S20's
 Cocoa tier, gamepane, abc_player) are **gated out, not ported** — each gets a
 clean-fail Windows stub, WINVM's pattern.
 
+## Phase WG — the Windows-native environment (parallel, after P5)
+
+The Windows twin of Phase CG: the macVM environment as a **native Win32
+window whose UI is written in Smalltalk** — `WinRef` handles over the
+winkb-resolved FFI, a WndProc door dispatching messages into a UI worker VM
+as top-level entries, view models shared with the web GUI, loaded as the
+`winui.list` conditional world layer users can browse and edit live.
+Design of record (incl. the gallery review it answers):
+[`win_gui_design.md`](win_gui_design.md). Reference gallery:
+`MACVM/docs/gallery/`. P2's trap/recovery layer was this track's CG0 and
+is already landed; **P5's resolver is the gate to WG0**.
+
+| Sprint | Size | Needs | Gate (headless; on-screen = snap verb) |
+|---|---|---|---|
+| WG0 FFI probe | `S` | P5 resolver | user32 round-trip from a Smalltalk doit (`RegisterClassW`/`CreateWindowExW`/`DestroyWindow`); `WNDCLASSW` built via Alien + winkb struct offsets |
+| WG1 window + loop | `M` | WG0 | Mica + dark-titlebar top-level window; message loop owned by the hosted UI VM on main; `macvm-winui` bin; snap verb captures PNG |
+| WG2 the WndProc door | `L` | WG1 | messages dispatch into `WinShell` as top-level entries; raising handler → `DefWindowProc` + next message dispatches; forced AV in a handler recovers (P2 layer); door latency measured |
+| WG3 controls + layout | `M` | WG2 | Smalltalk-created common controls with notifications through the door; `WM_SIZE` layout in Smalltalk; visual-styles v6 + PerMonitorV2 DPI |
+| WG4 shell chrome | `M` | WG3 | view bar (Fluent glyphs + labels + accent underline), lazy views, docked Transcript, live metrics cluster, verb enablement by focus |
+| WG5 Workspace + Browser | `L` | WG4 | syntax-coloured Workspace (Ctrl-D/Ctrl-P, ghost line); four-pane Browser on the shared model; Accept persists byte-identically to the web path |
+| WG6 Outliner + Find + Editor | `M` | WG5 | live-reflection tree; Find lands selections in the Browser; File In / Add to World |
+| WG7 Debugger + Monitor | `M` | WG5 | halt loop fronted natively (+F5/F10/F11); Monitor with column priority; primary restart-in-place |
+| WG8 Docs + Canvas + parity | `M` | WG4 | runnable doc examples; GDI-blit Canvas (Mandelbrot + Benchmark Chart); every empty state teaches; `docs/gallery-win/` captured |
+
+Games/sound (D3D11/XAudio2) stay the recorded stretch — the Demos menu
+greys with a reason naming the design doc, never silently.
+
 ---
 
 ## Standing rules
