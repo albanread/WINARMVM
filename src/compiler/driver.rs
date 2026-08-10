@@ -771,18 +771,6 @@ fn compile_method_full(
     version: u8,
     osr_bci: Option<u16>,
 ) -> Option<NmethodId> {
-    // WG3-BISECT (temporary, do not ship): with `MACVM_DBG_NMNAME`, print GC
-    // counters at compile START so the matching NMNAME install line reveals a
-    // compile that straddled a scavenge/full GC (stale resolved literals).
-    #[cfg(debug_assertions)]
-    if std::env::var("MACVM_DBG_NMNAME").is_ok() {
-        eprintln!(
-            "NMSTART scav={} full={} {}",
-            vm.universe.gc_stats.scavenge_count,
-            vm.universe.gc_stats.full_gc_count,
-            selector_string(method),
-        );
-    }
     let elig = if method.is_block() {
         eligibility_detail_block(vm, method)
     } else {
@@ -885,10 +873,6 @@ fn compile_method_full(
             .map(|s| s.as_string())
             .unwrap_or_default();
         if sel == want {
-            // WG3-BISECT (temporary): the bytecode alongside the IR, so a
-            // deopt's resume bci can be read against what re-execution runs.
-            eprintln!("==== BYTECODE {sel} (v{version}) ====");
-            eprintln!("{}", crate::bytecode::disasm::disassemble(&vm.universe, method));
             eprintln!("==== IR {sel} (v{version}) ====");
             for blk in &ir_method.blocks {
                 eprintln!("  block {} @bci{}:", blk.id.0, blk.bci);
@@ -1457,6 +1441,19 @@ fn compile_method_full(
     let (deopt_scopes, deopt_pcdescs) =
         build_deopt_metadata(&ir_method, &regalloc_result, &safepoint_pcs, &emitted_literal_ids);
 
+    // The dynamic-dispatch key `(rcvr_klass, key_selector)` belongs to this
+    // nmethod ONLY if dynamic lookup actually resolves that pair to the
+    // method being compiled. A customized compile of a SUPER-send target
+    // (`Object class>>new` compiled for a subclass metaclass because the
+    // subclass's own `new` override super-sends into it) carries the SAME
+    // pair as the override that dynamic dispatch must reach — installing it
+    // into `by_key` would let ordinary sends resolve the raw super target
+    // and silently bypass the override (the WG3 sub-floor canary's root
+    // cause). Blocks never consult `by_key` (S24 A1 filler keys), so they
+    // pass `true` vacuously.
+    let owns_dynamic_key = method.is_block()
+        || crate::runtime::lookup::lookup_uncached(vm, rcvr_klass, key_selector)
+            .is_some_and(|m| m.oop().raw() == method.oop().raw());
     let mut nm = Nmethod {
         id: NmethodId(0), // overwritten by CodeTable::install
         osr_cold_sends: if osr_bci.is_some() {
@@ -1466,6 +1463,7 @@ fn compile_method_full(
         },
         key_klass: rcvr_klass,
         key_selector,
+        owns_dynamic_key,
         code: h,
         entry_off: 0,
         verified_entry_off,
@@ -1559,33 +1557,7 @@ fn compile_method_full(
     }
     vm.stats.compilations += 1; // S15 A8 tier-balance counter
     let has_osr = nm.osr_map.is_some();
-    // WG3-BISECT (temporary, do not ship): `MACVM_DBG_NMNAME=1` prints an
-    // nm-id -> Class>>selector map line per install, so PROBE ring ids in a
-    // dossier can be named after the fact. Debug builds only.
-    #[cfg(debug_assertions)]
-    let dbg_key = if std::env::var("MACVM_DBG_NMNAME").is_ok() {
-        Some((nm.key_klass, nm.key_selector))
-    } else {
-        None
-    };
     let id = vm.code_table.install(nm);
-    #[cfg(debug_assertions)]
-    if let Some((k, s)) = dbg_key {
-        let name = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            format!(
-                "{}>>{}",
-                crate::runtime::error::name_of(k.name()),
-                s.as_string()
-            )
-        }))
-        .unwrap_or_else(|_| "<unreadable>".into());
-        eprintln!(
-            "NMNAME nm={} v{version} scav={} full={} {name}",
-            id.0,
-            vm.universe.gc_stats.scavenge_count,
-            vm.universe.gc_stats.full_gc_count,
-        );
-    }
     vm.probe_ring
         .push(crate::runtime::vm_state::ProbeEvent::Compile { nm: id.0, version });
     if has_osr {
@@ -1728,7 +1700,7 @@ fn build_deopt_metadata(
                      -- the regalloc pin must span every program position",
                     ir_method.block_closure_vreg,
                 );
-                let root_slots: Vec<_> = (0..n_slots)
+                let root_slots = (0..n_slots)
                     .map(|i| {
                         resolve_frame_loc(
                             ir::VReg(i as u32 + 1),
@@ -1740,9 +1712,6 @@ fn build_deopt_metadata(
                         )
                     })
                     .collect();
-                // WG3-BISECT (temporary): debug copy for the SCOPE dump below.
-                #[cfg(debug_assertions)]
-                let dbg_root_slots = root_slots.clone();
                 let root_method_ix = ir_method
                     .method_pool_ix
                     .expect("a method with a deopt site interned its own method oop");
@@ -1899,19 +1868,6 @@ fn build_deopt_metadata(
                 // sites with the phantom below a send's operands).
                 for &(ix, pool_ix) in &raw.stack_closures {
                     stack[ix as usize] = crate::compiler::scopes::ValueLoc::ElidedClosure(pool_ix);
-                }
-                // WG3-BISECT (temporary, do not ship): with `MACVM_DBG_IR`
-                // matching this selector, print each recorded deopt site's
-                // full contract — bci, kind, reexecute, operand stack locs,
-                // and the root slots — the data the materializer will obey.
-                #[cfg(debug_assertions)]
-                if let Ok(want) = std::env::var("MACVM_DBG_IR") {
-                    if ir_method.selector.as_string() == want {
-                        eprintln!(
-                            "SCOPE bci={} kind={:?} reexec={} stack={:?} slots={:?} recv={:?}",
-                            raw.bci, raw.kind, raw.reexecute, stack, dbg_root_slots, root_receiver
-                        );
-                    }
                 }
                 rec.record_site(
                     sp.pc_off,

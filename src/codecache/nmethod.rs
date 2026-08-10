@@ -295,6 +295,23 @@ pub struct Nmethod {
     /// S12's job; S10 just needs the mechanism in place).
     pub key_klass: KlassOop,
     pub key_selector: SymbolOop,
+    /// Whether this nmethod may answer DYNAMIC dispatch for its
+    /// `(key_klass, key_selector)` pair — i.e. enter `by_key`/`osr_table`.
+    ///
+    /// False for a customized compile whose method is NOT what dynamic
+    /// lookup resolves that pair to: the canonical case is a SUPER-send
+    /// target (`Object class>>new` compiled for a subclass metaclass
+    /// receiver, because the subclass's own `new` override super-sends into
+    /// it). Such a compile carries the SAME `(receiver klass, selector)`
+    /// pair as the override that dynamic dispatch must reach — letting it
+    /// into `by_key` lets ordinary sends resolve the super target and
+    /// silently bypass the override (the WG3 sub-floor canary's root cause:
+    /// `WinLayout new` dispatched `^self basicNew`, skipping `initLayout`,
+    /// and the nil `bands` surfaced as a fatal DNU two frames later). A
+    /// non-owning nmethod stays reachable through its call site's direct id
+    /// link (D4.6's super-aware machinery); it just never answers
+    /// `CodeTable::lookup`.
+    pub owns_dynamic_key: bool,
     pub code: CodeHandle,
     /// `== verified_entry_off` until S11 gives a customized nmethod a
     /// separate unverified entry.
@@ -521,6 +538,7 @@ impl Nmethod {
             // as this module's own private `fake_klass`/`fake_selector`).
             key_klass: unsafe { KlassOop::from_oop_unchecked(Oop::from_raw(0x1000 + MEM_TAG)) },
             key_selector: unsafe { SymbolOop::from_oop_unchecked(Oop::from_raw(0x2000 + MEM_TAG)) },
+            owns_dynamic_key: true,
             code: CodeHandle {
                 base: 0x1000 as *const u8,
                 len: 0x1000,
@@ -626,9 +644,20 @@ impl CodeTable {
             Some(bk) => {
                 self.by_block.insert(bk, id);
             }
-            None => {
+            // A non-owning nmethod (see `Nmethod::owns_dynamic_key` — a
+            // super-send target customized for a receiver klass whose OWN
+            // dynamic lookup of the selector resolves elsewhere) is
+            // installed but never enters `by_key`: its call sites hold its
+            // id directly, and dynamic dispatch must keep resolving the
+            // override.
+            None if self.slots[id.0 as usize]
+                .as_ref()
+                .expect("just installed")
+                .owns_dynamic_key =>
+            {
                 self.by_key.insert(key, id);
             }
+            None => {}
         }
 
         let pos = self.by_addr.partition_point(|&(b, _)| b < base);
@@ -679,6 +708,14 @@ impl CodeTable {
     }
 
     pub fn install_osr(&mut self, k: KlassOop, sel: SymbolOop, bci: u16, id: NmethodId) {
+        // Same gate as `install`/`rehash`: OSR entries are found by
+        // (klass, selector, bci) — the identical aliasing surface `by_key`
+        // has (`owns_dynamic_key`'s own doc).
+        if let Some(nm) = self.slots.get(id.0 as usize).and_then(|s| s.as_ref()) {
+            if !nm.owns_dynamic_key {
+                return;
+            }
+        }
         self.osr_table
             .insert((k.oop().raw(), sel.oop().raw(), bci), id);
     }
@@ -1080,6 +1117,11 @@ impl CodeTable {
                 self.by_block.insert(b.oop().raw(), nm.id);
                 continue;
             }
+            // Same gate as `install`: a non-owning nmethod never re-enters
+            // the dynamic-dispatch maps (`owns_dynamic_key`'s own doc).
+            if !nm.owns_dynamic_key {
+                continue;
+            }
             let key = (nm.key_klass.oop().raw(), nm.key_selector.oop().raw());
             self.by_key.insert(key, nm.id);
             if let Some(m) = &nm.osr_map {
@@ -1208,6 +1250,7 @@ mod tests {
             id: NmethodId(0),
             key_klass,
             key_selector,
+            owns_dynamic_key: true,
             code: CodeHandle {
                 base: base as *const u8,
                 len,
@@ -1602,6 +1645,60 @@ mod tests {
             seen,
             vec![0x1111, 0x2222],
             "NotEntrant: key_klass strong (mark pass MUST visit it)"
+        );
+    }
+
+    /// `owns_dynamic_key: false` (a customized SUPER-send target whose
+    /// `(receiver klass, selector)` pair dynamically resolves to an
+    /// override, not to the compiled method — the WG3 sub-floor canary's
+    /// root cause): installed and reachable by id/pc, but it must never
+    /// answer `lookup` — not at install, and not after a `rehash` (the GC
+    /// path that rebuilds `by_key` from slots). Its `set_not_entrant` must
+    /// also never evict a genuine owner occupying the same key.
+    #[test]
+    fn non_owning_nmethod_never_enters_by_key() {
+        let mut vm = test_vm();
+        let klass = vm.universe.array_klass;
+        let sel = vm.universe.intern(b"aliasedSuperTarget");
+
+        // The super target: same (klass, sel) key, but NOT the dynamic owner.
+        let h1 = vm.code_cache.alloc(32).expect("alloc");
+        let super_target = Nmethod {
+            owns_dynamic_key: false,
+            ..fake_nmethod(klass, sel, h1.base as usize, h1.len)
+        };
+        let super_id = vm.code_table.install(super_target);
+
+        assert_eq!(
+            vm.code_table.lookup(klass, sel),
+            None,
+            "a non-owning nmethod must not answer dynamic lookup"
+        );
+        assert!(
+            vm.code_table.get(super_id).is_some(),
+            "…but it is still installed and reachable by id"
+        );
+
+        // The genuine owner arrives later and takes the key normally.
+        let h2 = vm.code_cache.alloc(32).expect("alloc");
+        let owner = fake_nmethod(klass, sel, h2.base as usize, h2.len);
+        let owner_id = vm.code_table.install(owner);
+        assert_eq!(vm.code_table.lookup(klass, sel), Some(owner_id));
+
+        // rehash (the GC path) must preserve the split.
+        vm.code_table.rehash();
+        assert_eq!(
+            vm.code_table.lookup(klass, sel),
+            Some(owner_id),
+            "rehash must not resurrect the non-owner into by_key"
+        );
+
+        // Invalidating the non-owner must not evict the owner's mapping.
+        vm.code_table.set_not_entrant(super_id);
+        assert_eq!(
+            vm.code_table.lookup(klass, sel),
+            Some(owner_id),
+            "the non-owner's invalidation must leave the owner's key alone"
         );
     }
 

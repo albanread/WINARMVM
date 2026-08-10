@@ -214,6 +214,23 @@ pub fn activate_method(
             // of the process and pinned every benchmark at interpreter speed.
             let sel = crate::oops::wrappers::SymbolOop::try_from(m.selector())
                 .expect("a method's selector is always a Symbol");
+            // Same dispatch-truth gate as the c2i overflow trigger
+            // (`rt_interpret_call`'s own `is_dispatch_truth`, stubs.rs): a
+            // SUPER-dispatched activation runs an ANCESTOR method under the
+            // RECEIVER's klass — `(k, sel)` names the subclass override, not
+            // `m`, and compiling `m` customized under that key poisons every
+            // future normal send of `sel` to a `k` receiver (the WG3
+            // sub-floor canary: `WinLayout new`'s super-send compiled
+            // `Object class>>new` under `(WinLayout class, #new)` and every
+            // later `new` skipped `initLayout`). Declining here mirrors the
+            // c2i arm exactly; `Nmethod::owns_dynamic_key` backstops the
+            // same invariant structurally at install time.
+            let dispatch_truth = crate::runtime::lookup::lookup(vm, k, sel)
+                .is_some_and(|m2| m2.oop().raw() == m.oop().raw());
+            'trigger: {
+                if !dispatch_truth {
+                    break 'trigger; // fall through to plain interpreted activation
+                }
             let existing = vm.code_table.lookup(k, sel).filter(|&id| {
                 vm.code_table
                     .get(id)
@@ -318,6 +335,7 @@ pub fn activate_method(
             }
         }
     }
+            }
 
     match try_primitive(vm, m, argc) {
         PrimitiveOutcome::Result(v) => {

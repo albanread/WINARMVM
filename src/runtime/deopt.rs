@@ -1030,6 +1030,7 @@ pub(crate) mod test_support {
             id: NmethodId(0),
             key_klass: vm.universe.object_klass,
             key_selector: sel_sym,
+            owns_dynamic_key: true,
             code,
             entry_off: 0,
             verified_entry_off: 0,
