@@ -248,6 +248,60 @@ Three obligations this creates, named now rather than discovered:
 it. But the classifier work is P5's and the shape is fixed now, so nothing
 about it is a surprise later.
 
+### 2.4a The message architecture — the door is shallow, the DRAIN does the work
+
+*Added 2026-08-10 on the author's steer ("the Cocoa UI cascades messages and
+has a process handle them on the UI side; it drains the queue every so
+often"), after reading `cocoa_gui/src/view_refresh.rs`, `rebuild.rs` and
+`main.rs::drain_perform`. **This supersedes any reading of WG2 in which a
+handler does real work inline.***
+
+The Cocoa environment does **not** do the work in the callback. It runs two
+layers, and the split is the whole design:
+
+| layer | what it is | what it may do |
+|---|---|---|
+| **the door** | a C6 reverse-dispatch callback — on Windows, WG2's wndproc entry | **record, set a flag, wake the loop, return.** Nothing that allocates a view, queries the database, or calls back into the toolkit. |
+| **the drain** | `drain_perform`, run on the main thread in `NSDefaultRunLoopMode` only — on Windows, a periodic pass off the message loop | service each flag with a **fresh top-level `exec`**, with the VM quiescent and provably *not* inside a callback |
+
+**Why, in the Cocoa authors' own words and their own scars.** A refresh run
+inline in a callback is a *second VM entry nested inside the first* — and
+the work itself (`reloadData`, `addItemWithObjectValue:`) fires more
+data-source callbacks, which are entries too. Two failure modes are
+recorded, and the second is the one that matters:
+
+1. It **silently fails closed** behind the re-entrancy guard — the
+   "browser shows no data" symptom, with nothing in any log.
+2. Once that refresh Smalltalk gets **JIT-compiled**, it *corrupts the
+   tier-link invariant* `walk_frames` asserts (`ENTRY_FRAME_SENTINEL must
+   pair with IntoInterpreter`) — **a hard crash**.
+
+So WG2's depth guard is necessary but is *not* the architecture: it makes
+nesting safe, and the pattern above makes nesting **not happen**. Every
+Cocoa view refresh, the CG9 rebuild, the CG10 demo launch and the modal
+file panels all go through flag-and-drain for exactly this reason. Ours
+must too.
+
+**Above that sits the asynchronous layer** — commitment 2 made concrete:
+the primary VM never touches a handle, it *messages* the UI worker
+(`Worker uiDoit:onReply:` / `uiRequest:args:onReplyTimed:`, the
+`#uiReq`/`#uiReply` envelopes), and those envelopes are drained on the main
+thread in the same pass. That is the "process handling them on the UI side"
+— replies arrive as continuations, not as blocking returns.
+
+**The Windows mapping**, with one genuine difference to design around:
+
+| Cocoa | Windows |
+|---|---|
+| `performSelectorOnMainThread:` / `install_default_mode_drain` | a private `WM_APP+n` posted to the window, plus a low-rate `WM_TIMER` as the heartbeat |
+| `NSDefaultRunLoopMode` only — so a drain never runs mid-tracking or mid-modal | **no direct equivalent: a Windows modal move/size loop and a menu loop pump the queue themselves, so posted messages and `WM_TIMER` DO fire inside them.** Suppress explicitly: set a "tracking" flag on `WM_ENTERSIZEMOVE`/`WM_ENTERMENULOOP`, clear it on `WM_EXITSIZEMOVE`/`WM_EXITMENULOOP`, and make the drain a no-op while it is set (the work coalesces and runs on exit). |
+| the drain is where a rebuild may drop the UI worker's `VmHandle` | same — it is the only point where the VM is provably quiescent |
+
+WG2's measured 8.8 µs door round-trip is *affordable precisely because the
+door stays shallow*. The moment a handler does real work it is no longer
+8.8 µs, and it is no longer safe. **WG3 onward: handlers flag; the drain
+works.**
+
 ### 2.5 What is deliberately different from the Mac
 
 - **Labels under toolbar glyphs** (weakness #1). The Mac may adopt it back.

@@ -440,7 +440,7 @@ is already landed; **P5's resolver is the gate to WG0**.
 | WG0 FFI probe | `S` | P5 resolver | user32 round-trip from a Smalltalk doit (`RegisterClassW`/`CreateWindowExW`/`DestroyWindow`); `WNDCLASSW` built via Alien + winkb struct offsets |
 | WG1 window + loop | `M` | WG0 | Mica + dark-titlebar top-level window; message loop owned by the hosted UI VM on main; `macvm-winui` bin; snap verb captures PNG |
 | WG2 the WndProc door | `L` | WG1 | messages dispatch into `WinShell` as top-level entries; raising handler → `DefWindowProc` + next message dispatches; forced AV in a handler recovers (P2 layer); door latency measured |
-| WG3 controls + layout | `M` | WG2 | Smalltalk-created common controls with notifications through the door; `WM_SIZE` layout in Smalltalk; visual-styles v6 + PerMonitorV2 DPI |
+| WG3 controls + layout | `M` | WG2 | **the flag-and-drain pass first** (§2.4a), then Smalltalk-created common controls whose notifications FLAG from the door and are serviced by the drain; `WM_SIZE` layout in Smalltalk; tracking-suppression across `WM_ENTERSIZEMOVE`/`WM_ENTERMENULOOP`; visual-styles v6 + PerMonitorV2 DPI 
 | WG4 shell chrome | `M` | WG3 | view bar (Fluent glyphs + labels + accent underline), lazy views, docked Transcript, live metrics cluster, verb enablement by focus |
 | WG5 Workspace + Browser | `L` | WG4 | syntax-coloured Workspace (Ctrl-D/Ctrl-P, ghost line); four-pane Browser on the shared model; Accept persists byte-identically to the web path |
 | WG6 Outliner + Find + Editor | `M` | WG5 | live-reflection tree; Find lands selections in the Browser; File In / Add to World |
