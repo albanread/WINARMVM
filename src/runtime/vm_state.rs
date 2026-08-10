@@ -1486,16 +1486,26 @@ mod tests {
     fn jit_flag_parsing() {
         assert_eq!(VmOptions::parse_jit(None), JitMode::Off);
         assert_eq!(VmOptions::parse_jit(Some("off")), JitMode::Off);
-        // threshold=1 via the env var is a footgun (compiles before any
-        // inlined callee warms) — bumped to the floor, not honored literally.
+        // Rule 1: EVERY sub-floor value via the env var clamps to the floor
+        // (the original arm refused only `1`; the 2..19 gap is how P3 came to
+        // "find a defect" in an out-of-spec configuration). Pin the rule at
+        // both edges of the gap and just below the boundary.
         assert_eq!(
             VmOptions::parse_jit(Some("threshold=1")),
             JitMode::Threshold(JIT_THRESHOLD_FLOOR)
         );
-        // threshold=2 and up are honored as written (only 1 is refused).
         assert_eq!(
             VmOptions::parse_jit(Some("threshold=2")),
-            JitMode::Threshold(2)
+            JitMode::Threshold(JIT_THRESHOLD_FLOOR)
+        );
+        assert_eq!(
+            VmOptions::parse_jit(Some("threshold=19")),
+            JitMode::Threshold(JIT_THRESHOLD_FLOOR)
+        );
+        // The floor itself and everything above are honored as written.
+        assert_eq!(
+            VmOptions::parse_jit(Some("threshold=20")),
+            JitMode::Threshold(20)
         );
         assert_eq!(
             VmOptions::parse_jit(Some("threshold=10000")),

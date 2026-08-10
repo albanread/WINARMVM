@@ -194,8 +194,42 @@ fn compile_count_nonzero_at_threshold1() {
     );
 }
 
-/// WINARM (P3 D4) — a **VM defect found by this sprint, not a port gap**,
-/// committed as a runnable repro rather than described in prose.
+/// WINARM (P3 D4) — committed as a runnable repro rather than described in
+/// prose.
+///
+/// **FIXED (P4).** Root cause: `compiler::regalloc::regalloc`'s
+/// `block_closure_vreg` pin bounded the closure's live interval by
+/// `max(interval.end) + 2` — the last position at which SOME vreg is
+/// defined or used — instead of by the method's actual position count. A
+/// compile whose linearization ends in cold trap/fail blocks (DFS dead
+/// ends, so `reverse_postorder` puts them last) has a run of trailing
+/// positions past every interval end; at those positions
+/// `scopes::resolve_frame_loc` found the pinned interval already expired
+/// (it tests `iv.end > pos`, strictly) and returned `ValueLoc::Nil`, so
+/// `driver::build_deopt_metadata` recorded the root block scope's receiver
+/// as Nil. The measured failing compile: 195 IR ops (positions 0..=194,
+/// safepoints out to 194) pinned only to 166. See
+/// `regalloc::pin_end_bound`, and the unit regression
+/// `regalloc::tests::block_closure_vreg_pin_covers_trailing_cold_block_safepoints`.
+/// The threshold bound recorded below was therefore never real: whether a
+/// compile is affected depends on how many trailing positions end no
+/// interval — a property of the shape the profile produced, not of the
+/// threshold number. Un-ignored; it now passes.
+///
+/// **Mainline bug, platform-dependent TRIGGER — and the distinction is
+/// proven, not argued.** The bug is integer arithmetic over IR positions,
+/// with no OS, register, address or exception-handling input anywhere in
+/// it, and it is pinned by a pure unit test that hand-builds an `IrMethod`
+/// and calls `regalloc()` directly
+/// (`regalloc::tests::block_closure_vreg_pin_covers_trailing_cold_block_safepoints`)
+/// — no VM execution, no trap, no host involvement; it fails under the old
+/// bound on ANY host. That macOS never aborted here says only that no
+/// compile in a macOS run happened to have the trailing-position shape:
+/// identity hashes derive from allocation addresses, so Dictionary/Set
+/// iteration, compile order and IC/profile state all differ between hosts,
+/// and they decide WHICH methods compile with WHICH shape. "Passes on the
+/// other host" is evidence of an absent trigger, never of an absent bug —
+/// the same trap as the "passes at threshold 10" reading above.
 ///
 /// The whole world + test corpus compiled at `threshold` 2, 3 or 5 dies
 /// deterministically in `runtime::deopt.rs`'s root-block arm:
@@ -237,10 +271,22 @@ fn compile_count_nonzero_at_threshold1() {
 /// other test's result — down with it. Same reasoning P2 recorded for the
 /// depth-3 defect. Run it explicitly:
 /// `cargo test --test it_world -- --ignored threshold_2`.
+///
+/// **Deliberately an OUT-OF-SPEC configuration (rule 1: never below
+/// `JIT_THRESHOLD_FLOOR` = 20), and it must stay that way to be worth
+/// anything.** It reaches the threshold by constructing
+/// `JitMode::Threshold(2)` as a direct struct field, which is the sanctioned
+/// compiler-test backdoor — `parse_jit`'s clamp only guards the env/CLI
+/// surface, so nothing here is silently rewritten to 20 and this does not
+/// pass vacuously. Measured: at in-spec thresholds (20/25/50) the corpus
+/// never produces the triggering shape at all, with the fix or without it,
+/// so an in-spec version of this test would guard nothing. Sub-floor
+/// compiling is exactly what packs enough compiled blocks with cold
+/// trailing traps into one run to reach the defect end-to-end; the
+/// threshold-independent guard is the `regalloc` unit test named above.
+/// Renamed from `..._hits_root_block_deopt_defect`: it no longer hits it.
 #[test]
-#[ignore = "VM DEFECT (not a port gap): root-block deopt at threshold 2..5 over \
-            the whole corpus; aborts the test binary, so opt in explicitly"]
-fn world_suite_at_threshold_2_hits_root_block_deopt_defect() {
+fn world_suite_at_sub_floor_threshold_survives_root_block_deopt() {
     let mut vm = macvm::runtime::VmState::with_options(macvm::runtime::VmOptions {
         heap_mib: 64,
         eden_kb: None,

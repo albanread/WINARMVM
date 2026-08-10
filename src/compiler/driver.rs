@@ -1671,6 +1671,21 @@ fn build_deopt_metadata(
                     &f3_const,
                     &f3_pool,
                 );
+                // S24 A1 invariant, checked where it is cheapest to attribute:
+                // a BLOCK compilation's root scope MUST name a real frame home
+                // for the closure at EVERY deopt site — the materializer's
+                // root-block arm reads it back as a `ClosureOop`. `Nil` here
+                // means `regalloc`'s closure-vreg pin failed to cover this
+                // site, and the damage would otherwise only surface much later,
+                // inside a non-unwinding `extern "C"` trap handler where the
+                // abort names the consumer rather than the producer.
+                debug_assert!(
+                    ir_method.block_closure_vreg.is_none()
+                        || root_receiver != crate::compiler::scopes::ValueLoc::Nil,
+                    "block closure vreg {:?} resolved to Nil at deopt site position {position} \
+                     -- the regalloc pin must span every program position",
+                    ir_method.block_closure_vreg,
+                );
                 let root_slots = (0..n_slots)
                     .map(|i| {
                         resolve_frame_loc(

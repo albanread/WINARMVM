@@ -1271,6 +1271,52 @@ pub(crate) fn f3c_census(method: &IrMethod, ra: &RegallocResult) -> (u32, u32, u
     (freed, crossing, freed_with_trap_ext)
 }
 
+/// The interval end that pins a vreg live across EVERY program position of
+/// `method` — one strictly past the last position `compute_intervals` (and
+/// `driver::build_deopt_metadata`, and `emit`) will ever number.
+///
+/// Every consumer of a pinned interval tests a STRICT upper bound —
+/// `scopes::resolve_frame_loc` and `oopmap::build_for_position` both want
+/// `iv.end > pos` — so "covers the whole method" means `end > last_pos`,
+/// and `last_pos` is `n_ops - 1` where `n_ops` is the number of IR ops in
+/// `block_order` (all three walkers number positions by that identical
+/// walk, one position per op, so this is the definition of the range, not
+/// an estimate of it).
+///
+/// **This replaces `max(interval.end) + 2`, which was the root cause of the
+/// S24 A1 root-block deopt abort.** `max(interval.end)` is the last
+/// position at which SOME vreg is defined or used — not the last position.
+/// The two coincide only when the linearized tail happens to end an
+/// interval, and the tail is exactly where it does not: `compute_intervals`
+/// notes that an uncommon trap's fail block "has NO fall-through and is
+/// linearized LAST (a DFS dead end)", so a method whose cold trap/fail
+/// blocks trail the hot body leaves a run of positions past every interval
+/// end. Measured on the failing block compilation: 195 ops (positions
+/// 0..=194, safepoints up to 194) but `max(interval.end) + 2 == 166`, so
+/// the closure vreg was pinned only to 166 and `resolve_frame_loc` returned
+/// `ValueLoc::Nil` for the root scope's receiver at all 29 sites from 166
+/// on. The materializer's root-block arm then read `nil` out of the rebuilt
+/// frame's receiver-arg slot and failed its `ClosureOop::try_from` —
+/// a non-unwinding panic out of `extern "C"` `rt_uncommon_trap`, so the
+/// process aborts. (The `+ 2` made it *intermittent*, which is why an
+/// earlier bisect concluded it "passes at threshold 10/15/20/1000": whether
+/// a given compile is affected depends on how many trailing positions end
+/// no interval, i.e. on the shape the profile produced — never on the
+/// threshold number.)
+///
+/// `.max(existing ends)` keeps the pin monotone: it must never SHORTEN an
+/// interval that natural liveness already carried further (possible in
+/// principle for a widened deopt fact), which would un-spill a slot a
+/// recorded site names.
+fn pin_end_bound(method: &IrMethod, block_order: &[BlockId], intervals: &[LiveInterval]) -> u32 {
+    let n_ops: u32 = block_order
+        .iter()
+        .map(|b| method.blocks[b.0 as usize].code.len() as u32)
+        .sum();
+    let max_iv_end = intervals.iter().map(|iv| iv.end).max().unwrap_or(0);
+    n_ops.max(max_iv_end) + 1
+}
+
 pub fn regalloc(method: &IrMethod) -> RegallocResult {
     let (block_order, mut intervals, safepoint_positions, block_start_pos, extra_oop_live) =
         compute_intervals(method);
@@ -1284,14 +1330,14 @@ pub fn regalloc(method: &IrMethod) -> RegallocResult {
     // to the method's last position makes spill-all keep the slot canonical
     // and every liveness-intersected oopmap include it — one slot, and the
     // whole analysis dimension disappears.
+    //
+    // The bound is `pin_end_bound` (below) — the method's true position
+    // count, NOT `max(interval.end) + 2`. See that helper's doc for the
+    // defect the old proxy caused.
+    let pin_end = pin_end_bound(method, &block_order, &intervals);
     if let Some(cv) = method.block_closure_vreg {
-        // +2: resolve_frame_loc/build_for_position use STRICT upper bounds
-        // (`iv.end > pos`), so ending exactly AT the last position would
-        // resolve Nil at the final safepoint -- the very deopt this exists
-        // for (observed: scope_recv=Nil on depth3's block deopt).
-        let max_pos = intervals.iter().map(|iv| iv.end).max().unwrap_or(0) + 2;
         if let Some(iv) = intervals.iter_mut().find(|iv| iv.vreg == cv) {
-            iv.end = max_pos;
+            iv.end = pin_end;
             iv.crosses_safepoint = true;
         }
     }
@@ -1305,9 +1351,8 @@ pub fn regalloc(method: &IrMethod) -> RegallocResult {
     // the deopt corrupts (observed: `printOn:` with a captured stream, ctxloc
     // -> Nil at the trap). Same one-slot pin as `block_closure_vreg` above.
     if let Some((cv, _nctx)) = method.method_ctx_vreg {
-        let max_pos = intervals.iter().map(|iv| iv.end).max().unwrap_or(0) + 2;
         if let Some(iv) = intervals.iter_mut().find(|iv| iv.vreg == cv) {
-            iv.end = max_pos;
+            iv.end = pin_end;
             iv.crosses_safepoint = true;
         }
     }
@@ -1639,6 +1684,134 @@ mod tests {
             intervals[0].assignment,
             Some(Assignment::Spill(_))
         ));
+    }
+
+    /// REGRESSION (S24 A1 root-block deopt abort): the `block_closure_vreg`
+    /// pin must cover the LAST program position, not merely
+    /// `max(interval.end) + 2`.
+    ///
+    /// Shape reproduced here is the one real block compilations take: the
+    /// closure vreg is `Param 0`, read once by the entry prologue's
+    /// `LoadField` and never textually again, and the method's linearization
+    /// ends with a COLD trap block — a DFS dead end, so `reverse_postorder`
+    /// puts it last — whose ops define and use nothing. Those trailing
+    /// positions sit past every interval's natural end, so the old bound
+    /// stopped short of them and `resolve_frame_loc` handed
+    /// `build_deopt_metadata` a `ValueLoc::Nil` for the root scope's
+    /// receiver. The materializer's root-block arm then found `nil` where the
+    /// closure must be and aborted the process out of `extern "C"`
+    /// `rt_uncommon_trap`.
+    ///
+    /// Asserted as the INVARIANT (the closure is resolvable at every
+    /// safepoint), not as an interval-end number, so the test keeps meaning
+    /// if the position numbering or the pin's implementation changes.
+    #[test]
+    fn block_closure_vreg_pin_covers_trailing_cold_block_safepoints() {
+        let closure = VReg(0);
+        let home = VReg(1);
+        let v2 = VReg(2);
+
+        // Entry: the block prologue (Param + LoadField), then a call, then a
+        // branch whose cold arm is the trap block below.
+        let entry = IrBlock {
+            id: BlockId(0),
+            bci: 0,
+            code: vec![
+                Ir::Param {
+                    dst: closure,
+                    index: 0,
+                },
+                Ir::LoadField {
+                    dst: home,
+                    obj: closure,
+                    byte_off: 32,
+                },
+                Ir::ConstSmi { dst: v2, value: 1 },
+                Ir::SmiArith {
+                    op: SmiOp::Add,
+                    dst: v2,
+                    a: v2,
+                    b: v2,
+                    fail: BlockId(1),
+                },
+                Ir::Ret { val: home },
+            ],
+            entry_stack: Vec::new(),
+            deopt_sites: Vec::new(),
+        };
+        // The cold trap block: unreachable by fall-through, linearized LAST,
+        // and its ops touch no vreg — exactly the trailing run of positions
+        // the old `max(interval.end) + 2` bound could not reach. The trap is
+        // the LAST op, so its position is the method's last position.
+        let cold = IrBlock {
+            id: BlockId(1),
+            bci: 4,
+            code: vec![
+                Ir::Poll,
+                Ir::Poll,
+                Ir::Poll,
+                Ir::UncommonTrap { bci: 4 },
+            ],
+            entry_stack: Vec::new(),
+            deopt_sites: Vec::new(),
+        };
+
+        let mut method = hand_method(
+            vec![entry, cold],
+            (0..3)
+                .map(|_| VRegInfo {
+                    is_oop: true,
+                    is_fp: false,
+                })
+                .collect(),
+        );
+        method.block_closure_vreg = Some(closure);
+
+        let ra = regalloc(&method);
+
+        // The trailing cold block must really be linearized last and really
+        // extend past the other intervals — otherwise this test would pass
+        // vacuously and stop guarding anything.
+        let last_pos: u32 = ra
+            .block_order
+            .iter()
+            .map(|b| method.blocks[b.0 as usize].code.len() as u32)
+            .sum::<u32>()
+            - 1;
+        let other_max_end = ra
+            .intervals
+            .iter()
+            .filter(|iv| iv.vreg != closure)
+            .map(|iv| iv.end)
+            .max()
+            .unwrap_or(0);
+        assert!(
+            other_max_end + 2 <= last_pos,
+            "test shape lost its point: the old bound {} already covered the last \
+             position {last_pos}",
+            other_max_end + 2
+        );
+
+        // The invariant: at EVERY safepoint the block compilation's closure
+        // resolves to a real frame home. `Nil` here is the abort.
+        let empty_smi = std::collections::HashMap::new();
+        let empty_pool = std::collections::HashMap::new();
+        for &sp in &ra.safepoint_positions {
+            let loc = crate::compiler::scopes::resolve_frame_loc(
+                closure,
+                sp,
+                &ra.intervals,
+                &ra.extra_oop_live,
+                &empty_smi,
+                &empty_pool,
+            );
+            assert!(
+                matches!(loc, crate::compiler::scopes::ValueLoc::FrameSlot(_)),
+                "closure vreg resolved {loc:?} at safepoint position {sp} \
+                 (last position {last_pos}) -- the root block scope's receiver \
+                 would be recorded as Nil and the deopt materializer would abort"
+            );
+        }
     }
 
     /// Oop-map raw material: `slot_is_oop` records each spill slot's

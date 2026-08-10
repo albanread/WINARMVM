@@ -6052,11 +6052,61 @@ fn blockarg_guard_cold_materializes_closure() {
 //     checkout (`C:\projects\MACVM`, diffed ignoring line endings). The same
 //     nmethod and the same recorded `ValueLoc`s are therefore produced on both
 //     hosts, which is why this is filed as mainline rather than as a port bug.
+// P4 UPDATE — the "not a port gap" arbitration above is WITHDRAWN. The
+// arbitration it asked for has now been run: this test is un-ignored in the
+// MACVM checkout and PASSES there, so identical sources are behaving
+// differently on the two hosts and this is Windows-ARM64-divergent until
+// proven otherwise. Two facts narrow where that divergence can live:
+//   * `ValueLoc` has NO `Reg` variant (`compiler::scopes`: ConstPool,
+//     ConstSmi, FrameSlot, Nil, ElidedClosure, DoubleSlot). Deopt reads
+//     FRAME SLOTS, never the trap-time register file — spill-all is
+//     enforced in release by `regalloc::verify_spill_all`. So a VEH/
+//     trampoline register-save divergence cannot by itself produce a wrong
+//     `ValueLoc`; the register state that DOES matter (fp, pc/site_off) was
+//     measured sane by P2 above.
+//   * It is NOT the S24 A1 pin defect fixed in P4
+//     (`regalloc::pin_end_bound`): that fix leaves this test failing
+//     identically, and this compile is a METHOD (`block_closure_vreg` is
+//     `None`), so that pin never applies to it.
+// Measured failure mode here after the P4 fix: the smi `+` primitive Fails
+// and trips `interpreter::send.rs`'s `prim_fails` debug_assert — i.e. `+`
+// received a non-smi, consistent with the wrong-operand diagnosis above.
+//
+// P4 ROOT CAUSE (decisive A/B, both directions, deterministic): this is the
+// **S2 smi fast path** (`emit.rs`, `MACVM_S2`), NOT the trap-delivery seam
+// and NOT the deopt metadata.
+//     MACVM_S2=0        -> PASSES
+//     (default, S2 on)  -> aborts, as above
+//     MACVM_S2_POISON=1 -> still aborts, so the slot being read is one whose
+//                          write-through store S2 SKIPPED (the canary lands
+//                          in it and `+` fails on the canary instead).
+// `emit::commit` emits no `str` for an `s2_smi` vreg; the slot is brought
+// current only by `emit_s2_spill_stores`, whose coverage filter is an
+// interval-span test (`iv.start <= pos && iv.end > pos`, plus the exact
+// `s2_extra` fact). The block parameter's vreg has a DEGENERATE interval
+// (`[def, def]`) because its only consumer is the deopt record, which is not
+// an `Ir::uses` — so the slot the site names is read before any store makes
+// it current, and it holds whatever the native stack left there.
+//
+// Why only this test: every PASSING depth-2 in-body-trap test through the
+// linear `translate_spliced_block_body` passes a CONSTANT block argument, so
+// the parameter resolves via `f3_const` to `ValueLoc::ConstSmi` and no frame
+// slot is ever read. "Linear spliced block body + a parameter that actually
+// lives in a spill slot" is exercised here and nowhere else.
+//
+// Same FAMILY as the P4 `pin_end_bound` fix — a deopt-only consumer not
+// counted as a use, so an interval-span test under-covers the trap — but a
+// DIFFERENT root cause in a different component; the P4 fix does not touch
+// it. Left unfixed here: the fix belongs to S2's coverage filter.
+//
+// Still ignored on Windows only because the abort is non-unwinding and
+// would take the other 104 tests' results with it.
 #[cfg_attr(
     windows,
-    ignore = "VM DEFECT (not a port gap): the depth-3 spliced-block deopt site records \
-              the block parameter at the CLOSURE's spill slot; aborts the binary via a \
-              non-unwinding debug_assert in rt_uncommon_trap. See the comment above."
+    ignore = "UNFIXED, Windows-divergent (MACVM passes this un-ignored): the depth-3 \
+              spliced-block deopt site records the block parameter at the CLOSURE's \
+              spill slot; aborts the binary via a non-unwinding debug_assert in \
+              rt_uncommon_trap. See the comment above."
 )]
 #[test]
 fn depth3_deopt_in_block_in_callee_rebuilds_all_frames() {
