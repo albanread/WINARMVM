@@ -782,21 +782,29 @@ impl VmOptions {
             .strip_prefix("threshold=")
             .and_then(|n| n.parse::<u32>().ok())
         {
-            // `threshold=1` compiles a method on its VERY FIRST call, before
-            // any callee it inlines has been interpreted even once — so every
-            // graft is built from empty ICs and lowers its cold sends to
-            // uncommon traps. It measures cold-compile deopt behavior, NEVER
-            // steady-state speed (a 5x "slowdown" that is really 20x once the
-            // ICs warm). It is a compiler-correctness test tool ONLY (the embed
-            // tests that want it set `JitMode::Threshold(1)` in Rust directly,
-            // bypassing this env parse). Reaching it through `MACVM_JIT` is
-            // always a mistake, so refuse it: bump to a real threshold and say
-            // so, loudly, rather than hand back a garbage benchmark.
-            if n == 1 {
+            // Rule 1 (the author's, stated 2026-08-10, upgrading this arm from
+            // its original `n == 1`-only form): **the threshold is never below
+            // `JIT_THRESHOLD_FLOOR` (20).** A sub-floor threshold compiles a
+            // method before the callees it inlines have been interpreted
+            // enough — grafts built from empty/cold ICs whose cold sends lower
+            // to uncommon traps. That measures cold-compile deopt behavior,
+            // NEVER steady-state speed, and it is not a supported
+            // configuration: a failure observed below the floor is a failure
+            // of a config the design excludes (P3 "found a defect at
+            // thresholds 2/3/5" through exactly this gap — out-of-spec, and
+            // the observation misled a whole investigation). The env/CLI path
+            // therefore clamps EVERY sub-floor value, loudly. Compiler-
+            // correctness harnesses that genuinely want instant compilation
+            // keep their sanctioned tool: construct `JitMode::Threshold(n)`
+            // in Rust directly, bypassing this parse — in-tree tests already
+            // do, and that is a deliberate testing backdoor, not a supported
+            // user configuration.
+            if n < JIT_THRESHOLD_FLOOR {
                 eprintln!(
-                    "MACVM_JIT: threshold=1 is not a valid measurement config \
-                     (compiles before any inlined callee warms — measures cold-\
-                     compile deopts, not speed). Using threshold={JIT_THRESHOLD_FLOOR} instead."
+                    "MACVM_JIT: threshold={n} is below the floor and not a supported \
+                     configuration (rule 1: never below {JIT_THRESHOLD_FLOOR} — sub-floor \
+                     compiles graft from cold ICs and measure cold-compile deopts, not \
+                     programs). Using threshold={JIT_THRESHOLD_FLOOR} instead."
                 );
                 return JitMode::Threshold(JIT_THRESHOLD_FLOOR);
             }

@@ -74,9 +74,12 @@ gate-p01: gate-p00
 #     (MIGRATION.md §8, P0's "Open, and not a port problem"). That is
 #     unchanged by P2 and is why the sprint verifies with `cargo test
 #     --no-fail-fast` directly as well.
+# threshold=20, not =2: rule 1 — the threshold is never below the floor (20),
+# and `parse_jit` now clamps sub-floor values. The script warms past the
+# floor itself, so the trap still fires compiled.
 gate-p02: gate-p01
     MACVM_JIT=off cargo run --release -- run scripts/p2-deopt-roundtrip.mst --world world
-    MACVM_JIT=threshold=2 cargo run --release -- run scripts/p2-deopt-roundtrip.mst --world world
+    MACVM_JIT=threshold=20 cargo run --release -- run scripts/p2-deopt-roundtrip.mst --world world
 
 # P3 (docs/sprints/tests_p03.md) — the JIT-vs-interpreter DIFFERENTIAL, gate
 # item 4. Every corpus the project keeps, run in three JIT modes, stdout and

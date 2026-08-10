@@ -11,8 +11,8 @@
 
  The contract this file encodes is a DIFFERENCE, so run it both ways:
 
-   MACVM_JIT=off        cargo run -- run scripts/p2-deopt-roundtrip.mst --world world
-   MACVM_JIT=threshold=2 cargo run -- run scripts/p2-deopt-roundtrip.mst --world world
+   MACVM_JIT=off          cargo run -- run scripts/p2-deopt-roundtrip.mst --world world
+   MACVM_JIT=threshold=20 cargo run -- run scripts/p2-deopt-roundtrip.mst --world world
 
  Both must print the same four lines and exit 0. Before P2 landed the VEH,
  the second command died at once on Windows ARM64 with 0xC000001D
@@ -20,8 +20,12 @@
  0xF000 namespace raises here, NOT STATUS_BREAKPOINT; that measurement is
  the whole reason the handler is keyed the way it is).
 
- The three warm-up sends are what push `f:` past `threshold=2` so the
- fourth call runs COMPILED and the trap is real rather than interpreted."
+ threshold=20, not the =2 this file originally used: rule 1 (the author's —
+ the threshold is NEVER below `JIT_THRESHOLD_FLOOR` = 20, and `parse_jit`
+ now clamps every sub-floor value loudly). The silent warm-up loop below
+ pushes `f:` past the floor so the final call runs COMPILED and the trap is
+ real rather than interpreted; the printed output stays the same four lines
+ the JIT-off oracle produces."
 
 Object subclass: DeoptRepro [
     DeoptRepro class >> f: n [ ^n + n ]
@@ -30,4 +34,5 @@ Object subclass: DeoptRepro [
 Transcript show: (DeoptRepro f: 1) printString. Transcript cr.
 Transcript show: (DeoptRepro f: 2) printString. Transcript cr.
 Transcript show: (DeoptRepro f: 3) printString. Transcript cr.
+1 to: 25 do: [:i | DeoptRepro f: i ].
 Transcript show: (DeoptRepro f: SmallInteger maxVal) printString. Transcript cr.
