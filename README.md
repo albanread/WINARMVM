@@ -13,13 +13,28 @@ a hand-written non-unwinding AArch64 setjmp/longjmp, Win32 + WebView2 GUI
 shell) is this repo's own, and the compiler diverges where this system
 needs it to — each divergence marked and explained in place.
 
-**Status:** the suite runs **1069 passed / 0 failed / 13 ignored** (the 13
-are FFI, sprint P5 — the one unfinished port phase). JIT, uncommon traps,
-deopt, guest-fatal recovery, moving GC under compiled frames, and the
-live-HTML programming environment all work, all native — VM, JIT, and the
-WebView2 engine hosting the GUI are each PE-verified ARM64. The
-port-defect ledger is closed: no test is gated on a Windows-divergence
-claim.
+**Status: the port is complete — P0 through P5.** The suite runs **1086
+passed / 0 failed / 10 ignored** (identical with the FFI knowledge base
+present and absent), plus **7650 in-language world assertions, 0 failed**.
+JIT, uncommon traps, deopt, guest-fatal recovery, moving GC under compiled
+frames, the FFI resolver, and the live-HTML programming environment all
+work, all native — VM, JIT, and the WebView2 engine hosting the GUI are
+each PE-verified ARM64. The port-defect ledger is closed: no test is gated
+on a Windows-divergence claim, and the two compiler defects found along
+the way are fixed here and cherry-pickable upstream (one of them cured a
+silent wrong-answer bug).
+
+The 10 remaining gates are not port debt — they are two scoped slices of
+new work: `kqueue`-shaped readiness (`IoWorker` needs an IOCP or WSAPoll
+backend) and the winsock lifecycle. Both are named in
+[`docs/sprints/sprint_p05_detail.md`](docs/sprints/sprint_p05_detail.md).
+
+**In progress: [Phase WG](docs/win_gui_design.md)** — a Windows-native
+environment *written in Smalltalk*, the way the Mac one is: UI VM on the
+UI thread, messaging an independent Smalltalk GUI layer, driving Win32 and
+COM through the FFI. WG0 has landed — a guest Smalltalk doit now registers
+a window class from winkb-queried struct offsets, creates a real window
+and destroys it.
 
 ### Measured, on this machine (Snapdragon X / Oryon)
 
