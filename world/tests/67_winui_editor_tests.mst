@@ -1,0 +1,118 @@
+"67_winui_editor_tests.mst — WinUiEditorWg6cTests: the editor pane's
+ arithmetic, all of it pure.
+
+ WG6c's view is drawn by us, so every position on screen is a calculation we
+ own — and calculations can be checked exactly, with no window, which is the
+ same line this port has drawn since WG3. What needs a window (a paint
+ arriving, a real keystroke, a caret blinking) is `just gate-wg5b`.
+
+ THE BACKBONE IS ROUND-TRIPPING. Offset → (line, col) → offset must be the
+ identity, and pixel → offset must invert offset → pixel. A caret that lands
+ one character out is the single most noticeable defect an editor can have,
+ and it is exactly the kind of thing that survives eyeballing."
+
+TestCase subclass: WinUiEditorWg6cTests [
+
+    runAll [
+        self runTest: #testLineColRoundTrips do: [ self testLineColRoundTrips ].
+        self runTest: #testCaretPointIsColumnTimesWidth
+             do: [ self testCaretPointIsColumnTimesWidth ].
+        self runTest: #testHitTestInvertsTheCaretPoint
+             do: [ self testHitTestInvertsTheCaretPoint ].
+        self runTest: #testClickingPastEndOfLineLandsAtItsEnd
+             do: [ self testClickingPastEndOfLineLandsAtItsEnd ].
+        self runTest: #testTheCaretIsAlwaysInsideTheDocument
+             do: [ self testTheCaretIsAlwaysInsideTheDocument ].
+        self runTest: #testTypingThenUndoRestoresExactly
+             do: [ self testTypingThenUndoRestoresExactly ]
+    ]
+
+    threeLines [ ^'one', (String with: Character nl), 'two', (String with: Character nl), 'three' ]
+
+    testLineColRoundTrips [
+        "Offset → (line, col) → offset is the identity for every position in
+         the document. Checked over ALL of them rather than a sample: it is a
+         short document and an exhaustive check costs nothing, where a sampled
+         one could miss exactly the newline boundary that breaks."
+        | text |
+        WinShell openEditorOn: self threeLines.
+        text := WinShell editorText.
+        1 to: text size + 1 do: [ :i |
+            | lc back |
+            lc := WinShell editorLineColOf: i.
+            back := WinShell editorOffsetOfLine: (lc at: 1) col: (lc at: 2).
+            self assert: back = i
+                description: 'offset ' , i printString , ' round-trips via '
+                    , lc printString , ' but came back as ' , back printString ]
+    ]
+
+    testCaretPointIsColumnTimesWidth [
+        "The forward arithmetic, stated once so the inverse below has
+         something to be the inverse OF."
+        | p |
+        WinShell openEditorOn: self threeLines.
+        p := WinShell caretPointFor: 1.
+        self assert: p = (Array with: 0 with: 0)
+            description: 'the first character is at the origin'.
+        p := WinShell caretPointFor: 6.
+        self assert: (p at: 1) = WinShell editorCharWidth
+            description: 'offset 6 is column 1 of line 1'.
+        self assert: (p at: 2) = WinShell editorLineHeight
+            description: 'and one line down'
+    ]
+
+    testHitTestInvertsTheCaretPoint [
+        "Pixel → offset must undo offset → pixel. A caret that lands one
+         character out on a click is the most noticeable defect an editor can
+         have and the easiest to not notice while testing by eye."
+        | text |
+        WinShell openEditorOn: self threeLines.
+        text := WinShell editorText.
+        1 to: text size + 1 do: [ :i |
+            | p back |
+            p := WinShell caretPointFor: i.
+            back := WinShell editorOffsetAtX: (p at: 1) y: (p at: 2).
+            self assert: back = i
+                description: 'offset ' , i printString , ' → ' , p printString
+                    , ' → ' , back printString ]
+    ]
+
+    testClickingPastEndOfLineLandsAtItsEnd [
+        "What every editor does, and what a user means by clicking in the
+         empty space to the right of a short line."
+        | atEnd |
+        WinShell openEditorOn: self threeLines.
+        atEnd := WinShell editorOffsetAtX: 10000 y: 0.
+        self assert: atEnd = 4
+            description: 'past the end of `one` is its end (offset 4), not the next line'
+    ]
+
+    testTheCaretIsAlwaysInsideTheDocument [
+        "Every navigation below can run off an end, and a caret outside the
+         buffer is an `at:` away from a raise INSIDE A PAINT — which shows as
+         a blank pane with nothing to say why. Clamped on the way in, so no
+         caller has to remember."
+        WinShell openEditorOn: self threeLines.
+        WinShell editorCaret: 0 - 99.
+        self assert: WinShell editorCaret = 1 description: 'clamped at the bottom'.
+        WinShell editorCaret: 99999.
+        self assert: WinShell editorCaret = (WinShell editorText size + 1)
+            description: 'and at the top, which is one PAST the last character'
+    ]
+
+    testTypingThenUndoRestoresExactly [
+        "The whole argument for the rope: `TextBuffer` keeps the ROOTS of a
+         persistent tree, so the previous root IS the previous document. No
+         journal, no replay, nothing to apply partially."
+        | before |
+        WinShell openEditorOn: self threeLines.
+        before := WinShell editorText.
+        WinShell editorCaret: 1.
+        WinShell editorApply: 'X'.
+        self assert: WinShell editorText ~= before
+            description: 'typing changed the document'.
+        WinShell editorCommand: 'undo'.
+        self assert: WinShell editorText = before
+            description: 'and undo restored it EXACTLY'
+    ]
+]

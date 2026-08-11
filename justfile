@@ -1492,3 +1492,119 @@ gate-wg5b:
         echo "own image: unchanged"
     fi
     echo "gate-wg5b: PASS"
+
+# --- WG6c-2: the editor pane accepts input ----------------------------------
+#
+# docs/sprints/sprint_wg6c_detail.md, WG6c-2. The slice's own gate is one
+# sentence — "typing changes the document and undo restores it, which costs
+# nothing because the rope is persistent" — and it is asserted here twice, from
+# the two sides that can fail independently:
+#
+#   1. HEADLESS, the arithmetic. `world/tests/67_winui_editor_tests.mst`:
+#      offset <-> (line, col) round-trips over EVERY position, pixel <-> offset
+#      inverts, the caret clamps, typing-then-undo restores. Pure over the
+#      text, so it needs no window and runs on every platform's suite.
+#   2. THE WINDOW, the route. Nothing headless touches WG6c-2's actual shell
+#      change, which is four lines in 91's door routing by HWND to the pane —
+#      67 calls `editorApply:` directly and never crosses
+#      `window:message:wParam:lParam:` at all. A pane wired up wrongly passes
+#      all six of those tests and is stone dead on screen, so the second half
+#      drives REAL WM_CHAR / WM_KEYDOWN / WM_LBUTTONDOWN through the real door.
+#
+# WHY A REBUILD IS NOT OPTIONAL HERE, and it cost an afternoon to find: the
+# world's `.mst` files are read from disk at runtime, so an editor change shows
+# up in a stale `macvm-winui.exe` — but WM_PAINT joining the ALLOWLIST is Rust,
+# compiled in. Running WG6c against a binary built before that commit gives a
+# pane that is visible, focused, correctly positioned, types perfectly, and
+# never paints once. `cargo build` is therefore part of the gate rather than
+# something the developer is trusted to remember.
+gate-wg6c:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # A leftover window holds its own .exe open and the next build fails with
+    # "Access is denied" — a message that says nothing about the real cause.
+    taskkill //F //IM macvm-winui.exe > /dev/null 2>&1 || true
+
+    # 1: the arithmetic, inside the ordinary world suite.
+    just run-world-tests | tee /tmp/wg6c_world.txt
+    grep -q ', 0 failed' /tmp/wg6c_world.txt
+    # The suite must have actually RUN it. A test file that fell out of
+    # tests.list still reports "0 failed", which is the most comfortable way
+    # for a gate to pass while checking nothing.
+    grep -q 'WinUiEditorWg6cTests' /tmp/wg6c_world.txt
+    grep -q 'testTypingThenUndoRestoresExactly' /tmp/wg6c_world.txt
+
+    # 2: THE WINDOW.
+    cargo build --quiet -p win_gui
+    rm -f /tmp/wg6c_exit /tmp/wg6c_app.txt target/winui-wg6c.png
+    ( MACVM_WINUI_CTL=7673 ./target/debug/macvm-winui.exe > /tmp/wg6c_app.txt 2>&1; \
+        echo $? > /tmp/wg6c_exit ) &
+    for i in $(seq 1 60); do
+        (exec 3<>/dev/tcp/127.0.0.1/7673) 2>/dev/null && break || sleep 0.5
+    done
+    ./target/debug/macvm rusttcl scripts/winui-wg6c.tcl | tee /tmp/wg6c_gate.txt
+    cat /tmp/wg6c_app.txt
+
+    grep -q 'WG6C open true' /tmp/wg6c_gate.txt
+    grep -q 'WG6C pane-exists true' /tmp/wg6c_gate.txt
+    grep -q 'WG6C pane-hwnd-nonzero true' /tmp/wg6c_gate.txt
+    # FOCUS IS THE WHOLE ARCHITECTURAL CLAIM. WG6c-1 rejected an SS_OWNERDRAW
+    # STATIC because a STATIC can hold focus and still never receive a
+    # WM_KEYDOWN — focusable and mute. This asserts the half that was easy.
+    grep -q 'WG6C pane-has-focus true' /tmp/wg6c_gate.txt
+
+    # TYPING, through a real WM_CHAR from outside every VM entry.
+    BEFORE=$(grep -E '^WG6C doc-before ' /tmp/wg6c_gate.txt | awk '{print $NF}')
+    AFTER=$(grep -E '^WG6C doc-after-typing ' /tmp/wg6c_gate.txt | awk '{print $NF}')
+    echo "editor: $BEFORE chars, $AFTER after one keystroke"
+    test "$AFTER" -eq "$((BEFORE + 1))"
+    # Not merely LONGER — the right character, at the right place. A document
+    # that grew by one is also what a stray newline looks like.
+    grep -q 'WG6C typed-char-landed true' /tmp/wg6c_gate.txt
+    EB=$(grep -E '^WG6C edits-before ' /tmp/wg6c_gate.txt | awk '{print $NF}')
+    EA=$(grep -E '^WG6C edits-after ' /tmp/wg6c_gate.txt | awk '{print $NF}')
+    test "$EA" -gt "$EB"
+
+    # NAVIGATION, through a real WM_KEYDOWN. Arrows need no modifier, so this
+    # is a complete proof of that route rather than a partial one.
+    CT=$(grep -E '^WG6C caret-after-typing ' /tmp/wg6c_gate.txt | awk '{print $NF}')
+    CL=$(grep -E '^WG6C caret-after-left ' /tmp/wg6c_gate.txt | awk '{print $NF}')
+    echo "caret: $CT after typing, $CL after Left"
+    test "$CL" -lt "$CT"
+
+    # AND THE MODIFIER GATE REALLY GATES. A bare Z must not undo: `editorKeyDown:`
+    # asks GetKeyState, the real keyboard, and a synthesised message cannot lie
+    # to it. Asserted as "nothing happened" — the edit counter did not move.
+    EZ=$(grep -E '^WG6C edits-after-bare-z ' /tmp/wg6c_gate.txt | awk '{print $NF}')
+    test "$EZ" -eq "$EA"
+
+    # BACKSPACE, and the double-application it would be if `editorChar:` did not
+    # decline the control range: WM_CHAR delivers 8 for this key too. A document
+    # that shrank by TWO is that bug, so the assertion is exact.
+    BS=$(grep -E '^WG6C doc-after-backspace ' /tmp/wg6c_gate.txt | awk '{print $NF}')
+    test "$BS" -eq "$BEFORE"
+
+    # A CLICK PLACES THE CARET, through a real WM_LBUTTONDOWN — WG6c-1's
+    # arithmetic inverted, against pixels this gate computed from the pane's own
+    # metrics. Line and column rather than an offset: an offset would pass for
+    # the wrong reason on a document whose lines happened to be equal length.
+    grep -q 'WG6C click-line 1' /tmp/wg6c_gate.txt
+    grep -q 'WG6C click-col 4' /tmp/wg6c_gate.txt
+
+    # THE SLICE'S STATED GATE. Exact equality against the string the document
+    # started as, never a length: a journal that replayed badly comes back the
+    # right length most of the time.
+    grep -q 'WG6C undo-restored-exactly true' /tmp/wg6c_gate.txt
+
+    # AND IT PAINTED. Zero paints with an empty paintError is exactly what a
+    # stale binary looks like (see the note above this recipe), and it is
+    # indistinguishable from success on every other line of this gate.
+    PC=$(grep -E '^WG6C paint-calls ' /tmp/wg6c_gate.txt | awk '{print $NF}')
+    echo "editor: $PC paints"
+    test "$PC" -gt 0
+    grep -q "WG6C paint-error ''" /tmp/wg6c_gate.txt
+
+    test -s target/winui-wg6c.png
+    for i in $(seq 1 60); do [ -f /tmp/wg6c_exit ] && break || sleep 0.5; done
+    test "$(cat /tmp/wg6c_exit)" = "0"
+    echo "gate-wg6c: PASS"

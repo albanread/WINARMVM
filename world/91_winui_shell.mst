@@ -1326,6 +1326,18 @@ Object subclass: WinShell [
         MessagesSeen := (MessagesSeen isNil ifTrue: [ 0 ] ifFalse: [ MessagesSeen ]) + 1.
         LastMessage := msg.
 
+        "WG6c-2: the editor pane is a child of OUR window class, so its
+         messages arrive HERE rather than at a system control's WndProc —
+         which is the whole reason WG6c-1 built it that way. Routed first and
+         by HWND, so the pane's keys can never be confused with the shell's
+         own: `#defwindowproc` comes back for anything the editor has no
+         opinion about, and the shell's handlers below never see a message
+         that was addressed to the pane.
+
+         A no-op hook until 107 defines it."
+        (hwnd ~= 0 and: [ hwnd = self editorPaneHwnd ]) ifTrue: [
+            ^self editorMessage: msg wParam: wp lParam: lp ].
+
         msg = (WinApi constant: 'WM_SIZE') ifTrue: [ ^self onSize: wp lParam: lp ].
         msg = (WinApi constant: 'WM_CLOSE') ifTrue: [ ^self onClose ].
         msg = (WinApi constant: 'WM_DESTROY') ifTrue: [ ^self onDestroy ].
@@ -1337,7 +1349,12 @@ Object subclass: WinShell [
         msg = (WinApi constant: 'WM_LBUTTONDOWN') ifTrue: [ ^self onMouseDown: lp ].
         msg = (WinApi constant: 'WM_MOUSEMOVE') ifTrue: [ ^self onMouseMove: lp ].
         msg = (WinApi constant: 'WM_LBUTTONUP') ifTrue: [ ^self onMouseUp: lp ].
-        msg = (WinApi constant: 'WM_KEYDOWN') ifTrue: [ ^self onKeyDown: wp lParam: lp ].
+        "WM_KEYDOWN is dispatched ABOVE, to `onKeyDown:` — the one-argument
+         form WG4 D5 added and WG5a D3 implements for Ctrl-D/Ctrl-P. The
+         two-argument `onKeyDown:lParam:` that used to be dispatched here was
+         therefore UNREACHABLE: the first arm returns. Found reading this
+         file for WG6c-2. Left defined (something may yet want the lParam
+         flags) but no longer pretending to be wired."
         msg = (WinApi constant: 'WM_CHAR') ifTrue: [ ^self onChar: wp lParam: lp ].
         msg = (WinApi constant: 'WM_ENTERSIZEMOVE') ifTrue: [ ^self onEnterTracking: #sizemove ].
         msg = (WinApi constant: 'WM_ENTERMENULOOP') ifTrue: [ ^self onEnterTracking: #menu ].
@@ -1607,6 +1624,10 @@ Object subclass: WinShell [
     WinShell class >> paintWindow: hwnd dc: hdc x: x y: y w: w h: h [ ^0 ]
     WinShell class >> layoutEditorPane: content [ ^self ]
     WinShell class >> syncEditorCaret [ ^self ]
+    WinShell class >> editorPaneHwnd [ ^0 ]
+    "WG6c-2's editor input; 107 overrides."
+    WinShell class >> editorMessage: msg wParam: wp lParam: lp [ ^#defwindowproc ]
+    WinShell class >> editorCaret [ ^1 ]
     "WG6b's Find view; 105 overrides."
     WinShell class >> showFindPanes: aBool [ ^self ]
     WinShell class >> layoutFindPanes: content [ ^self ]

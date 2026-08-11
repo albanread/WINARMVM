@@ -1,0 +1,240 @@
+"── 107_winui_editorkeys.mst — WG6c-2: it accepts input ──────────────────
+ docs/sprints/sprint_wg6c_detail.md WG6c-2. The pane painted in WG6c-1; now
+ it types.
+
+ WHO OWNS THE CARET, and it is the one thing to get right. `handleKey:at:`
+ says so itself: *the terminal owns navigation natively — mouse, arrows,
+ selection — and tells the VM where the caret is only at edit time*. That was
+ written for a web textarea, which owned navigation because the browser did.
+ OUR pane owns it because nothing else can, so:
+
+   * the VIEW tracks the caret for navigation (arrows, Home/End, a click),
+   * the SESSION is told where it is at EDIT time and answers where it ended
+     up, and the view adopts that.
+
+ Two authorities would drift. One authority per phase cannot.
+
+ UNDO COSTS NOTHING, which is worth saying out loud because it is the whole
+ argument for the rope: `TextBuffer` is a list of ROOTS of a persistent tree,
+ so the previous root IS the previous document, exactly, with no journal and
+ no replay. Ctrl-Z is `buffer undo`.
+
+ EVERY MESSAGE HERE ARRIVES AT THE DOOR because the pane is a child of our
+ own window class (WG6c-1). WM_KEYDOWN and WM_CHAR were already allowlisted
+ before this sprint existed; nothing was added for them."
+
+Object subclass: WinShell [
+    <classVars: EditorCaret EditorKeys>
+
+    "── Routing ──────────────────────────────────────────────────────────"
+
+    WinShell class >> editorMessage: msg <Integer> wParam: wp <Integer> lParam: lp <Integer> ^ <Object> [
+        "Every message addressed to the editor pane. Answers an LRESULT for
+         what it handled and `#defwindowproc` for everything else — the same
+         two-sided contract the shell's own door half keeps, so a message this
+         file has no opinion about still behaves the way Windows expects.
+
+         Captured rather than propagated: a raise in here would unwind through
+         the door, and the door's own rule is that any non-Integer means
+         `#defwindowproc`. Better to answer that deliberately."
+        ^[ self editorMessageBody: msg wParam: wp lParam: lp ]
+            on: Error do: [ :e | PaintError := e messageText. #defwindowproc ]
+    ]
+
+    WinShell class >> editorMessageBody: msg <Integer> wParam: wp <Integer> lParam: lp <Integer> ^ <Object> [
+        msg = (WinApi constant: 'WM_LBUTTONDOWN') ifTrue: [ ^self editorClickAt: lp ].
+        msg = (WinApi constant: 'WM_KEYDOWN') ifTrue: [ ^self editorKeyDown: wp ].
+        msg = (WinApi constant: 'WM_CHAR') ifTrue: [ ^self editorChar: wp ].
+        ^#defwindowproc
+    ]
+
+    "── The caret the VIEW owns ──────────────────────────────────────────"
+
+    WinShell class >> editorCaret ^ <Integer> [
+        ^EditorCaret isNil ifTrue: [ 1 ] ifFalse: [ EditorCaret ] ]
+
+    WinShell class >> editorCaret: n <Integer> [
+        "Clamped to the document, always. Every navigation below can run off
+         an end, and a caret outside the buffer is an `at:` away from a raise
+         inside a paint — which is the failure that shows as a blank pane."
+        EditorCaret := (n max: 1) min: self editorText size + 1.
+        ^self
+    ]
+
+    WinShell class >> adoptSessionCaret [
+        "After an EDIT the session is the authority: it moved the caret past
+         whatever it inserted or removed, and the view takes that answer
+         rather than recomputing it."
+        EditorSession current ifNotNil: [ :s | self editorCaret: s cursorOffset ].
+        ^self
+    ]
+
+    "── Hit-testing: WG6c-1's arithmetic, inverted ───────────────────────"
+
+    WinShell class >> editorOffsetAtX: px <Integer> y: py <Integer> ^ <Integer> [
+        "Pixel to 1-based offset. The forward direction is
+         `column * charWidth`, `line * lineHeight` (WG6c-1), so this divides —
+         which is only true because the face is MONOSPACED, and is most of why
+         that was chosen.
+
+         PURE over the text, so a click landing on the right character is
+         checkable with no window. Clicking past the end of a line lands at
+         its END rather than wrapping to the next, which is what every editor
+         does and what a user means."
+        | text targetLine targetCol i line col |
+        text := self editorText.
+        targetLine := py // self editorLineHeight.
+        targetCol := (px + (self editorCharWidth // 2)) // self editorCharWidth.
+        i := 1.
+        line := 0.
+        col := 0.
+        [ i <= text size ] whileTrue: [
+            (line = targetLine and: [ col = targetCol ]) ifTrue: [ ^i ].
+            (text at: i) = Character nl
+                ifTrue: [
+                    "End of the target line reached before the target column:
+                     the click was past the last character, so stop here."
+                    line = targetLine ifTrue: [ ^i ].
+                    line := line + 1.
+                    col := 0 ]
+                ifFalse: [ col := col + 1 ].
+            i := i + 1 ].
+        ^text size + 1
+    ]
+
+    WinShell class >> editorClickAt: lp <Integer> ^ <Object> [
+        "A click both FOCUSES and positions. Focus first: without it the pane
+         is a picture — the keys would go wherever they were going before, and
+         the caret would blink in another window."
+        WinApi setFocus: self editorPaneHwnd.
+        self editorCaret: (self editorOffsetAtX: (self loWordSigned: lp)
+            y: (self hiWordSigned: lp)).
+        self syncEditorCaret.
+        ^0
+    ]
+
+    "── Keys ─────────────────────────────────────────────────────────────"
+
+    WinShell class >> editorKeys ^ <Integer> [
+        ^EditorKeys isNil ifTrue: [ 0 ] ifFalse: [ EditorKeys ] ]
+
+    WinShell class >> editorKeyDown: vk <Integer> ^ <Object> [
+        "Navigation and the editing keys that are not characters. Everything
+         printable arrives as WM_CHAR instead and is handled there, so no key
+         is acted on twice."
+        | ctrl |
+        ctrl := self controlIsDown.
+        ctrl ifTrue: [
+            vk = 16r5A ifTrue: [ ^self editorCommand: 'undo' ].   "Z"
+            vk = 16r59 ifTrue: [ ^self editorCommand: 'redo' ].   "Y"
+            ^#defwindowproc ].
+        vk = 16r25 ifTrue: [ ^self editorMoveBy: -1 ].            "Left"
+        vk = 16r27 ifTrue: [ ^self editorMoveBy: 1 ].             "Right"
+        vk = 16r26 ifTrue: [ ^self editorMoveLine: -1 ].          "Up"
+        vk = 16r28 ifTrue: [ ^self editorMoveLine: 1 ].           "Down"
+        vk = 16r24 ifTrue: [ ^self editorMoveToLineEdge: #home ]. "Home"
+        vk = 16r23 ifTrue: [ ^self editorMoveToLineEdge: #end ].  "End"
+        vk = 16r08 ifTrue: [ ^self editorApply: 'Backspace' ].    "Backspace"
+        vk = 16r2E ifTrue: [ ^self editorApply: 'Delete' ].       "Delete"
+        vk = 16r0D ifTrue: [ ^self editorApply: 'Enter' ].        "Enter"
+        ^#defwindowproc
+    ]
+
+    WinShell class >> editorChar: code <Integer> ^ <Object> [
+        "Printable characters only. Backspace (8), Enter (13) and Tab (9) all
+         arrive here as well as in WM_KEYDOWN, and acting on both would insert
+         twice or delete twice — so the control range is declined here and
+         owned there. Tab is the exception worth naming: it is not handled at
+         all yet, so it falls through to the system rather than inserting an
+         invisible character nobody asked for."
+        code < 32 ifTrue: [ ^#defwindowproc ].
+        code = 127 ifTrue: [ ^#defwindowproc ].
+        ^self editorApply: (String with: (Character value: code))
+    ]
+
+    WinShell class >> editorApply: key <String> ^ <Object> [
+        "One edit. The view hands over its caret, the session applies the edit
+         and moves the caret, and the view adopts the answer — the one-
+         authority-per-phase rule this file exists to keep."
+        EditorSession current isNil ifTrue: [ ^#defwindowproc ].
+        EditorKeys := self editorKeys + 1.
+        EditorSession current handleKey: key at: self editorCaret.
+        self adoptSessionCaret.
+        self refreshEditorPane.
+        self syncEditorCaret.
+        ^0
+    ]
+
+    WinShell class >> editorCommand: name <String> ^ <Object> [
+        "Undo and redo, which the rope makes free: `TextBuffer` keeps the
+         ROOTS of a persistent tree, so the previous root is the previous
+         document exactly. No journal, no replay, no partial application."
+        EditorSession current isNil ifTrue: [ ^#defwindowproc ].
+        EditorSession current handleCommand: name.
+        self adoptSessionCaret.
+        self refreshEditorPane.
+        self syncEditorCaret.
+        ^0
+    ]
+
+    "── Navigation, all pure arithmetic over the text ────────────────────"
+
+    WinShell class >> editorMoveBy: delta <Integer> ^ <Object> [
+        self editorCaret: self editorCaret + delta.
+        self syncEditorCaret.
+        ^0
+    ]
+
+    WinShell class >> editorLineColOf: offset <Integer> ^ <Array> [
+        "#(line col), both 0-based. Shared by every vertical move and by the
+         caret's own pixel position, so they cannot disagree about where the
+         caret is."
+        | text i line col |
+        text := self editorText.
+        i := 1. line := 0. col := 0.
+        [ i < offset and: [ i <= text size ] ] whileTrue: [
+            (text at: i) = Character nl
+                ifTrue: [ line := line + 1. col := 0 ]
+                ifFalse: [ col := col + 1 ].
+            i := i + 1 ].
+        ^Array with: line with: col
+    ]
+
+    WinShell class >> editorOffsetOfLine: targetLine <Integer> col: targetCol <Integer> ^ <Integer> [
+        | text i line col |
+        text := self editorText.
+        i := 1. line := 0. col := 0.
+        [ i <= text size ] whileTrue: [
+            (line = targetLine and: [ col = targetCol ]) ifTrue: [ ^i ].
+            (text at: i) = Character nl
+                ifTrue: [
+                    line = targetLine ifTrue: [ ^i ].
+                    line := line + 1. col := 0 ]
+                ifFalse: [ col := col + 1 ].
+            i := i + 1 ].
+        ^text size + 1
+    ]
+
+    WinShell class >> editorMoveLine: delta <Integer> ^ <Object> [
+        "Up and down keep the COLUMN, which is what makes vertical movement
+         feel like movement rather than teleporting. A short line clamps to
+         its end and the column is not remembered past that — the simple
+         behaviour, and the one that never surprises."
+        | lc |
+        lc := self editorLineColOf: self editorCaret.
+        self editorCaret: (self editorOffsetOfLine: ((lc at: 1) + delta max: 0)
+            col: (lc at: 2)).
+        self syncEditorCaret.
+        ^0
+    ]
+
+    WinShell class >> editorMoveToLineEdge: which <Symbol> ^ <Object> [
+        | lc |
+        lc := self editorLineColOf: self editorCaret.
+        which == #home
+            ifTrue: [ self editorCaret: (self editorOffsetOfLine: (lc at: 1) col: 0) ]
+            ifFalse: [ self editorCaret: (self editorOffsetOfLine: (lc at: 1) col: 1000000) ].
+        self syncEditorCaret.
+        ^0
+    ]
+]

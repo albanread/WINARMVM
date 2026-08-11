@@ -91,3 +91,7 @@
 # `EditorSession`'s rope with WG5c's tokenizer and palette. Loads after 100
 # (the tokenizer it names) and after 94 (the drawing helpers it reuses).
 106_winui_editorpane.mst
+# WINARM (WG6c-2): the editor pane accepts input — WM_CHAR/WM_KEYDOWN to the
+# rope's `handleKey:at:`, mouse hit-testing (WG6c-1's arithmetic inverted),
+# and undo/redo, which the persistent rope makes free.
+107_winui_editorkeys.mst

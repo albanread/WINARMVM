@@ -230,8 +230,14 @@ Object subclass: WinShell [
             WinApi createCaret: hwnd bitmap: 0 width: 2 height: self editorLineHeight.
             WinApi showCaret: hwnd.
             CaretOwned := true ].
-        p := self caretPointFor: (EditorSession current
-            ifNil: [ 1 ] ifNotNil: [ :s | s cursorOffset ]).
+        "THE VIEW'S caret, not the session's. 107's header states the rule —
+         the view owns the caret for NAVIGATION and the session owns it only
+         across an EDIT — and this line read the session's, so every arrow
+         key and every click moved a caret that was then drawn back at the
+         last edit position. The `two authorities would drift` hazard, in the
+         file that wrote it down. `editorCaret` is the view's, and after an
+         edit it has already adopted the session's answer."
+        p := self caretPointFor: self editorCaret.
         WinApi setCaretPos: (p at: 1) + 2 y: (p at: 2) + 2.
         ^self
     ]

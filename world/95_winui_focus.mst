@@ -159,6 +159,21 @@ Object subclass: WinShell [
          now self-healing rather than event-sourced, which is the right shape
          for a fact that can be re-derived cheaply at any time."
         self syncCommandEnablement.
+        "WG6c-2: THE CARET IS A THREAD-WIDE RESOURCE, not a per-window one, so
+         it belongs to whatever last called CreateCaret — and the editor pane
+         is the only thing here that makes one. Reconciled from the same pass
+         and for the same reason the verbs are: the pane can only notice its
+         OWN clicks and keys, so nothing in 107 ever runs when focus leaves by
+         another route, and the caret would go on blinking in a pane that does
+         not have focus. That is the sprint's named pitfall — it reads as two
+         cursors — and polling is what WG4 D4 already chose over WM_KILLFOCUS,
+         which Win32 sends to the control rather than to us.
+
+         `syncEditorCaret` is idempotent in both directions (it creates only
+         when focus IS the pane and it does not already own one, destroys only
+         when it does) and returns immediately when there is no pane at all, so
+         a quiet pass costs one GetFocus — the compare above already paid it."
+        self syncEditorCaret.
         "The verb cells' repaint now belongs to `syncCommandEnablement`, which
          is the only thing that can change how they look and so the only thing
          that should have to remember. Duplicating it here would repaint three

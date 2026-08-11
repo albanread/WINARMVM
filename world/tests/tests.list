@@ -141,4 +141,20 @@ tier1.mst
 # at all. 100 is where the Windows layer continues now that 90-99 is full.
 ../100_winui_syntax.mst
 66_winui_syntax_tests.mst
+# WINARM (WG6c-1/WG6c-2): the editor pane and its keys. Both load here for the
+# same compile-time reason the rest do - 67 names WinShell methods they define
+# - and in winui.list's own order, 106 before 107. 106 must follow ../100
+# above: it names `WinSyntax` in a method body, and an unresolved capitalised
+# name is a COMPILE error in this dialect.
+#
+# What 67 checks is the ARITHMETIC, which is pure over the text and so wants
+# no window: offset <-> (line, col), pixel <-> offset, the caret's clamp, and
+# typing-then-undo. That last one reaches `editorApply:`, which calls
+# `refreshEditorPane` and `syncEditorCaret` - both of which return early on a
+# zero `editorPaneHwnd`, so the edit path runs headless without touching FFI.
+# What needs a real window (a WM_PAINT arriving, a real keystroke, a caret
+# blinking) is `just gate-wg5b`.
+../106_winui_editorpane.mst
+../107_winui_editorkeys.mst
+67_winui_editor_tests.mst
 99_run_all.mst
