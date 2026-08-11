@@ -39,3 +39,6 @@
 # WINARM (WG4 D3): the custom-drawn command bar — Fluent glyphs, 9pt labels
 # beneath, and the system accent underline on the active view.
 94_winui_drawing.mst
+# WINARM (WG4 D4): Do It / Print It enablement, tracked by the FOCUSED
+# control rather than the active view.
+95_winui_focus.mst

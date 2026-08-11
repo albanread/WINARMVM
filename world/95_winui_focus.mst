@@ -1,0 +1,124 @@
+"── 95_winui_focus.mst — WG4 D4: Do It / Print It, tracked by FOCUS ──────
+ docs/ROADMAP.md's WG4 row ends `Do It/Print It enablement tracked by focus`,
+ and §2.1 says the same thing from the other side: *greyed by focus context —
+ the Mac contract, stated and tested*.
+
+ WHAT WAS THERE BEFORE, and why it had to change. WG4's first pass tracked the
+ ACTIVE VIEW: the verbs were enabled when `#workspace` was showing. That is a
+ coarser thing that happens to agree today only because there is exactly one
+ view that could ever supply source. It stops agreeing the moment WG5's
+ Browser puts four panes in one view, or the moment a Workspace shares a
+ window with a search field — and the failure would be silent: a Do It that
+ evaluates the wrong pane's text.
+
+ WHY POLL RATHER THAN LISTEN, which is the one real decision here. Win32 sends
+ `WM_SETFOCUS`/`WM_KILLFOCUS` to the control that gains or loses focus — NOT
+ to its parent. A shell that wanted them delivered would have to subclass every
+ child's wndproc, which means a Rust trampoline per control class and a second
+ door with none of the first one's guarantees. `GetFocus` answers the same
+ question in one call, and the drain already runs on a 50 ms heartbeat, so
+ asking there costs one Win32 call per pass and no new mechanism at all.
+
+ The check is CHEAP AND IDEMPOTENT: it compares the focused HWND against the
+ last one it saw and does nothing when they match, so the common case — focus
+ did not move — is one `GetFocus` and a compare."
+
+Object subclass: WinApi [
+    WinApi class >> getFocus ^ <Integer> [
+        "The window with the keyboard focus ON THIS THREAD, or 0. Thread-scoped
+         by design, which is exactly right here: the UI VM owns the only thread
+         that has any of these windows."
+        <primitive: FFI function: #GetFocus ret: #g args: #()>
+        ^self primitiveFailed: 'GetFocus'
+    ]
+
+    WinApi class >> setFocus: hwnd <Integer> ^ <Integer> [
+        "Give the keyboard focus to a control. Present for the same reason
+         `GetFocus` is — the shell must be able to put focus where a view
+         expects it on show (WG5's Workspace wants it on its text), and a
+         gate must be able to MOVE focus to prove the predicate answers both
+         ways rather than merely answering false consistently."
+        <primitive: FFI function: #SetFocus ret: #g args: #(g)>
+        ^self primitiveFailed: 'SetFocus'
+    ]
+
+    WinApi class >> getWindowLongPtr: hwnd <Integer> index: n <Integer> ^ <Integer> [
+        <primitive: FFI function: #GetWindowLongPtrW ret: #g args: #(g g)>
+        ^self primitiveFailed: 'GetWindowLongPtrW'
+    ]
+]
+
+Object subclass: WinControl [
+    "── can this control supply source to Do It? ─────────────────────────
+     A control is a SOURCE SURFACE when it is an editable multiline EDIT: the
+     Workspace is one, a read-only view placeholder is not, a button is not,
+     and the transcript — read-only by construction — is not either.
+
+     Asked of WIN32 rather than remembered, so a control whose style is changed
+     by anything at all still answers correctly. That is the same rule
+     `barLabel` follows and for the same reason."
+
+    isSourceSurface ^ <Boolean> [
+        | style |
+        (klass = 'EDIT') ifFalse: [ ^false ].
+        style := WinApi getWindowLongPtr: handle index: (0 - 16).   "GWL_STYLE"
+        ^((style bitAnd: (WinApi constant: 'ES_MULTILINE')) ~= 0)
+            and: [ (style bitAnd: (WinApi constant: 'ES_READONLY')) = 0 ]
+    ]
+]
+
+Object subclass: WinShell [
+
+    WinShell class >> focusedControl ^ <Object> [
+        "The WinControl that owns the keyboard focus, or nil — including nil
+         when focus is on the shell window itself or on nothing."
+        | h |
+        h := WinApi getFocus.
+        h = 0 ifTrue: [ ^nil ].
+        ^self controls detect: [ :c | c handle = h ] ifNone: [ nil ]
+    ]
+
+    WinShell class >> focusedControlName ^ <Object> [
+        ^self focusedControl ifNil: [ nil ] ifNotNil: [ :c | c name ]
+    ]
+
+    WinShell class >> syncCommandEnablement [
+        "D4's predicate, and it is deliberately about the FOCUSED CONTROL
+         rather than the active view: `can the thing the user is typing in
+         supply source?`. Answers false today for every view WG4 ships, which
+         is the honest answer — none of them is editable — and lights up on its
+         own the moment WG5's Workspace exists, with no change here."
+        | on |
+        on := self focusedControl
+            ifNil: [ false ]
+            ifNotNil: [ :c | c isSourceSurface ].
+        CommandsEnabled := on.
+        #(#doit #printit) do: [ :n |
+            (self controlNamed: n) ifNotNil: [ :c | c enable: on ] ].
+        ^self
+    ]
+
+    WinShell class >> checkFocusChanged ^ <Boolean> [
+        "Called from the drain. Answers whether focus MOVED — so the caller can
+         repaint the two verb cells only when their appearance can actually
+         have changed, rather than on every heartbeat.
+
+         `GetFocus` is one call and the compare is one word; a pass in which
+         nothing moved costs exactly that and touches no control."
+        | h |
+        h := WinApi getFocus.
+        h = LastFocusHwnd ifTrue: [ ^false ].
+        LastFocusHwnd := h.
+        FocusChanges := (FocusChanges isNil ifTrue: [ 0 ] ifFalse: [ FocusChanges ]) + 1.
+        self syncCommandEnablement.
+        "The verbs' own cells are owner-drawn and their greying is part of the
+         picture, so a focus change makes exactly those two stale."
+        #(#doit #printit) do: [ :n |
+            (self controlNamed: n) ifNotNil: [ :c |
+                WinApi invalidateRect: c handle rect: 0 erase: 0 ] ].
+        ^true
+    ]
+
+    WinShell class >> focusChanges ^ <Integer> [
+        ^FocusChanges isNil ifTrue: [ 0 ] ifFalse: [ FocusChanges ] ]
+]

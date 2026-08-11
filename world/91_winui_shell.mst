@@ -1521,6 +1521,12 @@ Object subclass: WinShell [
             PendingNotifies := OrderedCollection new.
             queued do: [ :n |
                 self serviceNotifyFrom: (n at: 1) id: (n at: 2) code: (n at: 3) ] ].
+        "WG4 D4: focus is polled here rather than listened for — Win32 sends
+         WM_SETFOCUS to the CONTROL, not to its parent, and subclassing every
+         child to hear it would mean a second door with none of this one's
+         guarantees. One GetFocus and a compare per pass; the hook is a no-op
+         until 95_winui_focus.mst defines it."
+        self checkFocusChanged.
         ReaskOnce == true ifTrue: [
             "The guest's own escape hatch, and `tests_wg3.md` item 5's whole
              mechanism: work discovered DURING a pass. Answering non-zero
@@ -1558,6 +1564,7 @@ Object subclass: WinShell [
      afterwards is exactly how the Cocoa side acquired its scars."
 
     WinShell class >> applyLayout [ ^self ]
+    WinShell class >> checkFocusChanged ^ <Boolean> [ ^false ]
     WinShell class >> buildControls [ ^self ]
     WinShell class >> ownsControlId: anId <Integer> ^ <Boolean> [ ^false ]
     WinShell class >> serviceCommand: anId <Integer> code: aCode <Integer> from: aHandle <Integer> [ ^self ]

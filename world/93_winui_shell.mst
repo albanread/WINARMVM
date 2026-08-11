@@ -184,7 +184,7 @@ Object subclass: WinApi [
 Object subclass: WinShell [
     <classVars: Wg4Enabled Views ActiveView ViewSwitchCount ViewBuildCount
                 TranscriptCollapsed TranscriptLines MetricsText MetricsUpdates
-                CommandsEnabled AccentColor LabelFont GlyphFont DrawRect DrawCalls DrawMisses DrawError DrawLast DrawIds DrawResult DrawResultClass DrawStep GlyphBuf>
+                CommandsEnabled AccentColor LabelFont GlyphFont DrawRect DrawCalls DrawMisses DrawError DrawLast DrawIds DrawResult DrawResultClass DrawStep GlyphBuf LastFocusHwnd FocusChanges>
 
     WinShell class >> wg4Enabled ^ <Boolean> [
         "`MACVM_WINUI_WG4=off` restores WG3's window exactly — the same shape
@@ -433,14 +433,10 @@ Object subclass: WinShell [
         ^CommandsEnabled == true
     ]
 
-    WinShell class >> syncCommandEnablement [
-        | on |
-        on := ActiveView == #workspace.
-        CommandsEnabled := on.
-        #(#doit #printit) do: [ :n |
-            (self controlNamed: n) ifNotNil: [ :c | c enable: on ] ].
-        ^self
-    ]
+    "WG4 D4 moved `syncCommandEnablement` to 95_winui_focus.mst, where the
+     predicate is about the FOCUSED CONTROL rather than the active view. The
+     old body tracked `ActiveView == #workspace`, which agrees with focus only
+     while exactly one view can supply source — see that file's own note."
 
     "── the hooks 92 defined, taken over ─────────────────────────────────"
 
