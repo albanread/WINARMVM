@@ -48,3 +48,6 @@
 # WINARM (WG5a): the Workspace — selection-or-everything, Do It / Print It
 # over the primary seam, Ctrl-D / Ctrl-P, and the ghost line.
 97_winui_workspace.mst
+# WINARM (WG5b-1): the Browser — four panes over the primary's live class
+# hierarchy, read-only. Accept and the image path are WG5b-2.
+98_winui_browser.mst

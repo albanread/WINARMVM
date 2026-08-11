@@ -96,10 +96,63 @@ these environments did in its first year.
 
 ## WG5b — the Browser
 
-Four panes over the shared path-scheme model, Accept persisting to the image.
-Detailed when 5a lands — the row's own hard part is the **CG8 gate re-run**
-(*Accept persists byte-identically to the web path*), and that gate is the
-specification.
+Four panes over the shared model, Accept persisting to the image. Detailed
+now that 5a has landed, and the research changed the shape of it.
+
+### What the Mac actually does, and why it matters here
+
+Reads are **DUAL**, deliberately (`66_cocoabrowser.mst`'s own note):
+
+* **hierarchy and selector rows** come from the PRIMARY's live reflection —
+  `UiBrowserService browseSnapshot`, which already exists, and which projects
+  the live hierarchy into a names-only nested tree of Strings, Arrays and
+  smis. Names only, because *the pickle REFUSES class objects* and that
+  refusal is the enforcement that no class oop crosses a VM boundary.
+* **the variables pane and all source text** come from the IMAGE
+  (`image_store`), so an added variable shows immediately while live instance
+  shape honestly waits for the next boot — there is no `become:`.
+
+Writes drive `image_store::flows` — the web GUI's own implementation, shared
+rather than reimplemented — and live-compile on the primary through the
+ordinary `Worker uiDoit:` channel.
+
+### The consequence for this port, and the slicing it forces
+
+The live half needs **nothing new**: WG4 D1 built the seam, `browseSnapshot`
+is already pickle-safe by construction, and `Worker uiDoit:` already
+live-compiles. A four-pane browser over live reflection is therefore reachable
+today, entirely in Smalltalk, with no new Rust at all.
+
+The image half needs a **host service** — the Mac's `host_service.rs` is an
+ObjC-shaped adapter over `image_store::flows`, and Windows has no equivalent.
+That is real work, it is where the CG8 gate lives, and it is the reason this
+row is sized **L**.
+
+So:
+
+* **WG5b-1 — the browser, over live reflection.** Four panes (packages,
+  classes, protocols, selectors) plus a source pane, fed by
+  `browseSnapshot` across the seam. Read-only. Everything a user needs to
+  BROWSE, which is most of what a browser is for, and it exercises the seam
+  with a payload far larger than a doit.
+* **WG5b-2 — Accept, over `image_store::flows`.** The host service, the write
+  path, and the CG8 gate: *Accept persists byte-identically to the web path*.
+  That gate is the specification and it is not negotiable — two GUIs that
+  wrote the image differently would be a corruption bug with a UI in front of
+  it.
+
+Slicing it this way keeps a read-only browser from waiting on a write path,
+and keeps the write path from being rushed to make a demo look complete.
+
+### Pitfalls specific to 5b
+
+* **`browseSnapshot` is a WHOLE-HIERARCHY payload.** It crosses the seam as
+  one pickled tree. That is fine — it is names only — but it must be requested
+  on a refresh rather than per pane, or four panes become four traversals of
+  the entire image.
+* **Names only, and that is load-bearing.** Anything the browser wants that
+  is not in those six slots (source, comments, categories) comes from the
+  image path, not by widening the snapshot until a class oop sneaks in.
 
 ## Implementation order
 

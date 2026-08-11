@@ -184,7 +184,7 @@ Object subclass: WinApi [
 Object subclass: WinShell [
     <classVars: Wg4Enabled Views ActiveView ViewSwitchCount ViewBuildCount
                 TranscriptCollapsed TranscriptLines MetricsText MetricsUpdates
-                CommandsEnabled AccentColor LabelFont GlyphFont DrawRect DrawCalls DrawMisses DrawError DrawLast DrawIds DrawResult DrawResultClass DrawStep GlyphBuf LastFocusHwnd FocusChanges TranscriptHeight DragActive DragStartY DragStartHeight MonoFont SelScratch DoItCount PrintItCount CursorScratch>
+                CommandsEnabled AccentColor LabelFont GlyphFont DrawRect DrawCalls DrawMisses DrawError DrawLast DrawIds DrawResult DrawResultClass DrawStep GlyphBuf LastFocusHwnd FocusChanges TranscriptHeight DragActive DragStartY DragStartHeight MonoFont SelScratch DoItCount PrintItCount CursorScratch BrowserTree BrowserRefreshes BrowserClass BrowserSide BrowserSelector>
 
     WinShell class >> wg4Enabled ^ <Boolean> [
         "`MACVM_WINUI_WG4=off` restores WG3's window exactly — the same shape
@@ -227,6 +227,7 @@ Object subclass: WinShell [
          rest do on the Mac — which is why this is a REGISTRY and not a
          hard-coded switch statement."
         self registerViewNamed: #workspace title: 'Workspace'.
+        self registerViewNamed: #browser title: 'Browser'.
         self registerViewNamed: #welcome title: 'Welcome'.
         self registerViewNamed: #transcript title: 'Transcript'.
         self registerViewNamed: #metrics title: 'Metrics'.
@@ -252,7 +253,8 @@ Object subclass: WinShell [
          that leaves a frame in which NEITHER is on screen. A tab control never
          has that frame; it is the whole difference between a swap and a blink."
         (self controlNamed: (self contentNameFor: aSymbol))
-            ifNotNil: [ :c | c show: true ].
+            ifNotNil: [ :c | c show: aSymbol ~~ #browser ].
+        self showBrowserPanes: aSymbol == #browser.
         self views do: [ :v |
             | c |
             (v at: 1) == aSymbol ifFalse: [
@@ -312,6 +314,10 @@ Object subclass: WinShell [
         aSymbol == #workspace ifTrue: [
             c setFont: self monoFont.
             self installGhost ].
+        "WG5b-1: the Browser's content child is a HOST for four panes rather
+         than a text surface of its own — it stays hidden and the panes sit in
+         its rect, so the view registry needs no notion of `composite view`."
+        aSymbol == #browser ifTrue: [ self buildBrowserPanes ].
         c show: false.
         "Position it NOW, at the content rect it will always occupy. A view
          switch deliberately does not relayout (every content child shares one
@@ -601,6 +607,9 @@ Object subclass: WinShell [
         self views do: [ :v |
             (self controlNamed: (self contentNameFor: (v at: 1))) ifNotNil: [ :c |
                 (c moveTo: (rects at: #content)) ifTrue: [ moved := moved + 1 ] ] ].
+        "The Browser's four panes share the content rect between them."
+        (self viewIsBuilt: #browser) ifTrue: [
+            self layoutBrowserPanes: (rects at: #content) ].
 
         (self controlNamed: #splitter) ifNotNil: [ :c |
             (c moveTo: (rects at: #splitter)) ifTrue: [ moved := moved + 1 ] ].
@@ -637,6 +646,11 @@ Object subclass: WinShell [
         name == #doit ifTrue: [ self doIt. ^self ].
         name == #printit ifTrue: [ self printIt. ^self ].
         name == #splitter ifTrue: [ self onSplitterClick. ^self ].
+        "WG5b-1: a LISTBOX reports selection changes as WM_COMMAND with
+         LBN_SELCHANGE (1) in the high word — the same door, the same drain,
+         one pass later."
+        (aCode = 1 and: [ self isBrowserPane: name ])
+            ifTrue: [ self onBrowserPaneChanged: name. ^self ].
         ^self wg3ServiceCommand: anId code: aCode from: aHandle
     ]
 ]
