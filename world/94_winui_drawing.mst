@@ -363,7 +363,9 @@ Object subclass: WinShell [
          because it queues rather than sends."
         self controls do: [ :c |
             (self isBarControl: c name) ifTrue: [
-                WinApi invalidateRect: c handle rect: 0 erase: 1 ] ].
+                "erase: 0 — the handler paints every pixel of the cell itself,
+                 so erasing to the background first is a flash with no purpose."
+                WinApi invalidateRect: c handle rect: 0 erase: 0 ] ].
         ^self
     ]
 

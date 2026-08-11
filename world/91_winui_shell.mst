@@ -976,7 +976,7 @@ Object subclass: WinShell [
          and says it may be stale."
         | atom |
         atom := WinApi registerClass: (WinApi
-            wndClassStyle: ((WinApi constant: 'CS_HREDRAW') bitOr: (WinApi constant: 'CS_VREDRAW'))
+            wndClassStyle: 0
             proc: WinApi wndProcAddress
             instance: WinApi moduleHandle
             cursor: (WinApi loadCursor: 0 name: (WinApi constant: 'IDC_ARROW'))
@@ -1028,7 +1028,8 @@ Object subclass: WinShell [
             createWindowExStyle: 0
             class: (WinArena nativeUtf16: self className)
             title: (WinArena scratchUtf16: self defaultTitle)
-            style: (WinApi constant: 'WS_OVERLAPPEDWINDOW')
+            style: ((WinApi constant: 'WS_OVERLAPPEDWINDOW')
+                bitOr: (WinApi constant: 'WS_CLIPCHILDREN'))
             x: (WinApi constant: 'CW_USEDEFAULT')
             y: (WinApi constant: 'CW_USEDEFAULT')
             width: (WinApi constant: 'CW_USEDEFAULT')

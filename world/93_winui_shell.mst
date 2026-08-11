@@ -245,16 +245,27 @@ Object subclass: WinShell [
         entry := self views detect: [ :v | (v at: 1) == aSymbol ] ifNone: [ nil ].
         entry isNil ifTrue: [ ^false ].
         self ensureViewBuilt: aSymbol.
+        "SHOW the incoming child FIRST, then hide the others. The obvious loop
+         — one pass calling `show:` with a boolean — hides the outgoing view
+         before showing the incoming one whenever the outgoing sorts first, and
+         that leaves a frame in which NEITHER is on screen. A tab control never
+         has that frame; it is the whole difference between a swap and a blink."
+        (self controlNamed: (self contentNameFor: aSymbol))
+            ifNotNil: [ :c | c show: true ].
         self views do: [ :v |
             | c |
-            c := self controlNamed: (self contentNameFor: (v at: 1)).
-            c isNil ifFalse: [ c show: (v at: 1) == aSymbol ] ].
+            (v at: 1) == aSymbol ifFalse: [
+                c := self controlNamed: (self contentNameFor: (v at: 1)).
+                c isNil ifFalse: [ c show: false ] ] ].
         ActiveView := aSymbol.
         ViewSwitchCount := (ViewSwitchCount isNil ifTrue: [ 0 ] ifFalse: [ ViewSwitchCount ]) + 1.
-        "The underline moved, so the old cell and the new one are both stale."
+        "ONLY the bar is stale — the underline moved. Deliberately NOT a
+         relayout: every content child occupies the SAME rect, so switching
+         views changes no geometry at all. The earlier `requestLayout` here
+         moved every control in the window on every switch, including the four
+         hidden ones, which is what made a swap look like a full redraw."
         self invalidateBar.
         self syncCommandEnablement.
-        self requestLayout.
         ^true
     ]
 
@@ -292,6 +303,19 @@ Object subclass: WinShell [
                     bitOr: (WinApi constant: 'ES_AUTOVSCROLL')))
             exStyle: 0.
         c show: false.
+        "Position it NOW, at the content rect it will always occupy. A view
+         switch deliberately does not relayout (every content child shares one
+         rect, so a switch changes no geometry) — which means a child built
+         after the last layout would otherwise never be given a position at
+         all, and would show as an empty content area. Measured exactly that
+         way the first time the relayout came out."
+        self isOpen ifTrue: [
+            | rects |
+            rects := self layout
+                rectsIn: self clientWidth
+                by: self clientHeight
+                dpi: (Dpi isNil ifTrue: [ WinApi constant: 'USER_DEFAULT_SCREEN_DPI' ] ifFalse: [ Dpi ]).
+            c moveTo: (rects at: #content) ].
         entry at: 3 put: true.
         ViewBuildCount := (ViewBuildCount isNil ifTrue: [ 0 ] ifFalse: [ ViewBuildCount ]) + 1.
         ^self

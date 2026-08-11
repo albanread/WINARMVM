@@ -198,6 +198,40 @@ carries the VM state a status bar would otherwise hold. If one is wanted it
 is a genuine ADDITION to the design, not an omission from it, and it should
 be argued for on its own terms rather than smuggled in as polish.
 
+### D6. Flicker-free switching and resizing (added 2026-08-11, on the author's report)
+
+**The report:** *"the modern view appears to be a flickery redraw of the
+content area when a new tab is selected — that does not seem like much of an
+improvement."* It is not, and the plan had no answer: the ONLY mention of
+flicker anywhere in the design is half a sentence in WG3's D4 — controls are
+moved with one `SetWindowPos` *"(or `DeferWindowPos` if measurement says the
+flicker warrants it)"*. Measurement now says it does, and `DeferWindowPos`
+was never the main cause anyway.
+
+**The three real causes, all present and all in this project's own code:**
+
+1. **No `WS_CLIPCHILDREN` on the parent** — zero occurrences in the whole
+   world. Without it the shell window paints its background over the areas
+   its children occupy, and each child then repaints on top. That double
+   paint IS the flash, and it is the classic Win32 one.
+2. **`CS_HREDRAW | CS_VREDRAW` on the window class** — every size change
+   invalidates the ENTIRE client area, so a drag repaints everything
+   continuously rather than the bands that actually moved.
+3. **`erase: 1` on the bar's own invalidation** (WG4 D3's, i.e. mine) — the
+   handler fully paints every pixel of its cell, so erasing to the background
+   first is a guaranteed flash with no purpose.
+
+**The fix, in that order**, cheapest and most load-bearing first. `WS_CLIPCHILDREN`
+alone is expected to remove most of it; the erase flag is a one-word change;
+dropping the class redraw styles is safe precisely BECAUSE the layout already
+repositions every band on `WM_SIZE`. `WS_EX_COMPOSITED` (true double-buffering
+for the child tree) is held in reserve: it fixes what remains but serialises
+painting through DWM, so it is measured before it is adopted, not assumed.
+
+**And the switch itself:** showing the new view's child before hiding the old
+one leaves no frame in which NEITHER is on screen — which is the difference
+between a swap and a blink.
+
 ## Implementation order
 
 1. **D1, alone.** The primary VM and the `#uiReq`/`#uiReply` round trip,
@@ -211,6 +245,8 @@ be argued for on its own terms rather than smuggled in as polish.
    an unthemed one, and the snap can settle it.
 4. **D4.** Focus tracking, and the enablement predicate that reads it.
 5. **D5.** The splitter (drag, grab bar, chevron, Clear) and the fonts.
+6. **D6.** Flicker: clip children, stop erasing what is about to be painted,
+   stop invalidating the whole client area for a band that moved.
 
 ## Pitfalls
 
