@@ -1,0 +1,233 @@
+"── 100_winui_syntax.mst — WG5c D1/D2: the tokenizer and the colour table ─
+ docs/sprints/sprint_wg5c_detail.md, the two PURE deliverables. No control,
+ no Win32, no window: `runsFor:` is a function from a String to an Array,
+ and `colorFor:` is a lookup. Both are therefore tested with equalities
+ rather than screenshots, exactly as WG5a D1's selection rule is.
+
+ WHY PURE MATTERS HERE and is not just tidiness. WG5c chose RichEdit over a
+ custom-drawn pane (the sprint records the evidence), and the one thing that
+ makes that choice safely reversible is this file: everything about WHAT to
+ colour lives here and knows nothing about how colour is applied. If a later
+ sprint wants its own text renderer, this survives untouched and only the
+ applying changes.
+
+ NUMBERING: the Windows layer has outgrown 90-99, which is now full. It
+ continues at three digits from 100. `winui.list` is the authority on load
+ order — the number is documentation — but note that a plain `ls` sorts
+ `100_` BEFORE `90_`; `sort -V` puts it right."
+
+Object subclass: WinSyntax [
+    <classVars: Palette>
+
+    "── D1. The tokenizer ────────────────────────────────────────────────"
+
+    WinSyntax class >> runsFor: src <String> ^ <OrderedCollection> [
+        "Answers runs of #(start length kind), 1-based, that TILE the input
+         exactly — every character belongs to exactly one run, in order, with
+         no gaps and no overlaps.
+
+         Tiling is deliberate even though the applier only cares about the
+         coloured kinds. It makes the whole function checkable by one
+         property (`the runs reassemble the source`) rather than by trusting
+         a list of cases to be complete, and a tokenizer that loses a
+         character is otherwise very easy to write and very hard to notice."
+        | runs i n start kind c |
+        runs := OrderedCollection new.
+        src isNil ifTrue: [ ^runs ].
+        n := src size.
+        i := 1.
+        [ i <= n ] whileTrue: [
+            start := i.
+            c := src at: i.
+            kind := #plain.
+            c = $" ifTrue: [
+                "A comment runs to the next unpaired double quote; a doubled
+                 one is an escape and stays inside."
+                kind := #comment.
+                i := self scanDelimited: src from: i + 1 to: n delimiter: $" ]
+            ifFalse: [ c = $' ifTrue: [
+                kind := #string.
+                i := self scanDelimited: src from: i + 1 to: n delimiter: $' ]
+            ifFalse: [ c = $$ ifTrue: [
+                "A Character literal takes the NEXT character whatever it is —
+                 including a quote, a space, or a dollar. Consuming it blindly
+                 is the point: `$'` must not open a string."
+                kind := #character.
+                i := (i + 2) min: n + 1 ]
+            ifFalse: [ c = $# ifTrue: [
+                kind := #symbol.
+                i := self scanSymbolIn: src from: i + 1 to: n ]
+            ifFalse: [ c isDigit ifTrue: [
+                kind := #number.
+                i := self scanNumberIn: src from: i to: n ]
+            ifFalse: [ c isLetter ifTrue: [
+                i := self scanWordIn: src from: i to: n.
+                kind := self kindOfWord: (src copyFrom: start to: i - 1) in: src at: i limit: n ]
+            ifFalse: [ (self isSpecialChar: c) ifTrue: [
+                kind := #special.
+                i := self scanSpecialIn: src from: i to: n ]
+            ifFalse: [ (self isBinaryChar: c) ifTrue: [
+                kind := #binary.
+                i := self scanBinaryIn: src from: i to: n ]
+            ifFalse: [
+                "Whitespace and anything unclassified — one character of
+                 #plain, so the tiling invariant holds for input this
+                 tokenizer has never seen."
+                i := i + 1 ] ] ] ] ] ] ] ].
+            runs add: (Array with: start with: i - start with: kind) ].
+        ^runs
+    ]
+
+    WinSyntax class >> scanDelimited: src <String> from: i <Integer> to: n <Integer> delimiter: d <Character> ^ <Integer> [
+        "Past the closing delimiter, treating a doubled one as an escape.
+         Answers n + 1 for an UNTERMINATED literal, which is the common state
+         of a string someone is in the middle of typing — it must colour to
+         the end of the buffer rather than raise."
+        | j |
+        j := i.
+        [ j <= n ] whileTrue: [
+            (src at: j) = d
+                ifTrue: [
+                    (j < n and: [ (src at: j + 1) = d ])
+                        ifTrue: [ j := j + 2 ]
+                        ifFalse: [ ^j + 1 ] ]
+                ifFalse: [ j := j + 1 ] ].
+        ^n + 1
+    ]
+
+    WinSyntax class >> scanSymbolIn: src <String> from: i <Integer> to: n <Integer> ^ <Integer> [
+        "After the #. Three shapes: #'quoted', #binarySelector, and
+         #keyword:with: (identifier characters plus colons)."
+        i > n ifTrue: [ ^i ].
+        (src at: i) = $' ifTrue: [ ^self scanDelimited: src from: i + 1 to: n delimiter: $' ].
+        (self isBinaryChar: (src at: i)) ifTrue: [ ^self scanBinaryIn: src from: i to: n ].
+        ^self scanWhile: src from: i to: n satisfying: [ :c | c isLetterOrDigit or: [ c = $_ or: [ c = $: ] ] ]
+    ]
+
+    WinSyntax class >> scanNumberIn: src <String> from: i <Integer> to: n <Integer> ^ <Integer> [
+        "Digits, plus the pieces a Smalltalk numeric literal can carry: a
+         radix `16r`, a decimal point BETWEEN digits, and an exponent. The
+         point is only consumed when a digit follows, so `3 factorial.` ends
+         the statement rather than starting a fraction — the classic
+         off-by-one-token bug in a Smalltalk lexer."
+        | j |
+        j := self scanWhile: src from: i to: n satisfying: [ :c | c isDigit ].
+        (j <= n and: [ (src at: j) = $r ]) ifTrue: [
+            j := self scanWhile: src from: j + 1 to: n satisfying: [ :c | c isLetterOrDigit ] ].
+        (j < n and: [ (src at: j) = $. and: [ (src at: j + 1) isDigit ] ]) ifTrue: [
+            j := self scanWhile: src from: j + 1 to: n satisfying: [ :c | c isDigit ] ].
+        (j <= n and: [ (src at: j) = $e or: [ (src at: j) = $d ] ]) ifTrue: [
+            ((j < n and: [ (src at: j + 1) isDigit ])
+                or: [ j + 1 < n and: [ (src at: j + 1) = $- and: [ (src at: j + 2) isDigit ] ] ])
+                    ifTrue: [
+                        j := self scanWhile: src from: j + 2 to: n satisfying: [ :c | c isDigit ] ] ].
+        ^j
+    ]
+
+    WinSyntax class >> scanWordIn: src <String> from: i <Integer> to: n <Integer> ^ <Integer> [
+        ^self scanWhile: src from: i to: n satisfying: [ :c | c isLetterOrDigit or: [ c = $_ ] ]
+    ]
+
+    WinSyntax class >> kindOfWord: w <String> in: src <String> at: j <Integer> limit: n <Integer> ^ <Symbol> [
+        "An identifier's kind depends on what it IS and what FOLLOWS it: a
+         trailing colon makes it a keyword part, which is the single most
+         useful thing colour can show in Smalltalk — it is how you read where
+         one keyword message ends and the next begins."
+        (j <= n and: [ (src at: j) = $: and: [ (j = n) or: [ (src at: j + 1) ~= $= ] ] ])
+            ifTrue: [ ^#keyword ].
+        (self isPseudoVariable: w) ifTrue: [ ^#pseudo ].
+        (w first isUppercase) ifTrue: [ ^#classname ].
+        ^#identifier
+    ]
+
+    WinSyntax class >> isPseudoVariable: w <String> ^ <Boolean> [
+        ^#('self' 'super' 'nil' 'true' 'false' 'thisContext') includes: w
+    ]
+
+    WinSyntax class >> scanWhile: src <String> from: i <Integer> to: n <Integer> satisfying: aBlock ^ <Integer> [
+        | j |
+        j := i.
+        [ j <= n and: [ aBlock value: (src at: j) ] ] whileTrue: [ j := j + 1 ].
+        ^j
+    ]
+
+    WinSyntax class >> isSpecialChar: c <Character> ^ <Boolean> [
+        ^'^.;()[]{}' includes: c
+    ]
+
+    WinSyntax class >> scanSpecialIn: src <String> from: i <Integer> to: n <Integer> ^ <Integer> [
+        "One character each — brackets do not run together into a token."
+        ^i + 1
+    ]
+
+    WinSyntax class >> isBinaryChar: c <Character> ^ <Boolean> [
+        "The binary-selector alphabet, plus `:` and `|` which are here rather
+         than in `special` because `:=` and `||` have to scan as one token."
+        ^'+-*/~<>=&@%,?!\|:' includes: c
+    ]
+
+    WinSyntax class >> scanBinaryIn: src <String> from: i <Integer> to: n <Integer> ^ <Integer> [
+        ^self scanWhile: src from: i to: n satisfying: [ :c | self isBinaryChar: c ]
+    ]
+
+    "── D2. The colour table ─────────────────────────────────────────────"
+
+    WinSyntax class >> kinds ^ <Array> [
+        "Named once so the tests can insist the palette covers every kind the
+         tokenizer can emit — a kind with no colour is an invisible hole that
+         only shows up as text that will not highlight."
+        ^#(#comment #string #symbol #character #number #keyword #binary
+           #special #pseudo #classname #identifier #plain)
+    ]
+
+    WinSyntax class >> colorFor: kind <Symbol> ^ <Integer> [
+        "A COLORREF (0x00BBGGRR — Win32's byte order, not RGB), which is what
+         RichEdit's CHARFORMAT wants and so what this answers directly.
+
+         The palette is the one every Smalltalk reader already knows — green
+         comments, blue keywords — rather than an invention, because syntax
+         colour is a convention and an unfamiliar one is worse than none."
+        ^self palette at: kind ifAbsent: [ self colorRefRed: 0 green: 0 blue: 0 ]
+    ]
+
+    WinSyntax class >> palette ^ <Dictionary> [
+        Palette isNil ifTrue: [ Palette := self buildPalette ].
+        ^Palette
+    ]
+
+    WinSyntax class >> buildPalette ^ <Dictionary> [
+        | d |
+        d := Dictionary new.
+        d at: #comment    put: (self colorRefRed:  0 green: 128 blue:  0).
+        d at: #string     put: (self colorRefRed: 163 green: 21 blue: 21).
+        d at: #symbol     put: (self colorRefRed: 163 green: 21 blue: 21).
+        d at: #character  put: (self colorRefRed: 163 green: 21 blue: 21).
+        d at: #number     put: (self colorRefRed:  9 green: 134 blue: 88).
+        d at: #keyword    put: (self colorRefRed:  0 green:  0 blue: 200).
+        d at: #binary     put: (self colorRefRed: 128 green:  0 blue: 128).
+        d at: #special    put: (self colorRefRed: 128 green:  0 blue: 128).
+        d at: #pseudo     put: (self colorRefRed:  0 green:  0 blue: 160).
+        d at: #classname  put: (self colorRefRed:  38 green: 127 blue: 153).
+        d at: #identifier put: (self colorRefRed:  0 green:  0 blue:  0).
+        d at: #plain      put: (self colorRefRed:  0 green:  0 blue:  0).
+        ^d
+    ]
+
+    WinSyntax class >> colorRefRed: r <Integer> green: g <Integer> blue: b <Integer> ^ <Integer> [
+        "COLORREF packs BLUE in the high byte — the reverse of how anyone
+         writes a colour down. Named here so the reversal happens once, in a
+         method whose whole job is to be the place it happens."
+        ^r + (g * 256) + (b * 65536)
+    ]
+
+    "── A convenience the applier will want, and the tests can check ─────"
+
+    WinSyntax class >> colouredRunsFor: src <String> ^ <OrderedCollection> [
+        "The tiling runs, minus the ones that would be drawn in the default
+         colour anyway. The applier sends one EM_SETCHARFORMAT per run, so
+         dropping the no-ops here is the difference between one message per
+         token and one per interesting token."
+        ^(self runsFor: src) reject: [ :r |
+            (r at: 3) == #plain or: [ (r at: 3) == #identifier ] ]
+    ]
+]

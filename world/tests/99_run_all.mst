@@ -134,4 +134,5 @@ TestRunner run: ObjectStreamTests.
 TestRunner run: ExceptionResumeTests.
 Smalltalk platformName == #windows ifTrue: [ TestRunner run: WinUiShellWg4Tests ].
 Smalltalk platformName == #windows ifTrue: [ TestRunner run: WinUiHostWg5bTests ].
+Smalltalk platformName == #windows ifTrue: [ TestRunner run: WinUiSyntaxWg5cTests ].
 TestRunner report.

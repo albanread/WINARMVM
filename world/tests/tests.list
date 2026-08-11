@@ -127,4 +127,9 @@ tier1.mst
 ../98_winui_browser.mst
 ../99_winui_host.mst
 65_winui_host_tests.mst
+# WINARM (WG5c D1/D2): the syntax tokenizer and colour table, both PURE - so
+# unlike every other winui test file this one needs nothing from the machine
+# at all. 100 is where the Windows layer continues now that 90-99 is full.
+../100_winui_syntax.mst
+66_winui_syntax_tests.mst
 99_run_all.mst

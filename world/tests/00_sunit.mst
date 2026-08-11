@@ -57,6 +57,28 @@ Object subclass: TestCase [
         result ranOne.
         aBool == true ifFalse: [ result fail: current , ': assertion failed' ]
     ]
+    assert: aBooleanOrBlock description: aString [
+        "SUnit's OWN labelled assertion, and it has to exist here or the
+         message resolves to `Object >> assert:description:`
+         (80_numeric_completion.mst) — which is a general-purpose assertion
+         that SIGNALS. Inside a TestCase that is doubly wrong: the failure
+         aborts the whole suite run instead of being recorded and counted,
+         and `ranOne` is never called, so the assertions do not appear in the
+         `N run` total at all.
+
+         Found the way it always is: fourteen new tests left the run count
+         unchanged at 7873, and a single wrong expectation in one of them
+         killed all 7873 rather than reporting `1 failed`. Both symptoms, one
+         missing method.
+
+         Takes a Boolean or a block, matching Object's, so the two forms stay
+         interchangeable for anyone who has already written either."
+        | ok |
+        ok := aBooleanOrBlock.
+        (ok == true or: [ ok == false ]) ifFalse: [ ok := aBooleanOrBlock value ].
+        result ranOne.
+        ok == true ifFalse: [ result fail: current , ': ' , aString ]
+    ]
     assert: a equals: b [
         result ranOne.
         a = b ifFalse: [

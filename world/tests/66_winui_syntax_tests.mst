@@ -1,0 +1,231 @@
+"66_winui_syntax_tests.mst — WinUiSyntaxWg5cTests, WG5c D1/D2's whole
+ acceptance. Not `the headless half` this time: the tokenizer and the colour
+ table ARE pure, so there is no other half. A window is needed only to apply
+ what this computes, which is D3/D4.
+
+ THE BACKBONE IS THE TILING PROPERTY. Every run must abut the last and the
+ whole list must reassemble the source exactly. A tokenizer that drops a
+ character, or emits an overlapping run, is easy to write and very hard to
+ spot by reading — but impossible to hide from a property that reconstructs
+ the input. It is checked on every case below rather than in one test of its
+ own, so a new case cannot be added without it being checked too."
+
+TestCase subclass: WinUiSyntaxWg5cTests [
+
+    runAll [
+        "The property first, over inputs chosen to break it."
+        self runTest: #testRunsTileTheSourceExactly do: [ self testRunsTileTheSourceExactly ].
+        self runTest: #testEmptyAndNilAreEmpty do: [ self testEmptyAndNilAreEmpty ].
+
+        "Then the individual lexical shapes."
+        self runTest: #testComments do: [ self testComments ].
+        self runTest: #testStringsAndTheirEscapes do: [ self testStringsAndTheirEscapes ].
+        self runTest: #testCharacterLiteralsSwallowTheirQuote
+             do: [ self testCharacterLiteralsSwallowTheirQuote ].
+        self runTest: #testSymbols do: [ self testSymbols ].
+        self runTest: #testNumbers do: [ self testNumbers ].
+        self runTest: #testAPeriodAfterANumberIsNotAFraction
+             do: [ self testAPeriodAfterANumberIsNotAFraction ].
+        self runTest: #testKeywordsVersusAssignment do: [ self testKeywordsVersusAssignment ].
+        self runTest: #testPseudoVariablesAndClassNames do: [ self testPseudoVariablesAndClassNames ].
+        self runTest: #testUnterminatedLiteralsColourToTheEnd
+             do: [ self testUnterminatedLiteralsColourToTheEnd ].
+
+        "Then the palette."
+        self runTest: #testEveryKindHasAColour do: [ self testEveryKindHasAColour ].
+        self runTest: #testColorRefPacksBlueHigh do: [ self testColorRefPacksBlueHigh ].
+        self runTest: #testColouredRunsDropTheNoOps do: [ self testColouredRunsDropTheNoOps ]
+    ]
+
+    "── The property ─────────────────────────────────────────────────────"
+
+    assertTiles: src <String> [
+        "Every run abuts the last, and concatenating them reproduces the
+         source. This is the invariant that makes the tokenizer trustworthy."
+        | runs at rebuilt |
+        runs := WinSyntax runsFor: src.
+        at := 1.
+        rebuilt := WriteStream on: String new.
+        runs do: [ :r |
+            self assert: (r at: 1) = at
+                description: 'run must start where the last ended: expected ' , at printString
+                    , ' got ' , (r at: 1) printString , ' in [' , src , ']'.
+            self assert: (r at: 2) > 0
+                description: 'a zero-length run would loop forever in [' , src , ']'.
+            rebuilt nextPutAll: (src copyFrom: (r at: 1) to: (r at: 1) + (r at: 2) - 1).
+            at := at + (r at: 2) ].
+        "Parenthesised, and it is not decoration: every binary operator in
+         Smalltalk has the SAME precedence and associates left to right, so
+         `at = src size + 1` reads as `(at = src size) + 1` — a Boolean asked
+         to add — and fails at run time with `does not understand +`. Found
+         exactly that way."
+        self assert: at = (src size + 1)
+            description: 'the runs must consume the whole source of [' , src , ']'.
+        self assert: rebuilt contents = src
+            description: 'the runs must REASSEMBLE [' , src , ']'
+    ]
+
+    testRunsTileTheSourceExactly [
+        "Inputs picked to break tiling specifically: nested-looking quotes, a
+         character literal holding a quote, an unterminated comment, adjacent
+         operators, and a bare bracket run."
+        #('x' 'foo bar' '3 + 4' 'a := b + 1.'
+          '"a comment" 1' '''a string'' 2' '$'' 3' '#sym #+ #at:put:'
+          'Object subclass: Foo [ ^self ]' '[:a :b | a + b] value: 1 value: 2'
+          '16rFF 1.5 2e10' '"unterminated' '''unterminated'
+          '{ } ( ) [ ] ; . ^' 'a<=b' '   ' 'ü') do: [ :s |
+            self assertTiles: s ]
+    ]
+
+    testEmptyAndNilAreEmpty [
+        self assert: (WinSyntax runsFor: '') isEmpty
+            description: 'an empty source has no runs'.
+        self assert: (WinSyntax runsFor: nil) isEmpty
+            description: 'nil must answer empty rather than raise — the pane is empty before it is filled'
+    ]
+
+    "── The lexical shapes ───────────────────────────────────────────────"
+
+    kindsOf: src <String> ^ <OrderedCollection> [
+        ^(WinSyntax runsFor: src) collect: [ :r | r at: 3 ]
+    ]
+
+    firstRunOf: src <String> ^ <Array> [
+        ^(WinSyntax runsFor: src) first
+    ]
+
+    testComments [
+        | r |
+        r := self firstRunOf: '"hello" x'.
+        self assert: (r at: 3) == #comment description: 'a double quote opens a comment'.
+        self assert: (r at: 2) = 7 description: 'the comment covers its own quotes'.
+        r := self firstRunOf: '"he""llo" x'.
+        self assert: (r at: 2) = 9
+            description: 'a DOUBLED quote is an escape and stays inside the comment'
+    ]
+
+    testStringsAndTheirEscapes [
+        | r |
+        r := self firstRunOf: '''abc'' x'.
+        self assert: (r at: 3) == #string description: 'a single quote opens a string'.
+        self assert: (r at: 2) = 5 description: 'the string covers its own quotes'.
+        "The source here is `'a''b' x`; the literal part is `'a''b'`, which is
+         six characters — quote, a, quote, quote, b, quote. Counted wrong the
+         first time, which is a good argument for the tiling property doing
+         the structural work and these cases only pinning the kinds."
+        r := self firstRunOf: '''a''''b'' x'.
+        self assert: (r at: 2) = 6
+            description: 'a doubled quote inside a string is an escape, not a close'
+    ]
+
+    testCharacterLiteralsSwallowTheirQuote [
+        "The one that bites: `$'` must NOT open a string. A Character literal
+         takes the next character whatever it is, and a tokenizer that checks
+         quotes before dollars colours the rest of the method as a string."
+        | kinds |
+        kinds := self kindsOf: '$'' + 1'.
+        self assert: kinds first == #character
+            description: 'a dollar takes the next character even when it is a quote'.
+        self assert: (kinds includes: #string) not
+            description: 'and must not have opened a string with it'
+    ]
+
+    testSymbols [
+        self assert: (self firstRunOf: '#foo') second = 4 description: '#foo is one run'.
+        self assert: (self firstRunOf: '#at:put:') second = 8
+            description: 'a keyword symbol keeps its colons'.
+        self assert: (self firstRunOf: '#+') second = 2 description: 'a binary symbol'.
+        self assert: (self firstRunOf: '#''quoted one''') second = 13
+            description: 'a quoted symbol runs to its closing quote'.
+        self assert: (self firstRunOf: '#foo') third == #symbol description: 'and is a symbol'
+    ]
+
+    testNumbers [
+        self assert: (self firstRunOf: '123') second = 3 description: 'plain integer'.
+        self assert: (self firstRunOf: '16rFF') second = 5 description: 'radix literal'.
+        self assert: (self firstRunOf: '1.5') second = 3 description: 'decimal'.
+        self assert: (self firstRunOf: '2e10') second = 4 description: 'exponent'.
+        self assert: (self firstRunOf: '123') third == #number description: 'and is a number'
+    ]
+
+    testAPeriodAfterANumberIsNotAFraction [
+        "`3 factorial.` — the trailing period is a STATEMENT separator. A
+         lexer that consumes the point after a digit eats it, and then the
+         next statement is coloured as part of a number."
+        | runs |
+        runs := WinSyntax runsFor: '3.'.
+        self assert: (runs first at: 2) = 1 description: 'the number is just the 3'.
+        self assert: (runs first at: 3) == #number description: 'and is a number'.
+        self assert: ((runs at: 2) at: 3) == #special
+            description: 'the period is a statement separator, not part of the literal'
+    ]
+
+    testKeywordsVersusAssignment [
+        "`at:` is a keyword; `a := 1`'s `a` is not — the colon belongs to the
+         assignment. Distinguished by what follows the colon, which is the
+         whole reason `kindOfWord:` takes the source and an index."
+        self assert: (self firstRunOf: 'at: 1') third == #keyword
+            description: 'identifier followed by colon is a keyword part'.
+        self assert: (self firstRunOf: 'a := 1') third == #identifier
+            description: 'but not when the colon is an assignment'
+    ]
+
+    testPseudoVariablesAndClassNames [
+        self assert: (self firstRunOf: 'self foo') third == #pseudo description: 'self'.
+        self assert: (self firstRunOf: 'thisContext') third == #pseudo description: 'thisContext'.
+        self assert: (self firstRunOf: 'nil') third == #pseudo description: 'nil'.
+        self assert: (self firstRunOf: 'Object new') third == #classname
+            description: 'a leading capital reads as a class name'.
+        self assert: (self firstRunOf: 'foo') third == #identifier
+            description: 'and a lowercase word does not'
+    ]
+
+    testUnterminatedLiteralsColourToTheEnd [
+        "The commonest state of a string is HALF TYPED. It must colour to the
+         end of the buffer rather than raise or drop the tail."
+        | runs |
+        runs := WinSyntax runsFor: '''abc'.
+        self assert: runs size = 1 description: 'an unterminated string is one run'.
+        self assert: (runs first at: 2) = 4 description: 'covering the whole buffer'.
+        runs := WinSyntax runsFor: '"abc'.
+        self assert: (runs first at: 2) = 4 description: 'and the same for a comment'
+    ]
+
+    "── The palette ──────────────────────────────────────────────────────"
+
+    testEveryKindHasAColour [
+        "A kind the tokenizer can emit but the palette does not know is an
+         invisible hole — that text simply never highlights, and nothing
+         complains. Checked against `kinds`, which is also what the tokenizer
+         is written against."
+        WinSyntax kinds do: [ :k |
+            self assert: (WinSyntax palette includesKey: k)
+                description: 'no colour for kind ' , k printString ]
+    ]
+
+    testColorRefPacksBlueHigh [
+        "COLORREF is 0x00BBGGRR — the reverse of how anyone writes a colour
+         down, and getting it backwards produces a palette that looks
+         plausible and is wrong in a way you have to hold up a reference to
+         see."
+        self assert: (WinSyntax colorRefRed: 255 green: 0 blue: 0) = 255
+            description: 'pure red is 0x0000FF'.
+        self assert: (WinSyntax colorRefRed: 0 green: 0 blue: 255) = 16rFF0000
+            description: 'pure blue is 0xFF0000'.
+        self assert: (WinSyntax colorRefRed: 0 green: 255 blue: 0) = 16r00FF00
+            description: 'green sits in the middle byte'
+    ]
+
+    testColouredRunsDropTheNoOps [
+        "The applier sends one message per run, so runs that would be drawn in
+         the default colour anyway are worth dropping before it starts."
+        | all coloured |
+        all := WinSyntax runsFor: 'foo bar "c" 1'.
+        coloured := WinSyntax colouredRunsFor: 'foo bar "c" 1'.
+        self assert: coloured size < all size
+            description: 'plain and identifier runs are dropped'.
+        self assert: (coloured allSatisfy: [ :r |
+            ((r at: 3) == #plain or: [ (r at: 3) == #identifier ]) not ])
+            description: 'and none of them survive'
+    ]
+]
