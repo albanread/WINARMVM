@@ -272,6 +272,60 @@ pub unsafe extern "C" fn MacvmHostMethodSource(
     )
 }
 
+/// `Image::class_source` -- the WHOLE class as one editable buffer, which is
+/// what the Editor view (WG6c-3) opens on.
+///
+/// The same read-only rule `MacvmHostMethodSource` follows, and the same
+/// hierarchy-live/text-from-the-image split: the class picker's rows come from
+/// the primary's reflection, but the TEXT comes from the image, so what the
+/// user edits is what the next boot will read. `persist_editor_class` below is
+/// the exact inverse and parses what this renders -- the round trip
+/// `class_source_round_trips_*` already pins for every class in the world.
+///
+/// A class with no stored source answers OK with an empty message rather than
+/// an error, exactly as a method with none does: "known live, no image text"
+/// is an ordinary state during a session, not a failure to report.
+///
+/// # Safety
+///
+/// `class` must satisfy [`utf16_in`]'s contract.
+#[no_mangle]
+pub unsafe extern "C" fn MacvmHostClassSource(class: *const u16) -> i64 {
+    let class_name = utf16_in(class);
+    finish(
+        Image::open_read_only(&image_path())
+            .map_err(|e| e.to_string())
+            .and_then(|img| img.class_source(&class_name).map_err(|e| e.to_string()))
+            .map(|opt| opt.unwrap_or_default()),
+    )
+}
+
+/// `flows::persist_editor_class` -- the Editor's Save, and the reason that
+/// function was promoted out of two GUIs in the first place (WG6c groundwork).
+///
+/// This is a THIRD caller of the same write logic rather than a third
+/// implementation of it, which is precisely what the CG8 gate exists to
+/// enforce: not two GUIs writing the image differently, but several
+/// implementations of HOW to write it, drifting independently.
+///
+/// It answers OK with `flows`' own one-line summary, INCLUDING the refusal
+/// ("nothing to save (no class definition in the buffer)") that a buffer with
+/// no parseable class produces. That is faithful rather than convenient: the
+/// promotion note records that every image call inside is `let _ = ...` and
+/// that giving it a `Result` is work for when all three callers are on it.
+/// Turning the refusal into ERR here would be this crate inventing a status
+/// the other two callers do not report, which is the drift being prevented.
+/// The guest reads the message and the gate asserts the image did not change.
+///
+/// # Safety
+///
+/// `source` must satisfy [`utf16_in`]'s contract.
+#[no_mangle]
+pub unsafe extern "C" fn MacvmHostPersistClass(source: *const u16) -> i64 {
+    let text = utf16_in(source);
+    finish(writer().map(|img| flows::persist_editor_class(&img, &text)))
+}
+
 /// The unit separator, 0x1F -- the field delimiter inside one result line.
 ///
 /// Chosen because it is the Mac's (`67_cocoafind.mst` documents the same wire
@@ -743,5 +797,119 @@ mod tests {
             "the probe that separates 'the channel is missing' from 'the write \
              was refused' must itself be unmistakable"
         );
+    }
+
+    /// The message slot as a String — the answer of whichever verb ran last.
+    fn msg() -> String {
+        let n = MacvmHostLastMessageLen() as usize;
+        unsafe { String::from_utf16_lossy(std::slice::from_raw_parts(MacvmHostLastMessage(), n)) }
+    }
+
+    /// WG6c-3's own round trip, and the reason both verbs are one commit: the
+    /// Editor RENDERS a whole class with `MacvmHostClassSource` and PARSES the
+    /// buffer back with `MacvmHostPersistClass`, so the two are inverses or
+    /// the feature silently eats methods.
+    ///
+    /// Asserted as "the edit landed AND the untouched method survived",
+    /// because a persist that rewrote the class wholesale would pass a test
+    /// that only looked for the new method.
+    #[test]
+    fn wg6c_a_class_round_trips_through_the_editor_verbs() {
+        let _guard = ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let path = scratch("wg6c_roundtrip");
+        {
+            let img = Image::open(&path).expect("scratch image");
+            img.create_or_reopen_class("Delta", Some("Object"), "", "", "value")
+                .expect("seed class");
+            flows::save_method(&img, "Delta", Side::Instance, "kept [ ^1 ]", None)
+                .expect("seed method");
+        }
+
+        std::env::set_var("MACVM_IMAGE_PATH", &path);
+        let rc = unsafe { MacvmHostClassSource(wide("Delta").as_ptr()) };
+        assert_eq!(rc, OK, "rendering a class must succeed: {}", msg());
+        let rendered = msg();
+        assert!(
+            rendered.contains("kept"),
+            "the whole class means its methods too, but got:\n{rendered}"
+        );
+
+        // The edit a user would make: one new method appended inside the body,
+        // i.e. before the class's CLOSING bracket. `rfind` and not `find` —
+        // the first `]` in a rendered class is inside a method body, and
+        // splicing there produced `0 added, 1 removed` rather than an error.
+        //
+        // `added [ ^2 ]` and not `added ^2`: a method in a CLASS BODY needs its
+        // brackets. `save_method` accepts the bare form because it parses only
+        // a message pattern, so seeding with one produced a class that rendered
+        // fine and then parsed back with no methods at all — reported as
+        // `1 removed`, which is the round trip failing in the most alarming
+        // possible direction.
+        let close = rendered
+            .rfind(']')
+            .unwrap_or_else(|| panic!("a rendered class must have a closing bracket:\n{rendered}"));
+        let edited = format!(
+            "{}    added [ ^2 ]\n{}",
+            &rendered[..close],
+            &rendered[close..]
+        );
+        let rc = unsafe { MacvmHostPersistClass(wide(&edited).as_ptr()) };
+        std::env::remove_var("MACVM_IMAGE_PATH");
+        assert_eq!(rc, OK, "saving an edited class must succeed: {}", msg());
+
+        let img = Image::open(&path).expect("reopen");
+        assert!(
+            img.method_source("Delta", Side::Instance, "added")
+                .expect("query added")
+                .is_some(),
+            "the added method must be in the image, summary was: {}",
+            msg()
+        );
+        assert!(
+            img.method_source("Delta", Side::Instance, "kept")
+                .expect("query kept")
+                .is_some(),
+            "and the method the edit did not touch must still be there — a save \
+             that rewrites rather than diffs loses exactly this"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The other half of WG6c-3's gate: *the parse gate refuses a bad one
+    /// WITHOUT CHANGING ANYTHING*. A refusal that had already half-written the
+    /// class would be worse than no gate at all, because the user is told it
+    /// did not happen.
+    #[test]
+    fn wg6c_an_unparseable_buffer_is_refused_without_changing_the_image() {
+        let _guard = ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let path = scratch("wg6c_refusal");
+        {
+            let img = Image::open(&path).expect("scratch image");
+            img.create_or_reopen_class("Epsilon", Some("Object"), "", "", "")
+                .expect("seed class");
+            flows::save_method(&img, "Epsilon", Side::Instance, "only [ ^7 ]", None)
+                .expect("seed method");
+        }
+        let before = std::fs::read(&path).expect("read before");
+
+        std::env::set_var("MACVM_IMAGE_PATH", &path);
+        let rc = unsafe { MacvmHostPersistClass(wide("this is not a class definition").as_ptr()) };
+        std::env::remove_var("MACVM_IMAGE_PATH");
+
+        // OK carrying flows' own refusal, NOT ERR — this crate must not invent
+        // a status the other two callers of `persist_editor_class` do not
+        // report. The words are the signal; the bytes below are the promise.
+        assert_eq!(rc, OK, "the refusal is a summary, not a channel failure");
+        assert!(
+            msg().contains("nothing to save"),
+            "the refusal must carry flows' own wording, but said: {}",
+            msg()
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("read after"),
+            before,
+            "a refused save must not have touched a single byte of the image"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 }

@@ -57,6 +57,16 @@ Object subclass: WinHost [
         ^self primitiveFailed: 'MacvmHostMethodSource'
     ]
 
+    WinHost class >> rawClassSource: cls <Integer> ^ <Integer> [
+        <primitive: FFI function: #MacvmHostClassSource library: #'winui_host.dll' ret: #g args: #(g)>
+        ^self primitiveFailed: 'MacvmHostClassSource'
+    ]
+
+    WinHost class >> rawPersistClass: src <Integer> ^ <Integer> [
+        <primitive: FFI function: #MacvmHostPersistClass library: #'winui_host.dll' ret: #g args: #(g)>
+        ^self primitiveFailed: 'MacvmHostPersistClass'
+    ]
+
     WinHost class >> rawLastMessage ^ <Integer> [
         <primitive: FFI function: #MacvmHostLastMessage library: #'winui_host.dll' ret: #g args: #()>
         ^self primitiveFailed: 'MacvmHostLastMessage'
@@ -133,6 +143,42 @@ Object subclass: WinHost [
         rc := self rawMethodSource: (WinArena nativeUtf16: className)
                   side: (side = #class ifTrue: [ 1 ] ifFalse: [ 0 ])
                   selector: (WinArena nativeUtf16: sel).
+        ^Array with: rc = 0 with: self lastMessage
+    ]
+
+    "── WG6c-3's two: a whole class out, a whole class back ─────────────"
+
+    WinHost class >> classSourceFor: className <String> ^ <Array> [
+        "The whole class as one editable buffer — what the Editor opens on,
+         and the same image-not-reflection split `methodSourceFor:` records
+         just above: the picker's rows are live, the TEXT is what the next
+         boot will read.
+
+         A class with no stored source answers #(true '') rather than a
+         refusal, exactly as a method with none does: known live and not in
+         the image is an ordinary state during a session."
+        | rc |
+        self available ifFalse: [ ^self unavailable ].
+        rc := self rawClassSource: (WinArena nativeUtf16: className).
+        ^Array with: rc = 0 with: self lastMessage
+    ]
+
+    WinHost class >> persistClass: src <String> ^ <Array> [
+        "The Editor's Save, through `image_store::flows::persist_editor_class`
+         — the SAME write path the web GUI and the Mac use, which is the whole
+         point of WG6c's groundwork commit promoting it out of two of them.
+
+         IT ANSWERS #(true ...) EVEN WHEN IT REFUSED, and that is faithful
+         rather than sloppy: `flows` reports a buffer it could not parse as the
+         summary `nothing to save (no class definition in the buffer)`, and
+         inventing an `ok: false` here would make this GUI report a status the
+         other two do not — the exact drift the shared write path exists to
+         prevent. The caller shows the message; what matters is that nothing
+         was written, which is `flows`' promise and is pinned by
+         `wg6c_an_unparseable_buffer_is_refused_without_changing_the_image`."
+        | rc |
+        self available ifFalse: [ ^self unavailable ].
+        rc := self rawPersistClass: (WinArena nativeUtf16: src).
         ^Array with: rc = 0 with: self lastMessage
     ]
 
