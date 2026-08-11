@@ -106,3 +106,48 @@ puts "WG4 metrics-right-of-buttons [gui eval {((WinShell controlNamed: #metrics)
 
 puts "WG4 snap [gui snap C:/projects/WINARM/target/winui-wg4.png]"
 puts "WG4 door [gui door]"
+
+# ── WG4 D3/D4/D5/D6, added as each landed ───────────────────────────────
+# The parts that need a real window: a paint actually arriving, focus actually
+# moving, a drag actually clamping, and a switch NOT relayouting.
+
+# D3 — the bar draws. drawCalls counts handler entries and drawError is the
+# only place a raise inside a paint would be visible (a paint that raises
+# leaves a blank cell and says nothing).
+gui eval {WinShell invalidateBar}
+gui sleep 400
+puts "WG4 draw-calls [gui eval {WinShell drawCalls}]"
+puts "WG4 draw-error [gui eval {WinShell drawError}]"
+puts "WG4 accent-read [gui eval {WinShell accentColorRef > 0}]"
+
+# D4 — enablement follows FOCUS, and answers both ways. An editable multiline
+# EDIT is a source surface; the read-only transcript is not.
+gui doit {WinShell addControl: #gateEdit class: 'EDIT' text: 'x' style: (((WinApi constant: 'WS_CHILD') bitOr: (WinApi constant: 'WS_VISIBLE')) bitOr: (WinApi constant: 'ES_MULTILINE')) exStyle: 0.}
+puts "WG4 edit-is-source [gui eval {(WinShell controlNamed: #gateEdit) isSourceSurface}]"
+puts "WG4 ro-is-source [gui eval {(WinShell controlNamed: #transcript) isSourceSurface}]"
+gui doit {WinApi setFocus: (WinShell controlNamed: #gateEdit) handle.}
+gui drain now
+puts "WG4 enabled-on-source [gui eval {WinShell commandsEnabled}]"
+gui doit {WinApi setFocus: (WinShell controlNamed: #transcript) handle.}
+gui drain now
+puts "WG4 enabled-off-source [gui eval {WinShell commandsEnabled}]"
+
+# D5 — the dock is draggable and clamps at both ends.
+gui eval {WinShell transcriptHeight: 150}
+puts "WG4 dock-set [gui eval {WinShell transcriptHeight}]"
+gui eval {WinShell transcriptHeight: 0}
+puts "WG4 dock-floor [gui eval {WinShell transcriptHeight = WinShell transcriptMinHeight}]"
+gui eval {WinShell transcriptHeight: 100000}
+puts "WG4 dock-ceiling [gui eval {WinShell transcriptHeight < 100000}]"
+gui eval {WinShell transcriptHeight: 120}
+
+# D6 — a view switch must cost NO layout pass: every content child shares one
+# rect, so switching changes no geometry. This is the assertion that would
+# have caught the flicker.
+gui drain now
+puts "WG4 layouts-before-switch [gui eval {WinShell layoutCount}]"
+gui send "0 0x111 [gui eval {(WinShell controlNamed: #view_welcome) id}] 0"
+gui drain now
+gui send "0 0x111 [gui eval {(WinShell controlNamed: #view_metrics) id}] 0"
+gui drain now
+puts "WG4 layouts-after-switch [gui eval {WinShell layoutCount}]"

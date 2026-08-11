@@ -43,7 +43,75 @@ TestCase subclass: WinUiShellWg4Tests [
         self runTest: #testUnknownViewIsDeclined do: [ self testUnknownViewIsDeclined ].
         self runTest: #testTranscriptKeepsNewestFirst
              do: [ self testTranscriptKeepsNewestFirst ].
-        self runTest: #testTranscriptIsBounded do: [ self testTranscriptIsBounded ]
+        self runTest: #testTranscriptIsBounded do: [ self testTranscriptIsBounded ].
+
+        "WG4 D3/D4/D5: the parts of the new chrome that are still PURE — a
+         glyph table, two bit extractions and a clamp. Everything needing a
+         window (a paint arriving, a drag captured, focus moving) is in
+         `just gate-wg4`, which is the same line WG3 drew."
+        self runTest: #testEveryViewHasItsOwnGlyph do: [ self testEveryViewHasItsOwnGlyph ].
+        self runTest: #testSignedWordsHandleNegatives do: [ self testSignedWordsHandleNegatives ].
+        self runTest: #testDockHeightClampsBothEnds do: [ self testDockHeightClampsBothEnds ].
+        self runTest: #testSplitterBandSitsAboveTheDock do: [ self testSplitterBandSitsAboveTheDock ]
+    ]
+
+    "── WG4 D3: the glyph table ──────────────────────────────────────────"
+
+    testEveryViewHasItsOwnGlyph [
+        "Each registered view draws a DISTINCT Fluent glyph. A table that
+         answered the same code point twice would render two tabs identically
+         and look like a layout bug rather than a table bug."
+        | codes |
+        WinShell registerShellViews.
+        codes := WinShell views collect: [ :v | WinShell glyphCodeFor: (v at: 1) ].
+        self assert: codes asSet size equals: codes size.
+        "...and every one is in the Private Use Area the icon font occupies,
+         which is what makes a wrong constant visible here rather than as a
+         box on screen."
+        codes do: [ :c |
+            self assert: (c >= 16rE700 and: [ c <= 16rF8FF ]) equals: true ]
+    ]
+
+    "── WG4 D5: lParam's two signed halves ───────────────────────────────"
+
+    testSignedWordsHandleNegatives [
+        "A pointer dragged ABOVE the client area reports a negative y, packed
+         as a 16-bit two's-complement half. Read unsigned it is 65000-odd, and
+         the dock jumps to its clamp instead of following the pointer — so this
+         is the arithmetic that decides whether a drag feels broken."
+        self assert: (WinShell hiWordSigned: 16r00640064) equals: 100.
+        self assert: (WinShell loWordSigned: 16r00640064) equals: 100.
+        "y = -10 packs as 0xFFF6 in the high half."
+        self assert: (WinShell hiWordSigned: 16rFFF60064) equals: -10.
+        self assert: (WinShell loWordSigned: 16r0064FFF6) equals: -10
+    ]
+
+    "── WG4 D5: the dock's clamp ─────────────────────────────────────────"
+
+    testDockHeightClampsBothEnds [
+        "The clamp is the layout's own business: a dock that could swallow the
+         window could not be undone with the gesture that made it."
+        WinShell transcriptHeight: 0.
+        self assert: WinShell transcriptHeight equals: WinShell transcriptMinHeight.
+        WinShell transcriptHeight: 100000.
+        self assert: (WinShell transcriptHeight < 100000) equals: true.
+        WinShell transcriptHeight: 150.
+        self assert: WinShell transcriptHeight equals: 150
+    ]
+
+    testSplitterBandSitsAboveTheDock [
+        "Bottom bands stack upward in the order added, so the splitter — added
+         after the transcript — must land ABOVE it, touching it."
+        | l r |
+        l := WinLayout new
+            add: #viewbar height: 34;
+            fill: #content;
+            addBottom: #transcript height: 120;
+            addBottom: #splitter height: 8;
+            yourself.
+        r := l rectsIn: 1000 by: 700 dpi: 96.
+        self assert: (((r at: #splitter) at: 2) < ((r at: #transcript) at: 2)) equals: true.
+        self assert: ((r at: #splitter) at: 4) equals: 8
     ]
 
     "── the layout ───────────────────────────────────────────────────────"

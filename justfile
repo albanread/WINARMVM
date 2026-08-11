@@ -1279,6 +1279,29 @@ gate-wg4: gate-wg3
     LAYOUTS=$(grep '^WG4 layouts ' /tmp/wg4_gate.txt | cut -d' ' -f3)
     test "$LAYOUTS" -ge 1
 
+    # ── D3: the bar actually painted, and nothing raised inside a paint ───
+    DRAWN=$(grep '^WG4 draw-calls ' /tmp/wg4_gate.txt | cut -d' ' -f3)
+    test "$DRAWN" -ge 5
+    grep -q "WG4 draw-error $" /tmp/wg4_gate.txt || grep -q "WG4 draw-error ''" /tmp/wg4_gate.txt
+    grep -q 'WG4 accent-read true' /tmp/wg4_gate.txt
+
+    # ── D4: enablement tracks FOCUS, and answers both ways ────────────────
+    grep -q 'WG4 edit-is-source true' /tmp/wg4_gate.txt
+    grep -q 'WG4 ro-is-source false' /tmp/wg4_gate.txt
+    grep -q 'WG4 enabled-on-source true' /tmp/wg4_gate.txt
+    grep -q 'WG4 enabled-off-source false' /tmp/wg4_gate.txt
+
+    # ── D5: the dock is the user's, and clamps ────────────────────────────
+    grep -q 'WG4 dock-set 150' /tmp/wg4_gate.txt
+    grep -q 'WG4 dock-floor true' /tmp/wg4_gate.txt
+    grep -q 'WG4 dock-ceiling true' /tmp/wg4_gate.txt
+
+    # ── D6: a switch costs NO layout. The flicker assertion. ──────────────
+    BEFORE=$(grep '^WG4 layouts-before-switch ' /tmp/wg4_gate.txt | cut -d' ' -f3)
+    AFTER=$(grep '^WG4 layouts-after-switch ' /tmp/wg4_gate.txt | cut -d' ' -f3)
+    echo "layouts across two view switches: $BEFORE -> $AFTER"
+    test "$BEFORE" -eq "$AFTER"
+
     # ── the window survived all of it ─────────────────────────────────────
     test -s "$SHOT"
     echo "snap: $SHOT ($(wc -c < "$SHOT") bytes)"

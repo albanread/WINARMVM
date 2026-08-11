@@ -112,5 +112,11 @@ tier1.mst
 63_winui_controls_tests.mst
 # WINARM (WG4): the shell's layout grammar and view registry, in-language.
 ../93_winui_shell.mst
+# WG4 D3/D4/D5 add the drawing, focus and splitter layers, and 64's pure
+# tests reach into all three (the glyph table, the signed-word split, the
+# dock clamp) — so they load here for the same reason ../90..93 do.
+../94_winui_drawing.mst
+../95_winui_focus.mst
+../96_winui_splitter.mst
 64_winui_shell_tests.mst
 99_run_all.mst
