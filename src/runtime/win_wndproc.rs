@@ -122,6 +122,13 @@ extern "system" {
     /// re-entrancy the whole flag-and-drain pattern exists to avoid.
     /// `drain_wake_is_post_not_send` is the test that says so.
     fn PostMessageW(hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> i32;
+    /// WINARM (WG6c-1). `BeginPaint` VALIDATES the invalid region as a side
+    /// effect, which is the whole reason a paint cannot be flag-and-drained:
+    /// without it Windows re-sends `WM_PAINT` immediately and forever. The
+    /// `PAINTSTRUCT` is opaque here -- only `hdc` at 0 and `rcPaint` at 8 are
+    /// read, and those two offsets are fixed by the API contract itself.
+    fn BeginPaint(hwnd: isize, ps: *mut u8) -> isize;
+    fn EndPaint(hwnd: isize, ps: *const u8) -> i32;
 }
 
 #[link(name = "kernel32")]
@@ -238,9 +245,12 @@ pub const WM_DRAWITEM: u32 = 0x002B;
 pub const WM_LBUTTONDOWN: u32 = 0x0201;
 pub const WM_LBUTTONUP: u32 = 0x0202;
 pub const WM_MOUSEMOVE: u32 = 0x0200;
+/// WINARM (WG6c-1). See [`perform_paint`] for why this one crosses.
+pub const WM_PAINT: u32 = 0x000F;
 
-pub const ALLOWLIST: [u32; 15] = [
+pub const ALLOWLIST: [u32; 16] = [
     WM_DRAWITEM,
+    WM_PAINT,
     WM_LBUTTONDOWN,
     WM_LBUTTONUP,
     WM_MOUSEMOVE,
@@ -994,6 +1004,14 @@ fn cross_into_smalltalk(hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> 
             // nothing and calls nothing that sends a message back.
             return perform_drawitem(vm, lparam);
         }
+        if msg == WM_PAINT {
+            // WINARM (WG6c-1). Synchronous for exactly WM_DRAWITEM's reason,
+            // one step further: a paint cannot be deferred to the drain
+            // because Windows re-sends WM_PAINT until the region is
+            // VALIDATED, so a flag-and-drain paint spins forever or leaves
+            // the pane blank. BeginPaint validates it; EndPaint closes it.
+            return perform_paint(vm, hwnd);
+        }
         if msg == WM_NOTIFY {
             // D3's payload-lifetime constraint. `lParam` is an `NMHDR*` that is
             // valid ONLY for the duration of this call, so the three fields are
@@ -1109,6 +1127,93 @@ fn perform_drawitem(vm: &mut VmState, lparam: isize) -> u64 {
     let argv = [
         a_id.oop(),
         a_state.oop(),
+        a_dc.oop(),
+        a_x.oop(),
+        a_y.oop(),
+        a_w.oop(),
+        a_h.oop(),
+    ];
+    let result = crate::interpreter::run_method_reentrant(vm, m, cls, &argv);
+    match SmallInt::try_from(result) {
+        Some(n) => n.value() as u64,
+        None => NOT_HANDLED,
+    }
+}
+
+/// `WM_PAINT` -> `WinShell class>>paintWindow:dc:x:y:w:h:`, every argument a
+/// `SmallInteger` and no pointer among them -- D3's constraint, which this
+/// keeps by copying the `PAINTSTRUCT`'s rect out before the guest runs.
+///
+/// # Why this is on the allowlist at all
+///
+/// §2.4a is flag-and-drain, and this is the second message to be exempted
+/// (after `WM_DRAWITEM`, and for a sharper version of its reason). Three
+/// things justify it:
+///
+/// 1. **It cannot be deferred.** A flagged paint is a paint that did not
+///    happen, and Windows re-sends `WM_PAINT` until the invalid region is
+///    validated. Drain-later spins or blanks the pane.
+/// 2. **The shape is already here.** `perform_drawitem` runs Smalltalk
+///    synchronously inside the door for the same underlying reason: drawing
+///    needs a DC that exists only for the duration of the message.
+/// 3. **It is scoped to windows we own.** Only a child created with OUR
+///    window class routes here at all; every stock control paints itself
+///    through its own WndProc and never reaches this door.
+///
+/// `EndPaint` runs on EVERY path, including a guest that fails to answer a
+/// SmallInteger -- an unvalidated region would have Windows re-send
+/// `WM_PAINT` immediately, which presents as a hang rather than as a missed
+/// repaint.
+#[cfg(windows)]
+fn perform_paint(vm: &mut VmState, hwnd: isize) -> u64 {
+    // PAINTSTRUCT is 72 bytes on 64-bit: hdc, fErase, rcPaint(4 x i32),
+    // fRestore, fIncUpdate, rgbReserved[32]. Zeroed and handed to Windows to
+    // fill; nothing here transcribes a member position that matters -- only
+    // `hdc` at 0 and `rcPaint` at 8, which are the two the API contract fixes.
+    let mut ps = [0u8; 128];
+    let hdc = unsafe { BeginPaint(hwnd, ps.as_mut_ptr() as *mut _) };
+    let rect = unsafe {
+        let base = ps.as_ptr();
+        [
+            std::ptr::read_unaligned(base.add(8) as *const i32),
+            std::ptr::read_unaligned(base.add(12) as *const i32),
+            std::ptr::read_unaligned(base.add(16) as *const i32),
+            std::ptr::read_unaligned(base.add(20) as *const i32),
+        ]
+    };
+    let answer = paint_body(vm, hwnd, hdc, rect);
+    unsafe { EndPaint(hwnd, ps.as_ptr() as *const _) };
+    answer
+}
+
+/// The guest call, split out so [`perform_paint`]'s `EndPaint` is
+/// unconditional and impossible to skip by adding an early return here.
+#[cfg(windows)]
+fn paint_body(vm: &mut VmState, hwnd: isize, hdc: isize, r: [i32; 4]) -> u64 {
+    let (Some(a_hwnd), Some(a_dc)) = (
+        SmallInt::try_new(hwnd as i64),
+        SmallInt::try_new(hdc as i64),
+    ) else {
+        return NOT_HANDLED;
+    };
+    let (Some(a_x), Some(a_y), Some(a_w), Some(a_h)) = (
+        SmallInt::try_new(r[0] as i64),
+        SmallInt::try_new(r[1] as i64),
+        SmallInt::try_new((r[2] - r[0]) as i64),
+        SmallInt::try_new((r[3] - r[1]) as i64),
+    ) else {
+        return NOT_HANDLED;
+    };
+    let Some(cls) = win_shell_class(vm) else {
+        return NOT_HANDLED;
+    };
+    let sel = vm.universe.intern(b"paintWindow:dc:x:y:w:h:");
+    let k = crate::runtime::primitives::klass_of(vm, cls);
+    let Some(m) = crate::runtime::lookup::lookup(vm, k, sel) else {
+        return NOT_HANDLED;
+    };
+    let argv = [
+        a_hwnd.oop(),
         a_dc.oop(),
         a_x.oop(),
         a_y.oop(),
@@ -1328,17 +1433,21 @@ mod tests {
         // declines when no drag is active). It is asserted as PRESENT above,
         // via the ALLOWLIST loop -- so this test still pins the set exactly,
         // it just pins the set WG4 actually ships.
+        // WM_PAINT (0x000F) left this list in WG6c-1: a custom-drawn editor
+        // pane is a child of OUR window class, so its paint reaches this door
+        // and must. `perform_paint`'s doc carries the three-part argument, the
+        // same shape WG4 D5 used to admit WM_MOUSEMOVE. It is asserted as
+        // PRESENT by the ALLOWLIST loop above.
         for m in [
             0x0084u32, // WM_NCHITTEST
             0x0020,    // WM_SETCURSOR
-            0x000F,    // WM_PAINT
             0x0014,    // WM_ERASEBKGND
             0x0001,    // WM_CREATE
         ] {
             assert!(!is_allowlisted(m), "{m:#06x} must not cross");
         }
         let before = vm_entries();
-        for m in [0x0084u32, 0x0020, 0x000F] {
+        for m in [0x0084u32, 0x0020] {
             let _ = macvm_wndproc(0, m, 0, 0);
         }
         assert_eq!(
