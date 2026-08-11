@@ -42,3 +42,6 @@
 # WINARM (WG4 D4): Do It / Print It enablement, tracked by the FOCUSED
 # control rather than the active view.
 95_winui_focus.mst
+# WINARM (WG4 D5): the transcript's splitter — a visible grab bar with a
+# chevron and Clear, a draggable dock height, and Cascadia Mono.
+96_winui_splitter.mst

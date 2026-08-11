@@ -1,0 +1,254 @@
+"── 96_winui_splitter.mst — WG4 D5: the splitter, the Clear button, the fonts
+ §2.1's Transcript row: *docked bottom, shared, on a real splitter with a
+ VISIBLE grab bar + chevron (fixing weakness #3), Cascadia Mono, Clear button
+ right*. Three of those five were missing, and the first is the one the row
+ calls a weakness of the MAC:
+
+   * **a real splitter** — the dock's height was a constant only a script
+     could change. A user could not drag it, and nothing on screen suggested
+     they might.
+   * **a visible grab bar** — the Mac's own dock has no visible grab, and
+     users do not discover it. §2.1 says fix that here rather than inherit it.
+   * **a chevron** that collapses and reopens the dock, so the affordance is
+     visible rather than remembered.
+   * **Clear**, right-aligned on the grab bar.
+   * **Cascadia Mono** in the transcript itself, because it is a log of code.
+
+ HOW A DRAG WORKS HERE, and why it needs no new door mechanism. The grab bar
+ is an ordinary owner-drawn child. Windows already delivers WM_LBUTTONDOWN /
+ WM_MOUSEMOVE / WM_LBUTTONUP to whichever window is under the pointer, and
+ `SetCapture` makes that the grab bar for the whole drag. Those three
+ messages are the WHOLE protocol; the shell records a pending height and the
+ DRAIN applies it, which keeps §2.4a intact — the door still only flags.
+
+ A drag is the one interaction where flagging and deferring is visible to the
+ user, so the drain's own heartbeat (50 ms) is what makes it feel live: the
+ pointer moves, the flag is set, the next pass lays out. At 20 Hz that reads
+ as continuous, and it costs one layout per pass rather than one per mouse
+ message — which is the same coalescing argument WG3 made for resize, applied
+ to the one gesture that generates even more messages."
+
+Object subclass: WinApi [
+    WinApi class >> setCapture: hwnd <Integer> ^ <Integer> [
+        <primitive: FFI function: #SetCapture ret: #g args: #(g)>
+        ^self primitiveFailed: 'SetCapture'
+    ]
+
+    WinApi class >> releaseCapture ^ <Integer> [
+        <primitive: FFI function: #ReleaseCapture ret: #g args: #()>
+        ^self primitiveFailed: 'ReleaseCapture'
+    ]
+
+    WinApi class >> loadCursor: hInstance <Integer> name: idc <Integer> ^ <Integer> [
+        <primitive: FFI function: #LoadCursorW ret: #g args: #(g g)>
+        ^self primitiveFailed: 'LoadCursorW'
+    ]
+
+    WinApi class >> setCursor: hCursor <Integer> ^ <Integer> [
+        <primitive: FFI function: #SetCursor ret: #g args: #(g)>
+        ^self primitiveFailed: 'SetCursor'
+    ]
+]
+
+Object subclass: WinShell [
+
+    "── the dock's height, now a user preference ─────────────────────────"
+
+    WinShell class >> transcriptMinHeight ^ <Integer> [ ^60 ]
+    WinShell class >> transcriptMaxFraction ^ <Integer> [ ^60 ]  "percent of client"
+    WinShell class >> splitterHeight ^ <Integer> [ ^8 ]
+
+    WinShell class >> transcriptHeight ^ <Integer> [
+        TranscriptHeight isNil ifTrue: [ TranscriptHeight := self transcriptOpenHeight ].
+        ^TranscriptHeight
+    ]
+
+    WinShell class >> transcriptHeight: h <Integer> [
+        "Clamped at both ends, and the clamp is the object's own business: a
+         layout that let the dock swallow the window would be a layout that
+         could not be undone with the same gesture that made it."
+        | maxH dipH |
+        dipH := self isOpen
+            ifTrue: [ self clientHeight * 96 // (Dpi isNil ifTrue: [ 96 ] ifFalse: [ Dpi ]) ]
+            ifFalse: [ 600 ].
+        maxH := dipH * self transcriptMaxFraction // 100.
+        TranscriptHeight := (h max: self transcriptMinHeight) min: maxH.
+        self layout setBottom: #transcript height: TranscriptHeight.
+        ^TranscriptHeight
+    ]
+
+    "── the drag, recorded by the door and applied by the drain ──────────"
+
+    WinShell class >> splitterDragBegin: yScreen <Integer> [
+        DragActive := true.
+        DragStartY := yScreen.
+        DragStartHeight := self transcriptHeight.
+        WinApi setCapture: (self controlNamed: #splitter) handle.
+        ^self
+    ]
+
+    WinShell class >> splitterDragTo: yScreen <Integer> [
+        "Dragging UP grows the dock, which is why the delta is start-minus-now.
+         Only a FLAG is set here plus the new height; the layout that acts on
+         it runs in the drain, one pass later."
+        | delta |
+        DragActive == true ifFalse: [ ^self ].
+        delta := (DragStartY - yScreen) * 96 // (Dpi isNil ifTrue: [ 96 ] ifFalse: [ Dpi ]).
+        self transcriptHeight: DragStartHeight + delta.
+        PendingLayout := true.
+        ^self
+    ]
+
+    WinShell class >> splitterDragEnd [
+        DragActive := false.
+        WinApi releaseCapture.
+        PendingLayout := true.
+        ^self
+    ]
+
+    WinShell class >> dragActive ^ <Boolean> [ ^DragActive == true ]
+
+    "── the door's three drag messages, routed ──────────────────────────
+     These arrive at the SHELL window, not at the splitter — a captured mouse
+     reports to the window that captured it, and before capture the shell sees
+     them because the splitter is its child. `lParam` packs the pointer
+     position as two SIGNED 16-bit halves in CLIENT coordinates, which is the
+     one piece of arithmetic here worth naming: the naive `bitAnd: 16rFFFF`
+     reads a negative y (the pointer dragged above the client area) as 65000-
+     odd, and the dock would jump instead of clamping."
+
+    WinShell class >> loWordSigned: v <Integer> ^ <Integer> [
+        | w | w := v bitAnd: 16rFFFF.
+        ^w > 32767 ifTrue: [ w - 65536 ] ifFalse: [ w ]
+    ]
+
+    WinShell class >> hiWordSigned: v <Integer> ^ <Integer> [
+        | w | w := (v bitShift: 0 - 16) bitAnd: 16rFFFF.
+        ^w > 32767 ifTrue: [ w - 65536 ] ifFalse: [ w ]
+    ]
+
+    WinShell class >> onMouseDown: lp <Integer> ^ <Object> [
+        "A click in the splitter band starts a drag; a click on its Clear
+         legend clears instead. Both are decided from geometry the layout
+         already knows, so neither needs a second control."
+        | y rects sr x |
+        self isOpen ifFalse: [ ^#defwindowproc ].
+        y := self hiWordSigned: lp.
+        x := self loWordSigned: lp.
+        rects := self layout rectsIn: self clientWidth by: self clientHeight
+            dpi: (Dpi isNil ifTrue: [ 96 ] ifFalse: [ Dpi ]).
+        sr := rects at: #splitter ifAbsent: [ nil ].
+        sr isNil ifTrue: [ ^#defwindowproc ].
+        (y >= (sr at: 2) and: [ y <= ((sr at: 2) + (sr at: 4)) ]) ifFalse: [ ^#defwindowproc ].
+        "Clear, right-hand end."
+        x >= ((sr at: 1) + (sr at: 3) - (60 * (Dpi isNil ifTrue: [ 96 ] ifFalse: [ Dpi ]) // 96))
+            ifTrue: [ self clearTranscript. ^0 ].
+        "Chevron, left-hand end."
+        x <= ((sr at: 1) + (28 * (Dpi isNil ifTrue: [ 96 ] ifFalse: [ Dpi ]) // 96))
+            ifTrue: [ self toggleTranscript. ^0 ].
+        self splitterDragBegin: y.
+        ^0
+    ]
+
+    WinShell class >> onMouseMove: lp <Integer> ^ <Object> [
+        self dragActive ifFalse: [ ^#defwindowproc ].
+        self splitterDragTo: (self hiWordSigned: lp).
+        ^0
+    ]
+
+    WinShell class >> onMouseUp: lp <Integer> ^ <Object> [
+        self dragActive ifFalse: [ ^#defwindowproc ].
+        self splitterDragEnd.
+        ^0
+    ]
+
+    "── the chevron: the same collapse, with something to click ──────────"
+
+    WinShell class >> toggleTranscript ^ <Boolean> [
+        "Overrides 93's: the dock's open height is now the USER's, so reopening
+         must restore what they chose rather than the constant it shipped with."
+        TranscriptCollapsed := self transcriptCollapsed not.
+        self layout
+            setBottom: #transcript
+            height: (self transcriptCollapsed ifTrue: [ 0 ] ifFalse: [ self transcriptHeight ]).
+        (self controlNamed: #transcript) ifNotNil: [ :c |
+            c show: self transcriptCollapsed not ].
+        self requestLayout.
+        self invalidateSplitter.
+        ^self transcriptCollapsed
+    ]
+
+    WinShell class >> invalidateSplitter [
+        (self controlNamed: #splitter) ifNotNil: [ :c |
+            WinApi invalidateRect: c handle rect: 0 erase: 0 ].
+        ^self
+    ]
+
+    "── Clear ───────────────────────────────────────────────────────────"
+
+    WinShell class >> clearTranscript [
+        TranscriptLines := OrderedCollection new.
+        (self controlNamed: #transcript) ifNotNil: [ :c | c setText: '' ].
+        ^self
+    ]
+
+    "── drawing the grab bar ─────────────────────────────────────────────"
+
+    WinShell class >> drawSplitter: hdc <Integer> x: x <Integer> y: y <Integer>
+                       w: w <Integer> h: h <Integer> ^ <Integer> [
+        "A visible grab: three dots centred, plus a chevron at the left and the
+         word Clear at the right. §2.1 calls the Mac's invisible grab weakness
+         #3 — this is the fix, and it is deliberately drawn rather than themed,
+         because there is no system part that means 'horizontal splitter'."
+        | rect brush old |
+        rect := self drawRectScratch.
+        self setRect: rect x: x y: y w: w h: h.
+        brush := WinApi createSolidBrush: self backgroundColorRef.
+        WinApi fillRect: hdc rect: rect brush: brush.
+        WinApi deleteObject: brush.
+        WinApi setBkMode: hdc mode: (WinApi constant: 'TRANSPARENT').
+        WinApi setTextColor: hdc color: self barDimTextColorRef.
+        old := WinApi selectObject: hdc object: self glyphFont.
+        "The chevron, left: pointing DOWN when open (click to collapse), UP when
+         collapsed (click to reopen) — the direction it will MOVE things."
+        WinArena u32At: self glyphBuffer put: (self transcriptCollapsed ifTrue: [ 16rE70E ] ifFalse: [ 16rE70D ]).
+        self setRect: rect x: x + 4 y: y w: 20 h: h.
+        WinApi drawText: hdc text: self glyphBuffer count: 0 - 1 rect: rect
+            format: ((WinApi constant: 'DT_LEFT')
+                bitOr: ((WinApi constant: 'DT_VCENTER') bitOr: (WinApi constant: 'DT_SINGLELINE'))).
+        "The grab dots, centre."
+        WinArena u32At: self glyphBuffer put: 16rE712.   "More"
+        self setRect: rect x: x y: y w: w h: h.
+        WinApi drawText: hdc text: self glyphBuffer count: 0 - 1 rect: rect
+            format: ((WinApi constant: 'DT_CENTER')
+                bitOr: ((WinApi constant: 'DT_VCENTER') bitOr: (WinApi constant: 'DT_SINGLELINE'))).
+        WinApi selectObject: hdc object: old.
+        "Clear, right."
+        old := WinApi selectObject: hdc object: self labelFont.
+        self setRect: rect x: x + w - 60 y: y w: 54 h: h.
+        WinApi drawText: hdc text: (WinArena scratchUtf16: 'Clear') count: 0 - 1 rect: rect
+            format: ((WinApi constant: 'DT_RIGHT')
+                bitOr: ((WinApi constant: 'DT_VCENTER') bitOr: (WinApi constant: 'DT_SINGLELINE'))).
+        WinApi selectObject: hdc object: old.
+        ^1
+    ]
+
+    WinShell class >> glyphBuffer ^ <Integer> [
+        GlyphBuf isNil ifTrue: [ GlyphBuf := WinArena alloc: 8 ].
+        ^GlyphBuf
+    ]
+
+    "── Cascadia Mono, for a pane that holds code ────────────────────────"
+
+    WinShell class >> monoFont ^ <Integer> [
+        "§2.1's Type row: `Cascadia Mono` for code panes. The transcript is one
+         — it is a log OF CODE, and proportional type in a log makes columns
+         that do not line up look like columns that do."
+        MonoFont isNil ifTrue: [
+            MonoFont := WinApi
+                createFont: (self pointsToHeight: 9)
+                weight: 400
+                face: (WinArena nativeUtf16: 'Cascadia Mono') ].
+        ^MonoFont
+    ]
+]

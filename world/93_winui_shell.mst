@@ -184,7 +184,7 @@ Object subclass: WinApi [
 Object subclass: WinShell [
     <classVars: Wg4Enabled Views ActiveView ViewSwitchCount ViewBuildCount
                 TranscriptCollapsed TranscriptLines MetricsText MetricsUpdates
-                CommandsEnabled AccentColor LabelFont GlyphFont DrawRect DrawCalls DrawMisses DrawError DrawLast DrawIds DrawResult DrawResultClass DrawStep GlyphBuf LastFocusHwnd FocusChanges>
+                CommandsEnabled AccentColor LabelFont GlyphFont DrawRect DrawCalls DrawMisses DrawError DrawLast DrawIds DrawResult DrawResultClass DrawStep GlyphBuf LastFocusHwnd FocusChanges TranscriptHeight DragActive DragStartY DragStartHeight MonoFont>
 
     WinShell class >> wg4Enabled ^ <Boolean> [
         "`MACVM_WINUI_WG4=off` restores WG3's window exactly — the same shape
@@ -453,6 +453,7 @@ Object subclass: WinShell [
             add: #viewbar height: 34;
             fill: #content;
             addBottom: #transcript height: self transcriptOpenHeight;
+            addBottom: #splitter height: self splitterHeight;
             yourself
     ]
 
@@ -501,6 +502,16 @@ Object subclass: WinShell [
                 bitOr: (WinApi constant: 'SS_RIGHT'))
             exStyle: 0.
 
+        "The splitter: an owner-drawn strip the user can see and drag."
+        self
+            addControl: #splitter
+            class: 'BUTTON'
+            text: ''
+            style: (((WinApi constant: 'WS_CHILD')
+                bitOr: (WinApi constant: 'WS_VISIBLE'))
+                bitOr: (WinApi constant: 'BS_OWNERDRAW'))
+            exStyle: 0.
+
         "The transcript dock."
         self
             addControl: #transcript
@@ -519,6 +530,8 @@ Object subclass: WinShell [
          created."
         #(#button #status #list) do: [ :n |
             (self controlNamed: n) ifNotNil: [ :c | c show: false ] ].
+        "§2.1: the transcript is a log OF CODE, so it wears Cascadia Mono."
+        (self controlNamed: #transcript) ifNotNil: [ :c | c setFont: self monoFont ].
         self appendTranscript: 'WG4 shell up — ', self views size printString, ' views registered.'.
         self switchToView: #welcome.
         self syncCommandEnablement.
@@ -570,6 +583,8 @@ Object subclass: WinShell [
             (self controlNamed: (self contentNameFor: (v at: 1))) ifNotNil: [ :c |
                 (c moveTo: (rects at: #content)) ifTrue: [ moved := moved + 1 ] ] ].
 
+        (self controlNamed: #splitter) ifNotNil: [ :c |
+            (c moveTo: (rects at: #splitter)) ifTrue: [ moved := moved + 1 ] ].
         (self controlNamed: #transcript) ifNotNil: [ :c |
             self transcriptCollapsed
                 ifFalse: [ (c moveTo: (rects at: #transcript)) ifTrue: [ moved := moved + 1 ] ] ].

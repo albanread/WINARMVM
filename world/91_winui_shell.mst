@@ -1325,6 +1325,12 @@ Object subclass: WinShell [
         msg = (WinApi constant: 'WM_CLOSE') ifTrue: [ ^self onClose ].
         msg = (WinApi constant: 'WM_DESTROY') ifTrue: [ ^self onDestroy ].
         msg = (WinApi constant: 'WM_COMMAND') ifTrue: [ ^self onCommand: wp lParam: lp ].
+        "WG4 D5: the splitter drag. Three messages, and the hooks below are
+         no-ops until 96_winui_splitter.mst defines them — the same discipline
+         every other hook in this file follows, so 91 stays complete alone."
+        msg = (WinApi constant: 'WM_LBUTTONDOWN') ifTrue: [ ^self onMouseDown: lp ].
+        msg = (WinApi constant: 'WM_MOUSEMOVE') ifTrue: [ ^self onMouseMove: lp ].
+        msg = (WinApi constant: 'WM_LBUTTONUP') ifTrue: [ ^self onMouseUp: lp ].
         msg = (WinApi constant: 'WM_KEYDOWN') ifTrue: [ ^self onKeyDown: wp lParam: lp ].
         msg = (WinApi constant: 'WM_CHAR') ifTrue: [ ^self onChar: wp lParam: lp ].
         msg = (WinApi constant: 'WM_ENTERSIZEMOVE') ifTrue: [ ^self onEnterTracking: #sizemove ].
@@ -1565,6 +1571,9 @@ Object subclass: WinShell [
 
     WinShell class >> applyLayout [ ^self ]
     WinShell class >> checkFocusChanged ^ <Boolean> [ ^false ]
+    WinShell class >> onMouseDown: lp <Integer> ^ <Object> [ ^#defwindowproc ]
+    WinShell class >> onMouseMove: lp <Integer> ^ <Object> [ ^#defwindowproc ]
+    WinShell class >> onMouseUp: lp <Integer> ^ <Object> [ ^#defwindowproc ]
     WinShell class >> buildControls [ ^self ]
     WinShell class >> ownsControlId: anId <Integer> ^ <Boolean> [ ^false ]
     WinShell class >> serviceCommand: anId <Integer> code: aCode <Integer> from: aHandle <Integer> [ ^self ]

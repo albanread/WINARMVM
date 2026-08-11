@@ -215,8 +215,19 @@ const _WM_APP_DRAIN_IS_PRIVATE: () = assert!(WM_APP_DRAIN >= 0x8000);
 /// no control other than the one being drawn.
 pub const WM_DRAWITEM: u32 = 0x002B;
 
-pub const ALLOWLIST: [u32; 12] = [
+/// WG4 D5: the three messages a splitter drag is made of. Allowlisted as a
+/// set, because any one without the others is a drag that starts and never
+/// ends (or ends without having begun) — and a captured mouse that never sees
+/// its button-up leaves the pointer captured for the life of the window.
+pub const WM_LBUTTONDOWN: u32 = 0x0201;
+pub const WM_LBUTTONUP: u32 = 0x0202;
+pub const WM_MOUSEMOVE: u32 = 0x0200;
+
+pub const ALLOWLIST: [u32; 15] = [
     WM_DRAWITEM,
+    WM_LBUTTONDOWN,
+    WM_LBUTTONUP,
+    WM_MOUSEMOVE,
     WM_CLOSE,
     WM_DESTROY,
     WM_SIZE,
