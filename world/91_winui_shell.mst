@@ -1070,6 +1070,11 @@ Object subclass: WinShell [
         "7. On screen."
         WinApi showWindow: Hwnd cmd: (WinApi constant: 'SW_SHOW').
         WinApi updateWindow: Hwnd.
+        "The owner-drawn strip has to be ASKED to paint its first frame --
+         Windows draws nothing for a BS_OWNERDRAW cell and waits for someone
+         to invalidate it. Nothing was asking, so the bar came up as a row of
+         empty boxes. A no-op in this layer; 93 implements it."
+        self paintBarOnce.
         WinApi setForegroundWindow: Hwnd.
 
         "A deliberately injected failure, for the gate's 'the loop outlives a
@@ -1577,6 +1582,8 @@ Object subclass: WinShell [
     WinShell class >> onMouseMove: lp <Integer> ^ <Object> [ ^#defwindowproc ]
     WinShell class >> onMouseUp: lp <Integer> ^ <Object> [ ^#defwindowproc ]
     WinShell class >> buildControls [ ^self ]
+    "WG4 D3's owner-drawn bar needs its first frame asked for; 93 overrides."
+    WinShell class >> paintBarOnce [ ^self ]
     WinShell class >> ownsControlId: anId <Integer> ^ <Boolean> [ ^false ]
     WinShell class >> serviceCommand: anId <Integer> code: aCode <Integer> from: aHandle <Integer> [ ^self ]
     WinShell class >> serviceNotifyFrom: aHandle <Integer> id: anId <Integer> code: aCode <Integer> [ ^self ]

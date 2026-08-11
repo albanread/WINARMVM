@@ -628,6 +628,37 @@ Object subclass: WinShell [
         ^moved
     ]
 
+    WinShell class >> paintBarOnce [
+        "THE FIRST PAINT HAS TO BE ASKED FOR, and nothing was asking.
+
+         Every cell on the strip is BS_OWNERDRAW, which means Windows draws
+         NOTHING for it and waits to be told — via WM_DRAWITEM — what it looks
+         like. At open the shell built the cells, laid them out, and never
+         invalidated, so the strip came up as a row of empty boxes and stayed
+         that way until some unrelated event happened to dirty it. The author
+         saw exactly that: `where is the rest of the app?`, and then `they only
+         appear after user clicks on the blank pane`.
+
+         It is not a drawing bug — the drawing was always correct, and 26
+         WM_DRAWITEMs arrived the instant anything asked. It is a bug about
+         who asks first, which is invisible to every headless test (there is
+         no window to be blank) and to the windowed gate too (which clicks a
+         view button, dirtying the strip before it ever looks at it).
+
+         InvalidateRect rather than a direct draw, for WG4 D3's own reason:
+         this runs inside a VM entry holding the busy guard, so a paint
+         provoked synchronously would be declined at the door. Invalidation is
+         asynchronous and arrives through the pump once the guard is released."
+        self invalidateBar.
+        #(#doit #printit #accept #splitter) do: [ :n |
+            (self controlNamed: n) ifNotNil: [ :c |
+                WinApi invalidateRect: c handle rect: 0 erase: 0 ] ].
+        self views do: [ :v |
+            (self controlNamed: (self viewButtonNameFor: (v at: 1))) ifNotNil: [ :c |
+                WinApi invalidateRect: c handle rect: 0 erase: 0 ] ].
+        ^self
+    ]
+
     WinShell class >> serviceCommand: anId <Integer> code: aCode <Integer> from: aHandle <Integer> [
         "A view-bar button, one drain pass after the click. Everything here
          is synchronous Win32 work — which is precisely why it is here and

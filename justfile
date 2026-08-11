@@ -1390,6 +1390,20 @@ gate-wg5b:
     # And it JOINED WG4 D4's focus rule rather than getting one of its own: a
     # read-only surface cannot supply source, so Accept is off.
     grep -q 'WG5B accept-on-readonly false' /tmp/wg5b_gate.txt
+    # The strip painted its own first frame -- it used to come up as a row of
+    # empty boxes and stay that way until something unrelated dirtied it.
+    DRAWN=$(grep -E '^WG5B drawcalls-at-open ' /tmp/wg5b_gate.txt | awk '{print $NF}')
+    echo "bar: $DRAWN cells drawn before any click"
+    test "$DRAWN" -gt 0
+    # A VERB SURVIVES BEING CLICKED. Clicking one used to move focus onto it,
+    # which made it not-a-source-surface, which disabled it -- and a disabled
+    # button never sends WM_COMMAND. The verb switched itself off on the way
+    # down. Both halves asserted, in the order that breaks.
+    grep -q 'WG5B enabled-on-workspace true' /tmp/wg5b_gate.txt
+    grep -q 'WG5B enabled-after-clicking-a-verb true' /tmp/wg5b_gate.txt
+    grep -q 'WG5B doit-still-clickable true' /tmp/wg5b_gate.txt
+    # And the click actually reaches Do It.
+    grep -q 'WG5B doit-fired 1' /tmp/wg5b_gate.txt
     # The Browser filled from the PRIMARY, across the seam.
     grep -q 'WG5B active-view #browser' /tmp/wg5b_gate.txt
     # `grep -oE '[0-9]+'` on the whole line would also match the 5 in WG5B --

@@ -43,6 +43,41 @@ gui doit {WinApi setFocus: (WinShell controlNamed: #transcript) handle.}
 gui doit {WinShell checkFocusChanged.}
 puts "WG5B accept-on-readonly [gui eval {(WinShell controlNamed: #accept) isEnabled}]"
 
+# ── the bar painted its FIRST frame ─────────────────────────────────────
+# A BS_OWNERDRAW cell is drawn by nobody until someone invalidates it, and
+# for a while nobody did: the strip came up as a row of empty boxes and only
+# filled in when an unrelated event happened to dirty it. Reported as `where
+# is the rest of the app?`. Non-zero draw calls before anything has been
+# clicked is the whole assertion.
+puts "WG5B drawcalls-at-open [gui eval {WinShell drawCalls}]"
+
+# ── A VERB MUST SURVIVE BEING CLICKED ───────────────────────────────────
+# The bug this pins was as bad as a bug gets: clicking `Do It` gave the
+# BUTTON focus, a button is not a source surface, so enablement disabled it
+# — and a disabled button never sends WM_COMMAND. The verb switched itself
+# off on the way down and the click vanished. `no response from print it or
+# doit`, and correctly.
+#
+# WG4 D4's own tests missed it because they set focus synthetically and
+# asserted both directions, but never made the ONE transition a human makes
+# every time: source surface -> verb cell. Asserted here in exactly that
+# order, because the order IS the bug.
+gui doit {WinApi setFocus: (WinShell controlNamed: (WinShell contentNameFor: #workspace)) handle.}
+gui doit {WinShell checkFocusChanged.}
+puts "WG5B enabled-on-workspace [gui eval {WinShell commandsEnabled}]"
+gui doit {WinApi setFocus: (WinShell controlNamed: #doit) handle.}
+gui doit {WinShell checkFocusChanged.}
+puts "WG5B enabled-after-clicking-a-verb [gui eval {WinShell commandsEnabled}]"
+puts "WG5B doit-still-clickable [gui eval {(WinShell controlNamed: #doit) isEnabled}]"
+
+# ── and Do It really runs, through a real WM_COMMAND ────────────────────
+gui doit {(WinShell controlNamed: (WinShell contentNameFor: #workspace)) setText: '3 + 4 * 2'.}
+gui doit {WinApi setFocus: (WinShell controlNamed: (WinShell contentNameFor: #workspace)) handle.}
+gui drain now
+gui send "0 0x111 [gui eval {(WinShell controlNamed: #doit) id}] 0"
+gui drain now
+puts "WG5B doit-fired [gui eval {WinShell doItCount}]"
+
 # ── the Browser, over the primary's live hierarchy ──────────────────────
 # A real WM_COMMAND (0x111) from outside every VM entry, then the panes. The
 # class count is a RELATIONSHIP, never a frozen integer (WG2 Δ 14): the world
