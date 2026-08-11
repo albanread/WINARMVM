@@ -21,10 +21,32 @@
 
  EVERY MESSAGE HERE ARRIVES AT THE DOOR because the pane is a child of our
  own window class (WG6c-1). WM_KEYDOWN and WM_CHAR were already allowlisted
- before this sprint existed; nothing was added for them."
+ before this sprint existed; nothing was added for them.
+
+ ── WG6c-2b: THE SELECTION, and where it lives ──────────────────────────
+ The rule above already answers it. A selection is NAVIGATION — it is made
+ by arrows, by Home/End and by a drag, none of which change the document —
+ so the VIEW owns it, exactly as it owns the caret, and the model needs no
+ selection concept at all. What the session gets told at edit time is a
+ RANGE rather than a point, and `replaceFrom:length:with:` was already there
+ to take it.
+
+ ANCHOR PLUS CARET, not start plus end. The selection is the span between
+ the place it started and the place the caret is now, in whichever order
+ they fall — which is the only representation that survives dragging
+ BACKWARDS through the anchor without the two ends swapping identity. Every
+ navigation key routes through one method, `editorMoveCaretTo:`, because
+ five keys agreeing about shift and a sixth not is precisely the bug this
+ shape exists to make impossible.
+
+ AND IT HAD BETTER BE VISIBLE. This project has shipped an invisible feature
+ before — WG5a D4's ghost line, whose test asserted the text it WOULD use
+ and never that anything appeared — so 106 paints the highlight, and the
+ rectangles it paints are computed here, purely, where they can be checked
+ without a window."
 
 Object subclass: WinShell [
-    <classVars: EditorCaret EditorKeys>
+    <classVars: EditorCaret EditorAnchor EditorKeys EditorDragging>
 
     "── Routing ──────────────────────────────────────────────────────────"
 
@@ -43,6 +65,14 @@ Object subclass: WinShell [
 
     WinShell class >> editorMessageBody: msg <Integer> wParam: wp <Integer> lParam: lp <Integer> ^ <Object> [
         msg = (WinApi constant: 'WM_LBUTTONDOWN') ifTrue: [ ^self editorClickAt: lp ].
+        "WG6c-2b. Both already allowlisted — WG4 D5 admitted them for the
+         splitter — and both reach the pane rather than the splitter's own
+         handlers, because 91 routes by HWND before its handlers are consulted.
+         A drag needs all three or none: a MOUSEMOVE without its LBUTTONUP
+         leaves the mouse captured for the life of the window, which is the
+         hazard WG4 D5 records against exactly this trio."
+        msg = (WinApi constant: 'WM_MOUSEMOVE') ifTrue: [ ^self editorDragTo: lp ].
+        msg = (WinApi constant: 'WM_LBUTTONUP') ifTrue: [ ^self editorEndDrag ].
         msg = (WinApi constant: 'WM_KEYDOWN') ifTrue: [ ^self editorKeyDown: wp ].
         msg = (WinApi constant: 'WM_CHAR') ifTrue: [ ^self editorChar: wp ].
         ^#defwindowproc
@@ -51,12 +81,54 @@ Object subclass: WinShell [
     "── The caret the VIEW owns ──────────────────────────────────────────"
 
     WinShell class >> editorCaret ^ <Integer> [
-        ^EditorCaret isNil ifTrue: [ 1 ] ifFalse: [ EditorCaret ] ]
+        "CLAMPED ON THE WAY OUT as well as on the way in, and the difference
+         matters: `editorCaret:` can only clamp against the document as it was
+         when it was called, and the document changes underneath — an undo, a
+         new class opened into the pane, an edit made from anywhere else. A
+         caret left past the end is an `at:` away from a raise INSIDE A PAINT,
+         which shows as a blank pane with nothing to say why."
+        | c |
+        c := EditorCaret isNil ifTrue: [ 1 ] ifFalse: [ EditorCaret ].
+        ^(c max: 1) min: self editorText size + 1
+    ]
+
+    WinShell class >> editorCaretAt: n <Integer> [
+        "Caret HERE, and nothing selected — the collapse `editorCaret:`
+         deliberately does not do. This is what everything OUTSIDE the input
+         path wants: opening a class at one of its methods, a jump from Find,
+         a script or a test placing the caret before it types.
+
+         It exists because leaving those callers to use `editorCaret:` was a
+         trap, and one that had already caught two tests in this file's own
+         suite: the anchor stayed where it was, so `editorCaret: 2` on a fresh
+         document quietly selected the first character and the next keystroke
+         replaced it."
+        self editorCaret: n.
+        EditorAnchor := self editorCaret.
+        ^self
+    ]
+
+    WinShell class >> resetEditorCaret [
+        "A NEW DOCUMENT gets a new caret and no selection. Called from
+         `openEditorOn:` in 106, which loads first and declares nothing about
+         either — without this the view kept the previous class's caret, and a
+         shorter document then had a selection running off its end."
+        ^self editorCaretAt: 1
+    ]
 
     WinShell class >> editorCaret: n <Integer> [
         "Clamped to the document, always. Every navigation below can run off
          an end, and a caret outside the buffer is an `at:` away from a raise
-         inside a paint — which is the failure that shows as a blank pane."
+         inside a paint — which is the failure that shows as a blank pane.
+
+         IT DELIBERATELY DOES NOT TOUCH THE ANCHOR, and that is not an
+         oversight to be tidied up later: shift-extend and a mouse drag both
+         work by moving the caret while the anchor stays put, so a setter that
+         collapsed the selection would make the two gestures this file exists
+         to support impossible. The callers that DO decide are
+         `editorMoveCaretTo:` (keyboard), `editorClickAt:` (mouse) and
+         `adoptSessionCaret` (after an edit). Anything outside this file that
+         wants a caret and no selection wants `resetEditorCaret` first."
         EditorCaret := (n max: 1) min: self editorText size + 1.
         ^self
     ]
@@ -64,9 +136,82 @@ Object subclass: WinShell [
     WinShell class >> adoptSessionCaret [
         "After an EDIT the session is the authority: it moved the caret past
          whatever it inserted or removed, and the view takes that answer
-         rather than recomputing it."
+         rather than recomputing it.
+
+         AND THE SELECTION IS GONE, which is not tidying up: the characters it
+         referred to no longer exist. A selection that survived its own
+         replacement would name a range in a document that has moved under it,
+         and the next keystroke would delete something the user never
+         highlighted."
         EditorSession current ifNotNil: [ :s | self editorCaret: s cursorOffset ].
+        EditorAnchor := self editorCaret.
         ^self
+    ]
+
+    "── The selection, which the view owns for the same reason ───────────"
+
+    WinShell class >> editorAnchor ^ <Integer> [
+        "Where the selection started. Clamped on the way OUT rather than kept
+         clamped, because the document can shrink under it — an undo, or an
+         edit made from anywhere else — and a stale anchor must degrade to a
+         valid one rather than raise inside a paint."
+        | a |
+        a := EditorAnchor isNil ifTrue: [ 1 ] ifFalse: [ EditorAnchor ].
+        ^(a max: 1) min: self editorText size + 1
+    ]
+
+    WinShell class >> editorSelection ^ <Array> [
+        "#(start length), 1-based, length 0 when there is no selection. The
+         ORDER is computed here and nowhere else: anchor and caret may fall
+         either way round, and every caller wants the span rather than the
+         history of how it was made."
+        | a c |
+        a := self editorAnchor.
+        c := self editorCaret.
+        ^Array with: (a min: c) with: (a max: c) - (a min: c)
+    ]
+
+    WinShell class >> editorHasSelection ^ <Boolean> [
+        ^(self editorSelection at: 2) > 0 ]
+
+    WinShell class >> editorSelectedText ^ <String> [
+        | sel |
+        sel := self editorSelection.
+        (sel at: 2) = 0 ifTrue: [ ^'' ].
+        ^self editorText copyFrom: (sel at: 1) to: (sel at: 1) + (sel at: 2) - 1
+    ]
+
+    WinShell class >> editorSelectAll ^ <Object> [
+        EditorAnchor := 1.
+        self editorCaret: self editorText size + 1.
+        self refreshEditorPane.
+        self syncEditorCaret.
+        ^0
+    ]
+
+    WinShell class >> shiftIsDown ^ <Boolean> [
+        "GetKeyState's HIGH bit is `currently down`; the low bit is the toggle
+         state, which for Shift is meaningless and for Caps Lock is the whole
+         point. The same trap `controlIsDown` records, and the same answer."
+        ^((WinApi getKeyState: 16r10) bitAnd: 16r8000) ~= 0   "VK_SHIFT"
+    ]
+
+    WinShell class >> editorMoveCaretTo: n <Integer> ^ <Object> [
+        "EVERY navigation ends here, and this is the only place the anchor
+         moves for a keyboard reason. Shift held EXTENDS — the anchor stays
+         where the selection began — and shift released COLLAPSES it onto the
+         caret, so there is no selection. One method rather than six, because
+         five keys agreeing about shift and a sixth not is the bug that shape
+         makes impossible rather than merely unlikely.
+
+         It REPAINTS now, which plain caret movement did not have to: the
+         highlight is part of the picture, so a selection that grew without a
+         repaint would be a selection the user cannot see."
+        self editorCaret: n.
+        self shiftIsDown ifFalse: [ EditorAnchor := self editorCaret ].
+        self refreshEditorPane.
+        self syncEditorCaret.
+        ^0
     ]
 
     "── Hit-testing: WG6c-1's arithmetic, inverted ───────────────────────"
@@ -105,11 +250,47 @@ Object subclass: WinShell [
     WinShell class >> editorClickAt: lp <Integer> ^ <Object> [
         "A click both FOCUSES and positions. Focus first: without it the pane
          is a picture — the keys would go wherever they were going before, and
-         the caret would blink in another window."
+         the caret would blink in another window.
+
+         Shift-click EXTENDS from wherever the selection already started,
+         which is the one gesture that makes a long selection reachable
+         without dragging across a scroll. A plain click drops the anchor
+         here, so the drag below has something to be a drag FROM."
+        | at |
         WinApi setFocus: self editorPaneHwnd.
+        at := self editorOffsetAtX: (self loWordSigned: lp) y: (self hiWordSigned: lp).
+        self editorCaret: at.
+        self shiftIsDown ifFalse: [ EditorAnchor := self editorCaret ].
+        "CAPTURE, so the drag keeps arriving after the pointer leaves the
+         pane. Without it a selection stops growing the moment the mouse
+         crosses the border, which reads as the editor losing interest."
+        EditorDragging := true.
+        WinApi setCapture: self editorPaneHwnd.
+        self refreshEditorPane.
+        self syncEditorCaret.
+        ^0
+    ]
+
+    WinShell class >> editorDragTo: lp <Integer> ^ <Object> [
+        "Only while a button is genuinely down. WM_MOUSEMOVE arrives for every
+         pointer movement over the pane — WG4 D5 admitted it knowing that, and
+         the flag is what keeps a hover from silently selecting text."
+        EditorDragging == true ifFalse: [ ^#defwindowproc ].
         self editorCaret: (self editorOffsetAtX: (self loWordSigned: lp)
             y: (self hiWordSigned: lp)).
+        self refreshEditorPane.
         self syncEditorCaret.
+        ^0
+    ]
+
+    WinShell class >> editorEndDrag ^ <Object> [
+        "RELEASED ON EVERY PATH THROUGH HERE, including one where no drag was
+         in progress. A captured mouse that never sees its button-up leaves
+         the pointer captured for the life of the window — WG4 D5's recorded
+         hazard, and the reason the three mouse messages are admitted as a set
+         rather than one at a time."
+        EditorDragging := false.
+        WinApi releaseCapture.
         ^0
     ]
 
@@ -127,6 +308,13 @@ Object subclass: WinShell [
         ctrl ifTrue: [
             vk = 16r5A ifTrue: [ ^self editorCommand: 'undo' ].   "Z"
             vk = 16r59 ifTrue: [ ^self editorCommand: 'redo' ].   "Y"
+            "WG6c-2b. The clipboard verbs keep their universal bindings — an
+             editor that invented its own would be wrong in a way no comment
+             could fix. 108 defines them; 91 declares the no-ops."
+            vk = 16r41 ifTrue: [ ^self editorSelectAll ].         "A"
+            vk = 16r43 ifTrue: [ ^self editorCopy ].              "C"
+            vk = 16r58 ifTrue: [ ^self editorCut ].               "X"
+            vk = 16r56 ifTrue: [ ^self editorPaste ].             "V"
             ^#defwindowproc ].
         vk = 16r25 ifTrue: [ ^self editorMoveBy: -1 ].            "Left"
         vk = 16r27 ifTrue: [ ^self editorMoveBy: 1 ].             "Right"
@@ -153,12 +341,59 @@ Object subclass: WinShell [
     ]
 
     WinShell class >> editorApply: key <String> ^ <Object> [
-        "One edit. The view hands over its caret, the session applies the edit
-         and moves the caret, and the view adopts the answer — the one-
-         authority-per-phase rule this file exists to keep."
+        "One edit. The view hands over its caret — or its SELECTION, when
+         there is one — the session applies the edit and moves the caret, and
+         the view adopts the answer. The one-authority-per-phase rule this
+         file exists to keep, with a range in place of a point.
+
+         A selection makes every editing key mean the same thing: replace what
+         is highlighted. Typing replaces it with the character, Enter with a
+         newline, and Backspace or Delete with nothing at all — which is why
+         they need no special case beyond the empty string."
+        | sel |
         EditorSession current isNil ifTrue: [ ^#defwindowproc ].
         EditorKeys := self editorKeys + 1.
-        EditorSession current handleKey: key at: self editorCaret.
+        sel := self editorSelection.
+        (sel at: 2) > 0
+            ifTrue: [
+                EditorSession current
+                    replaceFrom: (sel at: 1) - 1
+                    length: (sel at: 2)
+                    with: (self editorReplacementFor: key) ]
+            ifFalse: [ EditorSession current handleKey: key at: self editorCaret ].
+        self adoptSessionCaret.
+        self refreshEditorPane.
+        self syncEditorCaret.
+        ^0
+    ]
+
+    WinShell class >> editorReplacementFor: key <String> ^ <String> [
+        "What a key puts in place of a selection. Named separately so the
+         three editing keys that are not characters cannot drift from the one
+         that is."
+        key = 'Enter' ifTrue: [ ^String with: Character nl ].
+        key = 'Backspace' ifTrue: [ ^'' ].
+        key = 'Delete' ifTrue: [ ^'' ].
+        ^key
+    ]
+
+    WinShell class >> editorInsertText: s <String> ^ <Object> [
+        "LITERAL TEXT, never a key name — and that distinction is the whole
+         reason this is not just `editorApply:`. The key vocabulary has three
+         words in it ('Enter', 'Backspace', 'Delete'), so pasting a snippet
+         that happened to be the word `Delete` would delete the selection
+         instead of inserting the word. Unlikely, silent, and impossible to
+         work out from the symptom.
+
+         One path for both cases: with no selection the range is empty and
+         `replaceFrom:length:with:` is a plain insertion at the caret, so
+         paste needs no branch and cannot get one of the two wrong."
+        | sel |
+        EditorSession current isNil ifTrue: [ ^#defwindowproc ].
+        EditorKeys := self editorKeys + 1.
+        sel := self editorSelection.
+        EditorSession current
+            replaceFrom: (sel at: 1) - 1 length: (sel at: 2) with: s.
         self adoptSessionCaret.
         self refreshEditorPane.
         self syncEditorCaret.
@@ -180,9 +415,7 @@ Object subclass: WinShell [
     "── Navigation, all pure arithmetic over the text ────────────────────"
 
     WinShell class >> editorMoveBy: delta <Integer> ^ <Object> [
-        self editorCaret: self editorCaret + delta.
-        self syncEditorCaret.
-        ^0
+        ^self editorMoveCaretTo: self editorCaret + delta
     ]
 
     WinShell class >> editorLineColOf: offset <Integer> ^ <Array> [
@@ -222,19 +455,62 @@ Object subclass: WinShell [
          behaviour, and the one that never surprises."
         | lc |
         lc := self editorLineColOf: self editorCaret.
-        self editorCaret: (self editorOffsetOfLine: ((lc at: 1) + delta max: 0)
-            col: (lc at: 2)).
-        self syncEditorCaret.
-        ^0
+        ^self editorMoveCaretTo: (self editorOffsetOfLine: ((lc at: 1) + delta max: 0)
+            col: (lc at: 2))
     ]
 
     WinShell class >> editorMoveToLineEdge: which <Symbol> ^ <Object> [
         | lc |
         lc := self editorLineColOf: self editorCaret.
-        which == #home
-            ifTrue: [ self editorCaret: (self editorOffsetOfLine: (lc at: 1) col: 0) ]
-            ifFalse: [ self editorCaret: (self editorOffsetOfLine: (lc at: 1) col: 1000000) ].
-        self syncEditorCaret.
-        ^0
+        ^self editorMoveCaretTo: (which == #home
+            ifTrue: [ self editorOffsetOfLine: (lc at: 1) col: 0 ]
+            ifFalse: [ self editorOffsetOfLine: (lc at: 1) col: 1000000 ])
+    ]
+
+    "── The selection's rectangles, PURE so they can be checked ──────────
+
+     One rect per line the selection touches, in the pane's own coordinates,
+     which 106 fills before it draws the text. Computed here rather than
+     inside the paint for the reason this whole port keeps returning to: a
+     calculation in a paint handler is a calculation nobody can check, because
+     a raise in there is captured and the pane simply stays blank."
+
+    WinShell class >> editorSelectionRectsAtX: ox <Integer> y: oy <Integer> ^ <OrderedCollection> [
+        | out sel text lo hi charW lineH i line col startCol lineStart |
+        out := OrderedCollection new.
+        sel := self editorSelection.
+        (sel at: 2) = 0 ifTrue: [ ^out ].
+        text := self editorText.
+        lo := sel at: 1.
+        hi := lo + (sel at: 2).
+        charW := self editorCharWidth.
+        lineH := self editorLineHeight.
+        i := 1. line := 0. col := 0.
+        startCol := nil.
+        lineStart := nil.
+        [ i < hi ] whileTrue: [
+            (i >= lo and: [ startCol isNil ]) ifTrue: [ startCol := col. lineStart := line ].
+            (i <= text size and: [ (text at: i) = Character nl ])
+                ifTrue: [
+                    "A newline INSIDE the selection ends this line's rect. The
+                     +1 column is the newline itself, drawn as a sliver so a
+                     selected line break is visible rather than implied."
+                    startCol isNil ifFalse: [
+                        out add: (Array
+                            with: ox + (startCol * charW)
+                            with: oy + (lineStart * lineH)
+                            with: ((col - startCol + 1) * charW)
+                            with: lineH).
+                        startCol := nil ].
+                    line := line + 1. col := 0 ]
+                ifFalse: [ col := col + 1 ].
+            i := i + 1 ].
+        startCol isNil ifFalse: [
+            out add: (Array
+                with: ox + (startCol * charW)
+                with: oy + (lineStart * lineH)
+                with: ((col - startCol) * charW)
+                with: lineH) ].
+        ^out
     ]
 ]

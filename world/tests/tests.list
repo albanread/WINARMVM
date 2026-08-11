@@ -156,5 +156,8 @@ tier1.mst
 # blinking) is `just gate-wg5b`.
 ../106_winui_editorpane.mst
 ../107_winui_editorkeys.mst
+# WG6c-2b: the clipboard. 67 reaches its two PURE parts - the verbs' refusal
+# to act on an empty selection - and the Win32 half is inert until called.
+../108_winui_editorclip.mst
 67_winui_editor_tests.mst
 99_run_all.mst

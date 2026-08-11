@@ -1533,6 +1533,8 @@ gate-wg6c:
     # for a gate to pass while checking nothing.
     grep -q 'WinUiEditorWg6cTests' /tmp/wg6c_world.txt
     grep -q 'testTypingThenUndoRestoresExactly' /tmp/wg6c_world.txt
+    grep -q 'testReplacingASelectionIsOneUndo' /tmp/wg6c_world.txt
+    grep -q 'testSelectionRectsCoverExactlyTheSelectedLines' /tmp/wg6c_world.txt
 
     # 2: THE WINDOW.
     cargo build --quiet -p win_gui
@@ -1548,6 +1550,13 @@ gate-wg6c:
     grep -q 'WG6C open true' /tmp/wg6c_gate.txt
     grep -q 'WG6C pane-exists true' /tmp/wg6c_gate.txt
     grep -q 'WG6C pane-hwnd-nonzero true' /tmp/wg6c_gate.txt
+    # THE FONT WAS MEASURED before any pixel arithmetic. `editorCharWidth`
+    # answers a DEFAULT of 8 until the first paint runs DT_CALCRECT and finds
+    # the real 7, and it changes exactly once — so a click encoded before that
+    # transition and decoded after it lands somewhere else entirely. That is
+    # not hypothetical: it moved a click from line 1 column 4 to the end of the
+    # document when repaints were added elsewhere in the script.
+    grep -q 'WG6C metrics-measured true' /tmp/wg6c_gate.txt
     # FOCUS IS THE WHOLE ARCHITECTURAL CLAIM. WG6c-1 rejected an SS_OWNERDRAW
     # STATIC because a STATIC can hold focus and still never receive a
     # WM_KEYDOWN — focusable and mute. This asserts the half that was easy.
@@ -1595,6 +1604,34 @@ gate-wg6c:
     # started as, never a length: a journal that replayed badly comes back the
     # right length most of the time.
     grep -q 'WG6C undo-restored-exactly true' /tmp/wg6c_gate.txt
+
+    # ── WG6c-2b: the selection, and what it is for ──────────────────────
+    # A DRAG IS THREE MESSAGES and needs no modifier, so unlike shift-extend
+    # and Ctrl-Z this is a complete proof rather than a partial one: press,
+    # move, release, and the six characters under the gesture are selected.
+    grep -q "WG6C drag-selected 'Object'" /tmp/wg6c_gate.txt
+    # AND IT IS VISIBLE. This project has shipped an invisible feature before —
+    # WG5a D4's ghost line, whose test asserted the text a drawing WOULD use
+    # and never that anything appeared — so the highlight's rectangles are
+    # asserted to exist, and the snapshot at the end carries the rest.
+    RECTS=$(grep -E '^WG6C drag-rects ' /tmp/wg6c_gate.txt | awk '{print $NF}')
+    test "$RECTS" -ge 1
+    # AND THE MOUSE WAS RELEASED. A capture that leaks is invisible until every
+    # other control in the app stops responding, which is a long way from the
+    # drag that caused it — WG4 D5's recorded hazard against exactly this trio.
+    grep -q 'WG6C capture-released true' /tmp/wg6c_gate.txt
+
+    # THE CLIPBOARD IS REAL — Win32's own, global and shared, not a variable
+    # pretending to be one. Round-tripped, then used: copy puts the dragged
+    # selection on it, and paste over a different selection puts it back.
+    grep -q 'WG6C clip-put true' /tmp/wg6c_gate.txt
+    grep -q "WG6C clip-got 'ROUNDTRIP'" /tmp/wg6c_gate.txt
+    grep -q "WG6C clip-error ''" /tmp/wg6c_gate.txt
+    grep -q "WG6C clip-after-copy 'Object'" /tmp/wg6c_gate.txt
+    grep -q "WG6C doc-after-paste 'Object'" /tmp/wg6c_gate.txt
+    # ONE Ctrl-Z after a paste over a selection, not two. Delete-then-insert as
+    # two commits left the first undo on a document the user never saw.
+    grep -q 'WG6C undo-after-paste-restores true' /tmp/wg6c_gate.txt
 
     # AND IT PAINTED. Zero paints with an empty paintError is exactly what a
     # stale binary looks like (see the note above this recipe), and it is

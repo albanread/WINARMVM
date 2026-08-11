@@ -1628,6 +1628,17 @@ Object subclass: WinShell [
     "WG6c-2's editor input; 107 overrides."
     WinShell class >> editorMessage: msg wParam: wp lParam: lp [ ^#defwindowproc ]
     WinShell class >> editorCaret [ ^1 ]
+    "WG6c-2b's selection; 107 overrides. 106 paints the rectangles and loads
+     BEFORE 107, so an empty collection here is what makes that file complete
+     on its own rather than merely complete in practice."
+    WinShell class >> editorSelectionRectsAtX: x y: y [ ^OrderedCollection new ]
+    WinShell class >> resetEditorCaret [ ^self ]
+    "WG6c-2b's clipboard; 108 overrides. Declared here because 107 DISPATCHES
+     them (Ctrl-C/X/V) and loads before 108 does — a layer that stopped at 107
+     would otherwise answer doesNotUnderstand to a keystroke."
+    WinShell class >> editorCopy [ ^#defwindowproc ]
+    WinShell class >> editorCut [ ^#defwindowproc ]
+    WinShell class >> editorPaste [ ^#defwindowproc ]
     "WG6b's Find view; 105 overrides."
     WinShell class >> showFindPanes: aBool [ ^self ]
     WinShell class >> layoutFindPanes: content [ ^self ]

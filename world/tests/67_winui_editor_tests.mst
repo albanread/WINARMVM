@@ -24,7 +24,21 @@ TestCase subclass: WinUiEditorWg6cTests [
         self runTest: #testTheCaretIsAlwaysInsideTheDocument
              do: [ self testTheCaretIsAlwaysInsideTheDocument ].
         self runTest: #testTypingThenUndoRestoresExactly
-             do: [ self testTypingThenUndoRestoresExactly ]
+             do: [ self testTypingThenUndoRestoresExactly ].
+        self runTest: #testANewDocumentResetsTheCaretAndSelection
+             do: [ self testANewDocumentResetsTheCaretAndSelection ].
+        self runTest: #testTheSelectionIsOrderedWhicheverWayItWasMade
+             do: [ self testTheSelectionIsOrderedWhicheverWayItWasMade ].
+        self runTest: #testSelectionRectsCoverExactlyTheSelectedLines
+             do: [ self testSelectionRectsCoverExactlyTheSelectedLines ].
+        self runTest: #testTypingOverASelectionReplacesIt
+             do: [ self testTypingOverASelectionReplacesIt ].
+        self runTest: #testReplacingASelectionIsOneUndo
+             do: [ self testReplacingASelectionIsOneUndo ].
+        self runTest: #testPasteInsertsTextNotKeyNames
+             do: [ self testPasteInsertsTextNotKeyNames ].
+        self runTest: #testCopyingNothingLeavesTheClipboardAlone
+             do: [ self testCopyingNothingLeavesTheClipboardAlone ]
     ]
 
     threeLines [ ^'one', (String with: Character nl), 'two', (String with: Character nl), 'three' ]
@@ -114,5 +128,145 @@ TestCase subclass: WinUiEditorWg6cTests [
         WinShell editorCommand: 'undo'.
         self assert: WinShell editorText = before
             description: 'and undo restored it EXACTLY'
+    ]
+
+    "── WG6c-2b: the selection, and what it is for ───────────────────────"
+
+    testANewDocumentResetsTheCaretAndSelection [
+        "The view's caret is the VIEW's to reset, and nothing was doing it: the
+         session started each document at 1 while the view kept the previous
+         class's caret and anchor. On a SHORTER document that is a selection
+         running off the end, which is a raise inside a paint — the failure
+         with no symptom but a blank pane."
+        WinShell openEditorOn: self threeLines.
+        WinShell editorSelectAll.
+        WinShell openEditorOn: 'ab'.
+        self assert: WinShell editorCaret = 1
+            description: 'a new document starts at the beginning'.
+        self assert: WinShell editorHasSelection not
+            description: 'and with nothing selected, whatever the last one left'
+    ]
+
+    testTheSelectionIsOrderedWhicheverWayItWasMade [
+        "Anchor and caret fall either way round — dragging BACKWARDS through
+         the anchor is the ordinary case, not the exotic one — and every
+         caller wants the span rather than the history of how it was made."
+        | forward backward |
+        WinShell openEditorOn: self threeLines.
+        WinShell editorCaretAt: 1.
+        WinShell editorCaret: 4.
+        forward := WinShell editorSelection.
+        self assert: forward = (Array with: 1 with: 3)
+            description: 'anchor 1, caret 4 is #(1 3) but was ' , forward printString.
+        "Now the other way round — anchor at the END, caret dragged back past
+         it, which is what a backwards drag actually is. `editorSelectAll` will
+         not do: it anchors at 1, so moving the caret back to 1 COLLAPSES the
+         selection rather than inverting it."
+        WinShell editorCaretAt: WinShell editorText size + 1.
+        WinShell editorCaret: 1.
+        backward := WinShell editorSelection.
+        self assert: (backward at: 1) = 1
+            description: 'a backwards selection still starts at the lower end'.
+        self assert: (backward at: 2) = (WinShell editorText size)
+            description: 'and spans to the anchor, not from it'
+    ]
+
+    testSelectionRectsCoverExactlyTheSelectedLines [
+        "What the user SEES is these rectangles, so they are checked rather
+         than trusted — this project has shipped an invisible feature before
+         (WG5a D4's ghost line) precisely by testing the value a drawing would
+         use instead of the drawing.
+
+         `one\ntwo\nthree` selected whole is three rects: two short lines that
+         include their newline as a visible sliver, and a last line that has
+         none to include."
+        | rects w |
+        WinShell openEditorOn: self threeLines.
+        WinShell editorSelectAll.
+        rects := WinShell editorSelectionRectsAtX: 0 y: 0.
+        w := WinShell editorCharWidth.
+        self assert: rects size = 3
+            description: 'three lines selected is three rects, not '
+                , rects size printString.
+        self assert: ((rects at: 1) at: 3) = (4 * w)
+            description: '`one` plus its newline is four columns wide'.
+        self assert: ((rects at: 2) at: 2) = WinShell editorLineHeight
+            description: 'the second rect is one line down'.
+        self assert: ((rects at: 3) at: 3) = (5 * w)
+            description: '`three` has no newline to include, so five columns'.
+        "And no selection is no rectangles — the cost of the feature when it
+         is not in use."
+        WinShell resetEditorCaret.
+        self assert: (WinShell editorSelectionRectsAtX: 0 y: 0) isEmpty
+            description: 'an empty selection draws nothing'
+    ]
+
+    testTypingOverASelectionReplacesIt [
+        "The whole point of a selection. Backspace and Delete go the same way
+         and are asserted with it, because the three used to need three
+         different code paths and would have drifted."
+        WinShell openEditorOn: self threeLines.
+        WinShell resetEditorCaret.
+        WinShell editorCaret: 4.
+        WinShell editorApply: 'X'.
+        self assert: (WinShell editorText copyFrom: 1 to: 2)
+                = ('X' , (String with: Character nl))
+            description: 'typing over `one` leaves X then the newline, but the text is '
+                , WinShell editorText printString.
+        WinShell openEditorOn: self threeLines.
+        WinShell resetEditorCaret.
+        WinShell editorCaret: 4.
+        WinShell editorApply: 'Backspace'.
+        self assert: (WinShell editorText at: 1) = Character nl
+            description: 'Backspace over a selection deletes it and nothing else'
+    ]
+
+    testReplacingASelectionIsOneUndo [
+        "ONE Ctrl-Z, not two. Delete-then-insert as two commits leaves a first
+         undo step on a document the user never saw — the selection gone and
+         the replacement not yet back — and the only way home was to press it
+         again and know to."
+        | before |
+        WinShell openEditorOn: self threeLines.
+        before := WinShell editorText.
+        WinShell resetEditorCaret.
+        WinShell editorCaret: 4.
+        WinShell editorApply: 'X'.
+        self assert: WinShell editorText ~= before
+            description: 'the selection was replaced'.
+        WinShell editorCommand: 'undo'.
+        self assert: WinShell editorText = before
+            description: 'and ONE undo brought it all back, not half of it'
+    ]
+
+    testPasteInsertsTextNotKeyNames [
+        "`editorApply:` speaks a vocabulary with three words in it — Enter,
+         Backspace, Delete — so pasting a snippet that happens to BE one of
+         them must not perform the key. Silent, unlikely, and impossible to
+         diagnose from the symptom, which is why it is pinned."
+        WinShell openEditorOn: 'ab'.
+        WinShell editorCaretAt: 2.
+        WinShell editorInsertText: 'Delete'.
+        self assert: WinShell editorText = 'aDeleteb'
+            description: 'the WORD was inserted, but the text is '
+                , WinShell editorText printString
+    ]
+
+    testCopyingNothingLeavesTheClipboardAlone [
+        "Copying an empty selection must be a no-op rather than putting an
+         empty string on the clipboard: the alternative silently destroys
+         whatever the user had there, which is the worst possible answer to a
+         mistyped shortcut. Checked as `it did not reach Win32 at all` — the
+         verbs answer before touching the clipboard, so this runs headless."
+        WinShell openEditorOn: self threeLines.
+        WinShell resetEditorCaret.
+        self assert: WinShell editorHasSelection not
+            description: 'nothing is selected to begin with'.
+        self assert: WinShell editorCopy = 0
+            description: 'copy answers handled, and quietly does nothing'.
+        self assert: WinShell editorCut = 0
+            description: 'and so does cut'.
+        self assert: WinShell editorText = self threeLines
+            description: 'a cut with no selection changed nothing'
     ]
 ]

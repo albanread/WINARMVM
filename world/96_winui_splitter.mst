@@ -49,6 +49,15 @@ Object subclass: WinApi [
         ^self primitiveFailed: 'ReleaseCapture'
     ]
 
+    WinApi class >> getCapture ^ <Integer> [
+        "Which window has the mouse captured on this thread, or 0. Added by
+         WG6c-2b so a gate can assert that a drag RELEASED — a capture that
+         leaks is invisible until every other control in the app stops
+         responding, which is a long way from the drag that caused it."
+        <primitive: FFI function: #GetCapture ret: #g args: #()>
+        ^self primitiveFailed: 'GetCapture'
+    ]
+
     WinApi class >> loadCursor: hInstance <Integer> name: idc <Integer> ^ <Integer> [
         <primitive: FFI function: #LoadCursorW ret: #g args: #(g g)>
         ^self primitiveFailed: 'LoadCursorW'

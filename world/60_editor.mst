@@ -327,6 +327,23 @@ Object subclass: TextBuffer [
     insert: aString at: at [ ^self commit: (root insert: aString at: at) ]
     delete: from to: to [ ^self commit: (root delete: from to: to) ]
 
+    "A replace as ONE commit, and the reason is undo GRANULARITY rather than
+     speed. Delete-then-insert as two commits makes Ctrl-Z over a typed-over
+     selection a two-step operation whose FIRST step lands on a document the
+     user never saw — the selection gone and the replacement not yet back.
+     Composing both edits before committing costs nothing here precisely
+     because the rope is persistent: `delete` and `insert` are pure functions
+     answering new roots, so the intermediate root is just a value that is
+     never recorded.
+
+     Nothing at all is committed for a no-op replace, so an empty selection
+     replaced by an empty string cannot put an unreachable state on the undo
+     stack."
+    replaceFrom: from to: to with: aString [
+        (to < from and: [ aString isEmpty ]) ifTrue: [ ^self ].
+        ^self commit: ((root delete: from to: to) insert: aString at: from)
+    ]
+
     canUndo [ ^undo isEmpty not ]
     canRedo [ ^redo isEmpty not ]
 
@@ -421,8 +438,12 @@ Object subclass: EditorSession [
     replaceFrom: loc length: len with: s [
         | at |
         at := loc + 1.
-        len > 0 ifTrue: [ buffer delete: at to: loc + len ].
-        s isEmpty ifFalse: [ buffer insert: s at: at ].
+        "ONE commit, via TextBuffer's own replace — so undoing a typed-over
+         selection is a single Ctrl-Z rather than two, the second of which
+         used to be the only way back to a state the user recognised. This is
+         the entry point WG6c-2b's selection editing goes through, and the
+         granularity is the whole reason it does."
+        buffer replaceFrom: at to: loc + len with: s.
         cursor := (at + s size min: buffer size + 1) max: 1.
         ^self render
     ]

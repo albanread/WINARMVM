@@ -54,6 +54,25 @@ gui drain now
 puts "WG6C pane-exists [gui eval {(WinShell controlNamed: WinShell editorPaneName) notNil}]"
 puts "WG6C pane-hwnd-nonzero [gui eval {WinShell editorPaneHwnd ~= 0}]"
 
+# THE FIRST PAINT HAS TO HAPPEN BEFORE ANY PIXEL ARITHMETIC, and this is not
+# tidiness — it is a race that already produced a wrong answer here.
+# `editorCharWidth` and `editorLineHeight` answer DEFAULTS (8 and 16) until a
+# paint has measured the real font with DT_CALCRECT, and they change exactly
+# once, at that first paint. Every click below is built by one `gui eval` and
+# decoded by a later `gui send`, so a paint landing between the two encodes
+# with one set of metrics and decodes with the other.
+#
+# Measured, not theorised: adding repaints elsewhere in this script moved the
+# transition and a click that had been landing on line 1 column 4 started
+# landing at the end of the document. Forced and ASSERTED here, so everything
+# after this line is arithmetic against metrics that can no longer change.
+gui doit {WinShell refreshEditorPane.}
+gui drain now
+gui drain now
+puts "WG6C metrics-measured [gui eval {WinShell paintCalls > 0}]"
+puts "WG6C char-width [gui eval {WinShell editorCharWidth}]"
+puts "WG6C line-height [gui eval {WinShell editorLineHeight}]"
+
 # THE PANE MUST HOLD THE FOCUS or a keystroke is addressed to a window that
 # is not listening — and that is not a quibble: it is the entire reason WG6c-1
 # rejected an SS_OWNERDRAW STATIC, which can hold focus and still never see a
@@ -133,6 +152,53 @@ gui doit {WinShell editorCommand: 'undo'.}
 gui drain now
 puts "WG6C doc-after-undo [gui eval {WinShell editorText size}]"
 puts "WG6C undo-restored-exactly [gui eval {WinShell editorText = ('Object subclass: Demo [', (String with: Character nl), '    "the comment"', (String with: Character nl), '    run [ ^self foo: 3 + 4 ]', (String with: Character nl), ']')}]"
+
+# ── WG6c-2b: a DRAG selects, through three real messages ────────────────
+# LBUTTONDOWN, MOUSEMOVE, LBUTTONUP — the full gesture, and none of the three
+# needs a modifier, so unlike shift-extend this is a COMPLETE proof rather
+# than a partial one. Line 0, columns 0 to 5: `Object`.
+gui doit {WinShell editorCaretAt: 1.}
+gui send "[gui eval {(WinShell controlNamed: WinShell editorPaneName) id}] 0x0201 0 [gui eval {3 * 65536 + 1}]"
+gui send "[gui eval {(WinShell controlNamed: WinShell editorPaneName) id}] 0x0200 1 [gui eval {3 * 65536 + (WinShell editorCharWidth * 6 + 1)}]"
+gui send "[gui eval {(WinShell controlNamed: WinShell editorPaneName) id}] 0x0202 0 [gui eval {3 * 65536 + (WinShell editorCharWidth * 6 + 1)}]"
+gui drain now
+puts "WG6C drag-selected [gui eval {WinShell editorSelectedText}]"
+puts "WG6C drag-rects [gui eval {(WinShell editorSelectionRectsAtX: 0 y: 0) size}]"
+# AND THE MOUSE IS NOT STILL CAPTURED. A drag that never released would leave
+# the pointer captured for the life of the window — WG4 D5's recorded hazard,
+# and invisible until every other control in the app stops responding.
+puts "WG6C capture-released [gui eval {WinApi getCapture = 0}]"
+
+# ── the clipboard, which is real, global, and shared ────────────────────
+# A round trip through Win32's own clipboard rather than through a variable
+# pretending to be one: put text on it, ask for it back, compare.
+puts "WG6C clip-put [gui eval {WinShell clipboardText: 'ROUNDTRIP'}]"
+puts "WG6C clip-got [gui eval {WinShell clipboardText}]"
+puts "WG6C clip-error [gui eval {WinShell clipError}]"
+
+# COPY, then PASTE over a different selection. The document is the assertion:
+# the six characters the drag selected end up where the second selection was.
+gui doit {WinShell editorCopy.}
+puts "WG6C clip-after-copy [gui eval {WinShell clipboardText}]"
+gui doit {WinShell editorCaretAt: 1.}
+gui doit {WinShell editorSelectAll.}
+gui doit {WinShell editorPaste.}
+gui drain now
+puts "WG6C doc-after-paste [gui eval {WinShell editorText}]"
+# ONE undo, not two — a replace is a single commit, so the first Ctrl-Z must
+# land on the document the user recognises rather than half way.
+gui doit {WinShell editorCommand: 'undo'.}
+gui drain now
+puts "WG6C undo-after-paste-restores [gui eval {WinShell editorText = ('Object subclass: Demo [', (String with: Character nl), '    "the comment"', (String with: Character nl), '    run [ ^self foo: 3 + 4 ]', (String with: Character nl), ']')}]"
+
+# Leave a selection ON SCREEN for the snapshot, because the highlight is the
+# half of this slice a human has to be able to see.
+gui doit {WinShell editorCaretAt: 1.}
+gui send "[gui eval {(WinShell controlNamed: WinShell editorPaneName) id}] 0x0201 0 [gui eval {(WinShell editorLineHeight * 2 + 3) * 65536 + 1}]"
+gui send "[gui eval {(WinShell controlNamed: WinShell editorPaneName) id}] 0x0200 1 [gui eval {(WinShell editorLineHeight * 2 + 3) * 65536 + (WinShell editorCharWidth * 28 + 1)}]"
+gui send "[gui eval {(WinShell controlNamed: WinShell editorPaneName) id}] 0x0202 0 [gui eval {(WinShell editorLineHeight * 2 + 3) * 65536 + (WinShell editorCharWidth * 28 + 1)}]"
+gui drain now
+puts "WG6C snap-selection [gui eval {WinShell editorSelectedText}]"
 
 # ── and none of it broke the paint ──────────────────────────────────────
 # A raise inside a paint is captured into `paintError` rather than propagated

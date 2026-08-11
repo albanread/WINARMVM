@@ -153,6 +153,24 @@ Object subclass: WinShell [
         text isEmpty ifTrue: [
             WinApi selectObject: hdc object: old.
             ^1 ].
+        "WG6c-2b: THE SELECTION, UNDER THE TEXT. Filled before a single glyph
+         is drawn, and the text then drawn over it in TRANSPARENT mode — which
+         is why the syntax colours survive the highlight instead of being
+         replaced by a system highlight colour. A code editor that loses its
+         colouring the moment you select something has traded one useful thing
+         for another.
+
+         The rectangles are computed in 107, purely, so the arithmetic that
+         decides what looks selected is checkable without a window — the same
+         reason `caretPointFor:` lives outside the paint. Its cost is nothing
+         when there is no selection: the collection is empty and this loop
+         does not run."
+        (self editorSelectionRectsAtX: x y: y) do: [ :sr |
+            | sb |
+            sb := WinApi createSolidBrush: 16rF0D8A8.   "a light blue, BGR"
+            self setRect: rect x: (sr at: 1) y: (sr at: 2) w: (sr at: 3) h: (sr at: 4).
+            WinApi fillRect: hdc rect: rect brush: sb.
+            WinApi deleteObject: sb ].
         runs := WinSyntax runsFor: text.
         lineH := self editorLineHeight.
         charW := self editorCharWidth.
@@ -261,6 +279,11 @@ Object subclass: WinShell [
 
     WinShell class >> openEditorOn: aString <String> [
         EditorSession openOn: aString.
+        "The VIEW's caret is the view's to reset, and nothing else was doing
+         it: the session starts a new document at 1 while the view kept the
+         previous class's caret and selection, which on a shorter document ran
+         off the end. A no-op until 107 defines it."
+        self resetEditorCaret.
         self refreshEditorPane.
         ^self
     ]

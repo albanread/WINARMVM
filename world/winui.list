@@ -95,3 +95,6 @@
 # rope's `handleKey:at:`, mouse hit-testing (WG6c-1's arithmetic inverted),
 # and undo/redo, which the persistent rope makes free.
 107_winui_editorkeys.mst
+# WINARM (WG6c-2b): the clipboard. Loads after 107, which dispatches Ctrl-C/X/V
+# to it; 91 declares the three as no-ops so 107 is complete without this file.
+108_winui_editorclip.mst

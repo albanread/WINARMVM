@@ -1,0 +1,185 @@
+"── 108_winui_editorclip.mst — WG6c-2b: the clipboard ────────────────────
+ docs/sprints/sprint_wg6c_detail.md WG6c-2, the last of its three named
+ pieces. 107 made a selection; this is what a selection is FOR.
+
+ THE CLIPBOARD IS GLOBAL, SHARED, AND MODAL, which is the whole difficulty
+ and the reason this is its own file. `OpenClipboard` takes a process-wide
+ lock that every other application on the desktop is contending for, and a
+ clipboard left open is not a leak in this process — it is Notepad failing to
+ copy, and Word failing to copy, until this process exits. So:
+
+   * every open is matched by a close through `ensure:`, on the raising path
+     as well as the returning one, and
+   * nothing between them does anything that could raise if it can be hoisted
+     out instead.
+
+ It is the same discipline WG6c-1's `BeginPaint`/`EndPaint` needed and got,
+ for a failure that is louder and further away.
+
+ WHO OWNS THE MEMORY, which is the classic Win32 trap here. After a
+ successful `SetClipboardData` the SYSTEM owns the handle: freeing it is a
+ double free, and holding it to reuse is a use-after-free. `EmptyClipboard`
+ before it is not tidiness either — it is what frees the PREVIOUS owner's
+ data and makes this process the owner, and skipping it leaks their memory
+ rather than ours.
+
+ GMEM_MOVEABLE is required, not preferred: `SetClipboardData` documents that
+ the handle must be movable, and a GMEM_FIXED block appears to work right up
+ until a paste in another process.
+
+ UTF-16 BOTH WAYS, via the arena's own boundary (`asUtf16Alien` out,
+ `stringFromUtf16At:units:` back), so this file adds no third encoder to a
+ layer that already has one and has tested it. CF_UNICODETEXT rather than
+ CF_TEXT for the reason WG5a and WG5c D4 both record: the narrow formats go
+ through the ANSI code page and lose exactly the characters a code editor is
+ most likely to be carrying."
+
+Object subclass: WinApi [
+
+    WinApi class >> openClipboard: hwnd <Integer> ^ <Integer> [
+        <primitive: FFI function: #OpenClipboard ret: #g args: #(g)>
+        ^self primitiveFailed: 'OpenClipboard'
+    ]
+    WinApi class >> closeClipboard ^ <Integer> [
+        <primitive: FFI function: #CloseClipboard ret: #g args: #()>
+        ^self primitiveFailed: 'CloseClipboard'
+    ]
+    WinApi class >> emptyClipboard ^ <Integer> [
+        <primitive: FFI function: #EmptyClipboard ret: #g args: #()>
+        ^self primitiveFailed: 'EmptyClipboard'
+    ]
+    WinApi class >> setClipboardData: fmt <Integer> handle: h <Integer> ^ <Integer> [
+        <primitive: FFI function: #SetClipboardData ret: #g args: #(g g)>
+        ^self primitiveFailed: 'SetClipboardData'
+    ]
+    WinApi class >> getClipboardData: fmt <Integer> ^ <Integer> [
+        <primitive: FFI function: #GetClipboardData ret: #g args: #(g)>
+        ^self primitiveFailed: 'GetClipboardData'
+    ]
+    WinApi class >> isClipboardFormatAvailable: fmt <Integer> ^ <Integer> [
+        <primitive: FFI function: #IsClipboardFormatAvailable ret: #g args: #(g)>
+        ^self primitiveFailed: 'IsClipboardFormatAvailable'
+    ]
+    WinApi class >> globalAlloc: flags <Integer> bytes: n <Integer> ^ <Integer> [
+        <primitive: FFI function: #GlobalAlloc ret: #g args: #(g g)>
+        ^self primitiveFailed: 'GlobalAlloc'
+    ]
+    WinApi class >> globalLock: h <Integer> ^ <Integer> [
+        <primitive: FFI function: #GlobalLock ret: #g args: #(g)>
+        ^self primitiveFailed: 'GlobalLock'
+    ]
+    WinApi class >> globalUnlock: h <Integer> ^ <Integer> [
+        <primitive: FFI function: #GlobalUnlock ret: #g args: #(g)>
+        ^self primitiveFailed: 'GlobalUnlock'
+    ]
+]
+
+Object subclass: WinShell [
+    <classVars: ClipError>
+
+    "── the boundary, both ways ──────────────────────────────────────────"
+
+    WinShell class >> clipboardText: aString <String> ^ <Boolean> [
+        "Put aString on the clipboard as CF_UNICODETEXT. Answers whether it
+         got there.
+
+         The ENCODE HAPPENS FIRST, outside the open — `asUtf16Alien` allocates
+         and so can raise, and a raise between `OpenClipboard` and
+         `CloseClipboard` is the failure this file is most careful about. The
+         `ensure:` would still close it; not being able to fail in there at
+         all is better than being rescued."
+        | src n h p dst ok |
+        src := aString asUtf16Alien.
+        n := src size.                  "bytes, and already NUL-terminated"
+        h := WinApi globalAlloc: (WinApi constant: 'GMEM_MOVEABLE') bytes: n.
+        h = 0 ifTrue: [ ClipError := 'GlobalAlloc failed'. ^false ].
+        p := WinApi globalLock: h.
+        p = 0 ifTrue: [ ClipError := 'GlobalLock failed'. ^false ].
+        dst := Alien forAddress: p size: n.
+        1 to: n do: [ :i | dst byteAt: i put: (src byteAt: i) ].
+        WinApi globalUnlock: h.
+        (WinApi asBool: (WinApi openClipboard: self editorPaneHwnd)) ifFalse: [
+            ClipError := 'OpenClipboard refused — another process holds it'.
+            ^false ].
+        ok := [
+            WinApi emptyClipboard.
+            "AND THE HANDLE IS NO LONGER OURS once this succeeds. Nothing below
+             frees it, which is not an omission — freeing it here is a double
+             free, and keeping it to reuse is a use-after-free."
+            (WinApi setClipboardData: (WinApi constant: 'CF_UNICODETEXT') handle: h) ~= 0
+        ] ensure: [ WinApi closeClipboard ].
+        ok ifFalse: [ ClipError := 'SetClipboardData failed' ].
+        ^ok
+    ]
+
+    WinShell class >> clipboardText ^ <String> [
+        "Whatever CF_UNICODETEXT is on the clipboard, or an empty String —
+         which is also the honest answer when the clipboard holds a bitmap, a
+         file list, or nothing at all. A paste of nothing must be a no-op
+         rather than an error: the user pressed Ctrl-V, which is not a
+         mistake."
+        | h p out |
+        (WinApi asBool: (WinApi isClipboardFormatAvailable: (WinApi constant: 'CF_UNICODETEXT')))
+            ifFalse: [ ^'' ].
+        (WinApi asBool: (WinApi openClipboard: self editorPaneHwnd)) ifFalse: [
+            ClipError := 'OpenClipboard refused — another process holds it'.
+            ^'' ].
+        ^[
+            h := WinApi getClipboardData: (WinApi constant: 'CF_UNICODETEXT').
+            h = 0 ifTrue: [ '' ] ifFalse: [
+                p := WinApi globalLock: h.
+                p = 0 ifTrue: [ '' ] ifFalse: [
+                    out := WinArena stringFromUtf16At: p units: (self clipboardUnitsAt: p).
+                    WinApi globalUnlock: h.
+                    out ] ]
+        ] ensure: [ WinApi closeClipboard ]
+    ]
+
+    WinShell class >> clipboardUnitsAt: p <Integer> ^ <Integer> [
+        "How many UTF-16 units before the NUL. CAPPED, because this is walking
+         memory another process filled in: a block whose terminator was lost
+         would otherwise be an unbounded read that ends in a fault rather than
+         in an answer. The cap is far larger than any class this editor
+         holds and far smaller than a runaway."
+        | n |
+        n := 0.
+        [ n < 4194304 and: [ (WinArena u16At: p + (n * 2)) ~= 0 ] ] whileTrue: [ n := n + 1 ].
+        ^n
+    ]
+
+    WinShell class >> clipError ^ <String> [
+        ^ClipError isNil ifTrue: [ '' ] ifFalse: [ ClipError ] ]
+
+    "── the three verbs ──────────────────────────────────────────────────"
+
+    WinShell class >> editorCopy ^ <Object> [
+        "Copying NOTHING is a no-op, deliberately: the alternative — copying an
+         empty string — silently destroys whatever the user had on the
+         clipboard, which is the most annoying possible response to a mistyped
+         shortcut."
+        self editorHasSelection ifFalse: [ ^0 ].
+        self clipboardText: self editorSelectedText.
+        ^0
+    ]
+
+    WinShell class >> editorCut ^ <Object> [
+        "Copy THEN delete, and only if the copy worked. A cut whose copy
+         failed and whose delete succeeded has destroyed the text with nothing
+         to paste back — the one outcome a user cannot recover from without
+         reaching for undo and knowing to."
+        self editorHasSelection ifFalse: [ ^0 ].
+        (self clipboardText: self editorSelectedText) ifFalse: [ ^0 ].
+        ^self editorApply: 'Delete'
+    ]
+
+    WinShell class >> editorPaste ^ <Object> [
+        "Through `editorInsertText:` rather than `editorApply:`, because the
+         clipboard holds TEXT and the key vocabulary has words in it — see
+         107. An empty clipboard inserts nothing rather than clearing the
+         selection, which is what every editor does."
+        | s |
+        s := self clipboardText.
+        s isEmpty ifTrue: [ ^0 ].
+        ^self editorInsertText: s
+    ]
+]
