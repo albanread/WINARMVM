@@ -165,5 +165,8 @@ tier1.mst
 # WG6d-2: the cell grid. Loads here so 67 sees the renderer-backed metrics
 # accessors; the DLL half is inert until something attaches.
 ../110_winui_render.mst
+# WG6e: WinCodePane. Its navigation and selection arithmetic is pure over the
+# pane's OWN text, so 67 checks it with no window and no renderer.
+../111_winui_codepane.mst
 67_winui_editor_tests.mst
 99_run_all.mst

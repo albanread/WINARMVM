@@ -75,7 +75,28 @@ Object subclass: WinShell [
 
     WinShell class >> transcriptMinHeight ^ <Integer> [ ^60 ]
     WinShell class >> transcriptMaxFraction ^ <Integer> [ ^60 ]  "percent of client"
-    WinShell class >> splitterHeight ^ <Integer> [ ^8 ]
+    WinShell class >> splitterHeight ^ <Integer> [
+        "TALL ENOUGH FOR ITS OWN CONTENT, and it was not. This answered 8 while
+         `drawSplitter:` draws a Fluent glyph, the grab dots and the word
+         `Clear` at 9pt into it with DT_VCENTER — roughly twice the band — so
+         the chevron and the label were clipped against the transcript below.
+         Reported from the screen as `the clear icon does not fit`.
+
+         DPI-SCALED, which the drawing was not either: the hit test at
+         `onMouseDown:` already scaled its 60px Clear zone by DPI, so at
+         anything but 96 the band you could click and the band you could see
+         were different sizes. Two authorities over one number, which is the
+         defect this port has now paid for four times."
+        ^22 * self splitterDpi // 96
+    ]
+
+    WinShell class >> splitterDpi ^ <Integer> [
+        ^(Dpi isNil or: [ Dpi = 0 ]) ifTrue: [ 96 ] ifFalse: [ Dpi ] ]
+
+    WinShell class >> splitterScaled: n <Integer> ^ <Integer> [
+        "One place that turns a design pixel into a device one, so the drawing
+         and the hit test cannot disagree about where `Clear` is."
+        ^n * self splitterDpi // 96 ]
 
     WinShell class >> transcriptHeight ^ <Integer> [
         TranscriptHeight isNil ifTrue: [ TranscriptHeight := self transcriptOpenHeight ].
@@ -166,7 +187,7 @@ Object subclass: WinShell [
             dpi: (Dpi isNil ifTrue: [ 96 ] ifFalse: [ Dpi ]).
         sr := rects at: #splitter ifAbsent: [ nil ].
         sr isNil ifTrue: [ ^self ].
-        x >= ((sr at: 1) + (sr at: 3) - (60 * (Dpi isNil ifTrue: [ 96 ] ifFalse: [ Dpi ]) // 96))
+        x >= ((sr at: 1) + (sr at: 3) - (self splitterScaled: 60))
             ifTrue: [ ^self clearTranscript ].
         ^self toggleTranscript
     ]
@@ -193,7 +214,7 @@ Object subclass: WinShell [
         x >= ((sr at: 1) + (sr at: 3) - (60 * (Dpi isNil ifTrue: [ 96 ] ifFalse: [ Dpi ]) // 96))
             ifTrue: [ self clearTranscript. ^0 ].
         "Chevron, left-hand end."
-        x <= ((sr at: 1) + (28 * (Dpi isNil ifTrue: [ 96 ] ifFalse: [ Dpi ]) // 96))
+        x <= ((sr at: 1) + (self splitterScaled: 28))
             ifTrue: [ self toggleTranscript. ^0 ].
         self splitterDragBegin: y.
         ^0
@@ -261,7 +282,7 @@ Object subclass: WinShell [
         "The chevron, left: pointing DOWN when open (click to collapse), UP when
          collapsed (click to reopen) — the direction it will MOVE things."
         WinArena u32At: self glyphBuffer put: (self transcriptCollapsed ifTrue: [ 16rE70E ] ifFalse: [ 16rE70D ]).
-        self setRect: rect x: x + 4 y: y w: 20 h: h.
+        self setRect: rect x: x + (self splitterScaled: 4) y: y w: (self splitterScaled: 20) h: h.
         WinApi drawText: hdc text: self glyphBuffer count: 0 - 1 rect: rect
             format: ((WinApi constant: 'DT_LEFT')
                 bitOr: ((WinApi constant: 'DT_VCENTER') bitOr: (WinApi constant: 'DT_SINGLELINE'))).
@@ -274,7 +295,7 @@ Object subclass: WinShell [
         WinApi selectObject: hdc object: old.
         "Clear, right."
         old := WinApi selectObject: hdc object: self labelFont.
-        self setRect: rect x: x + w - 60 y: y w: 54 h: h.
+        self setRect: rect x: x + w - (self splitterScaled: 60) y: y w: (self splitterScaled: 54) h: h.
         WinApi drawText: hdc text: (WinArena scratchUtf16: 'Clear') count: 0 - 1 rect: rect
             format: ((WinApi constant: 'DT_RIGHT')
                 bitOr: ((WinApi constant: 'DT_VCENTER') bitOr: (WinApi constant: 'DT_SINGLELINE'))).

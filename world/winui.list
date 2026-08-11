@@ -108,3 +108,9 @@
 # fills the grid from the tokenizer. Loads LAST because it overrides 106's
 # metrics and paint: the renderer is the one authority on a cell's size.
 110_winui_render.mst
+# WINARM (WG6e): a code pane is an OBJECT. `WinCodePane` holds one pane's
+# window, document, caret, selection and renderer attachment — because the
+# shell has eight views and three want a code surface AT ONCE, which no
+# arrangement of class variables can serve. Loads after 110 (it names
+# WinRender) and after 100 (WinSyntax).
+111_winui_codepane.mst

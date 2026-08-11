@@ -42,7 +42,9 @@ TestCase subclass: WinUiEditorWg6cTests [
         self runTest: #testTheEditorViewTilesItsContentRect
              do: [ self testTheEditorViewTilesItsContentRect ].
         self runTest: #testUtf16UnitsAreNotByteCounts
-             do: [ self testUtf16UnitsAreNotByteCounts ]
+             do: [ self testUtf16UnitsAreNotByteCounts ].
+        self runTest: #testTwoPanesKeepTheirOwnDocumentAndCaret
+             do: [ self testTwoPanesKeepTheirOwnDocumentAndCaret ]
     ]
 
     threeLines [ ^'one', (String with: Character nl), 'two', (String with: Character nl), 'three' ]
@@ -306,6 +308,46 @@ TestCase subclass: WinUiEditorWg6cTests [
         pane := r at: WinShell editorPaneName.
         self assert: (pane at: 3) >= 0
             description: 'a narrow window still gives the buffer a non-negative width'
+    ]
+
+    testTwoPanesKeepTheirOwnDocumentAndCaret [
+        "THE WHOLE POINT OF WG6e, and the assertion the old design could not
+         even express. The shell has eight views and three of them want an
+         editable code surface at once — the Workspace, the Browser's source
+         pane and the Editor — and WG6c kept caret, anchor, selection and the
+         document itself in class variables, plus `EditorSession current`,
+         which is a singleton in the BASE world. Two panes could not both be
+         right; they could not even both hold a document.
+
+         Two panes, two documents, two carets, two selections, and an edit to
+         one leaves the other untouched. No window and no renderer: the pane's
+         navigation and selection arithmetic is pure over its OWN text."
+        | a b |
+        a := WinCodePane named: #paneA on: 0.
+        b := WinCodePane named: #paneB on: 0.
+        a openOn: 'alpha'.
+        b openOn: 'beta'.
+        self assert: a text = 'alpha' description: 'pane A holds its own document'.
+        self assert: b text = 'beta' description: 'and pane B holds a different one'.
+
+        a caretAt: 3.
+        b caretAt: 1.
+        self assert: a caret = 3 description: 'pane A keeps its own caret'.
+        self assert: b caret = 1 description: 'and B keeps its own, at ' , b caret printString.
+
+        a selectAll.
+        self assert: a hasSelection description: 'A has a selection'.
+        self assert: b hasSelection not
+            description: 'and B does NOT — the old design had one anchor for both'.
+
+        a applyKey: 'X'.
+        self assert: a text = 'X' description: 'typing over A''s selection replaced it'.
+        self assert: b text = 'beta'
+            description: 'and B is untouched, but reads ' , b text printString.
+
+        "And the caret each pane adopted after its own edit is its own."
+        self assert: a caret = 2 description: 'A''s caret followed A''s edit'.
+        self assert: b caret = 1 description: 'B''s did not move at all'
     ]
 
     testUtf16UnitsAreNotByteCounts [

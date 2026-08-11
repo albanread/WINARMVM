@@ -1021,6 +1021,25 @@ mod app {
     }
 
     pub fn run() -> i32 {
+        // WINARM (WG6d): THE JIT IS ON HERE UNLESS TOLD OTHERWISE.
+        //
+        // `VmOptions::from_env` defaults `MACVM_JIT` to `Off`, and that default
+        // is right for the reason its own comment gives: hundreds of pre-S10
+        // tests were verified against pure-interpreter behaviour and
+        // `test_vm()` reads the same env, so defaulting it on would let
+        // ambient shell state change unrelated test results.
+        //
+        // NONE OF THAT APPLIES TO A WINDOW. This process is not a test
+        // harness; it is a GUI whose every keystroke runs guest Smalltalk, and
+        // inheriting a test-suite default meant the whole world interpreted.
+        // Reported as "the UI is chronically slow", correctly, and the other
+        // half of that was a debug build.
+        //
+        // Set rather than forced: an explicit `MACVM_JIT` still wins, so
+        // `MACVM_JIT=off` remains the way to measure the interpreter.
+        if std::env::var_os("MACVM_JIT").is_none() {
+            std::env::set_var("MACVM_JIT", "threshold=20");
+        }
         ensure_message_queue();
         // WG4 D1: the primary VM on a background thread, the UI VM in place on
         // THIS one. The handshake parks until the primary is up and has
