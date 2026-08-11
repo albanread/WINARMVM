@@ -19,6 +19,9 @@ puts "WG5B browser-refreshes [gui eval {WinShell browserRefreshes}]"
 # WG5b-2 wires up`. This asserts the promise was KEPT rather than restated:
 # the sentence is gone, and an unselected browser asks for a class instead of
 # showing an empty box, which reads as a failed load.
+# WG5c D3: the Browser's source pane is the OTHER swapped surface, and the
+# one Accept reads from — so it must satisfy the same predicate.
+puts "WG5C browser-source-is-source [gui eval {(WinShell controlNamed: #browserSource) isSourceSurface}]"
 puts "WG5B source-empty [gui eval {WinShell sourceTextFor: nil selector: nil}]"
 puts "WG5B source-still-a-promise [gui eval {(WinShell sourceTextFor: 'Point' selector: nil) includesSubstring: 'wires up'}]"
 

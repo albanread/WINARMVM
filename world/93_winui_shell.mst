@@ -301,7 +301,12 @@ Object subclass: WinShell [
          surface; this one is."
         c := self
             addControl: (self contentNameFor: aSymbol)
-            class: 'EDIT'
+            "WG5c D3: only the WORKSPACE becomes a RichEdit. The other views'
+             content children are read-only placeholders with no code in them,
+             and a text engine they never colour would be cost for nothing.
+             `codePaneClass` (101) falls back to EDIT if Msftedit.dll will not
+             load, so this stays a working control either way."
+            class: (aSymbol == #workspace ifTrue: [ self codePaneClass ] ifFalse: [ 'EDIT' ])
             text: (aSymbol == #workspace ifTrue: [ '' ] ifFalse: [ self placeholderTextFor: aSymbol ])
             style: (((WinApi constant: 'WS_CHILD')
                 bitOr: ((WinApi constant: 'WS_BORDER') bitOr: (WinApi constant: 'WS_VSCROLL')))

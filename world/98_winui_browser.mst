@@ -155,7 +155,10 @@ Object subclass: WinShell [
         self browserPaneNames do: [ :n |
             n == #browserSource
                 ifTrue: [
-                    self addControl: n class: 'EDIT' text: ''
+                    "WG5c D3: the source pane is the other code surface, and
+                     it is the one Accept reads — so it becomes a RichEdit
+                     alongside the Workspace, by the same `codePaneClass`."
+                    self addControl: n class: self codePaneClass text: ''
                         style: (((WinApi constant: 'WS_CHILD')
                             bitOr: ((WinApi constant: 'WS_BORDER') bitOr: (WinApi constant: 'WS_VSCROLL')))
                             bitOr: ((WinApi constant: 'ES_MULTILINE')

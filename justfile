@@ -1414,6 +1414,12 @@ gate-wg5b:
     test "$CLASSES" -ge 100
     # The source pane keeps WG5b-1's promise instead of restating it.
     grep -q 'WG5B source-still-a-promise false' /tmp/wg5b_gate.txt
+    # WG5c D3: the swap really happened, and the enablement predicate learned
+    # the new class in the same change.
+    grep -q 'WG5C richedit-loaded true' /tmp/wg5b_gate.txt
+    grep -q "WG5C pane-class 'RICHEDIT50W'" /tmp/wg5b_gate.txt
+    grep -q 'WG5C workspace-is-source true' /tmp/wg5b_gate.txt
+    grep -q 'WG5C browser-source-is-source true' /tmp/wg5b_gate.txt
     # And the channel resolves HERE, in the process that owns the window.
     grep -q 'WG5B host-available true' /tmp/wg5b_gate.txt
     grep -q 'WG5B host-ping 22343' /tmp/wg5b_gate.txt

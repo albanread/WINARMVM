@@ -57,3 +57,13 @@
 # its `acceptSource` names WinHost, which this file defines, and reopens
 # WinShell to add the verb 93 now routes to.
 99_winui_host.mst
+# WINARM (WG5c D1/D2): the syntax tokenizer and colour table — both PURE, so
+# this file needs nothing from the machine and nothing from the shell. The
+# Windows layer has outgrown 90-99 and continues at three digits from 100;
+# THIS LIST is the authority on load order, but note a plain `ls` sorts 100_
+# before 90_ (`sort -V` puts it right).
+100_winui_syntax.mst
+# WINARM (WG5c D3): the RichEdit surface. Loads after 95 because it redefines
+# `isSourceSurface`, and after 93/98 is irrelevant — they reach it by message
+# send at open time, not by name at compile time.
+101_winui_richedit.mst

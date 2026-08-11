@@ -93,5 +93,17 @@ puts "WG5B active-view [gui eval {WinShell activeView}]"
 # never filled). The recipe disconnects and waits in bash instead, letting
 # the window pump freely, then runs winui-wg5b-2.tcl. Split for that reason
 # alone.
+# ── WG5c D3: the code surfaces are RichEdits ────────────────────────────
+# Two claims, and the second is the one with history. First that the swap
+# happened at all — Msftedit.dll loaded and the pane really is RICHEDIT50W
+# rather than the EDIT fallback silently standing in. Second that
+# `isSourceSurface` was taught the new class IN THE SAME CHANGE: a code pane
+# that stops being a source surface greys out Do It / Print It / Accept,
+# which is a failure this port has now shipped twice and should not ship a
+# third time.
+puts "WG5C richedit-loaded [gui eval {WinShell richEditAvailable}]"
+puts "WG5C pane-class [gui eval {WinShell codePaneClass}]"
+puts "WG5C workspace-is-source [gui eval {(WinShell controlNamed: (WinShell contentNameFor: #workspace)) isSourceSurface}]"
+
 # Part 1 ends here. `just gate-wg5b` now waits in bash and runs
 # scripts/winui-wg5b-2.tcl, which reads the panes and closes the window.

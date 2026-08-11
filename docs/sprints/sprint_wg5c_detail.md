@@ -85,6 +85,46 @@ first.
 * **D5 — the ghost line, for real this time.** Whatever WG5c does here must
   be checked ON SCREEN, because that is precisely what was not done before.
 
+## As built — D1, D2, D3
+
+**D1/D2 landed pure**, as designed, and their gate is the tiling property
+(`world/tests/66_winui_syntax_tests.mst`): the runs must reassemble the
+source exactly, asserted on every case rather than in one test of its own.
+Writing them turned up two defects in the TEST FRAMEWORK, not the tokenizer:
+`assert:description:` was resolving to `Object`'s general-purpose assertion,
+which SIGNALS — so inside a `TestCase` one wrong expectation aborted the
+whole suite instead of reporting a failure, and 302 assertions across
+WG5a/5b/5c were never counted. SUnit now has its own.
+
+**D3 swapped both code surfaces**, and the swap is invisible — which is what
+success looks like here. Verified on screen and in the gate:
+
+| | |
+|---|---|
+| `Msftedit.dll` loads | yes |
+| pane class | `RICHEDIT50W`, not the EDIT fallback |
+| Workspace `isSourceSurface` | true |
+| Browser source `isSourceSurface` | true |
+| text round-trip, `EM_GETSEL`, eval-target rule | unchanged |
+| Do It over the seam | fires, `3 + 4 * 2 => 14` |
+
+Two things worth recording because they were predictions that turned out
+either right or unnecessary:
+
+* **`isSourceSurface` was the real risk and it was handled in the same
+  file as the swap** — deliberately, so nobody can change which control the
+  code panes use without meeting the predicate that decides whether the verbs
+  light up for them. The port has already shipped that failure twice.
+* **The CRLF worry did not materialise.** WG5b-2 converts LF to CRLF at the
+  control boundary and RichEdit renders it correctly — the Browser's source
+  pane shows a real multi-line method where the plain EDIT had shown boxes.
+  No change was needed, and the pitfall below is left standing as a caution
+  rather than a fixed defect.
+
+Only the *other* views' content children stay plain `EDIT`s: they are
+read-only placeholders with no code in them, and a text engine they never
+colour would be cost for nothing.
+
 ## Pitfalls, recorded now
 
 * **RichEdit line endings are CR, not CRLF.** WG5b-2 added a `crlf:`
