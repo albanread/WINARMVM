@@ -49,6 +49,34 @@ Object subclass: WinApi [
         ^self primitiveFailed: 'ReleaseCapture'
     ]
 
+    WinApi class >> windowFromPoint: packedPoint <Integer> ^ <Integer> [
+        "WHICH WINDOW A REAL CLICK WOULD GO TO. `SendMessage` from a script
+         bypasses hit-testing entirely, so it proves a handler and says nothing
+         about whether the pointer can ever reach it — which is the difference
+         between `the drag works` and `not with a mouse it doesn't`.
+
+         POINT is two 32-bit fields and eight bytes, so the x64 convention
+         passes it BY VALUE in one register: low half x, high half y."
+        <primitive: FFI function: #WindowFromPoint ret: #g args: #(g)>
+        ^self primitiveFailed: 'WindowFromPoint'
+    ]
+
+    WinApi class >> setCursorPos: x <Integer> y: y <Integer> ^ <Integer> [
+        "Present so a GATE can drive a REAL pointer. `gui send` delivers with
+         SendMessage, which bypasses hit-testing, capture and the queue — it
+         proves a handler runs and says nothing about whether a user could ever
+         reach it. Moving the actual cursor is the only way to test the path a
+         person takes."
+        <primitive: FFI function: #SetCursorPos ret: #g args: #(g g)>
+        ^self primitiveFailed: 'SetCursorPos'
+    ]
+
+    WinApi class >> mouseEvent: flags <Integer> dx: dx <Integer> dy: dy <Integer>
+                    data: d <Integer> extra: e <Integer> ^ <Integer> [
+        <primitive: FFI function: #mouse_event ret: #v args: #(g g g g g)>
+        ^self primitiveFailed: 'mouse_event'
+    ]
+
     WinApi class >> getCapture ^ <Integer> [
         "Which window has the mouse captured on this thread, or 0. Added by
          WG6c-2b so a gate can assert that a drag RELEASED — a capture that
@@ -70,7 +98,7 @@ Object subclass: WinApi [
 ]
 
 Object subclass: WinShell [
-    <classVars: SplitterDraws SplitterLast>
+    <classVars: SplitterDraws SplitterLast SplitDowns SplitMoves SplitUps>
 
     "── the dock's height, now a user preference ─────────────────────────"
 
@@ -162,6 +190,24 @@ Object subclass: WinShell [
         ^c isNil ifTrue: [ 0 ] ifFalse: [ c handle ]
     ]
 
+    WinShell class >> windowAtScreenX: x <Integer> y: y <Integer> ^ <Integer> [
+        ^WinApi windowFromPoint: ((y bitAnd: 16rFFFFFFFF) bitShift: 32) + (x bitAnd: 16rFFFFFFFF)
+    ]
+
+    WinShell class >> whoOwnsTheSplitterBand ^ <Array> [
+        "#(hwndAtTheBandsCentre splitterHwnd sameWindow), and it is the one
+         measurement that separates `the handler is never called` from `the
+         handler is called and does nothing`. `gui send` bypasses hit-testing
+         entirely, so a synthesised drag proves the second and says nothing
+         about the first — which is the whole distance between `it drags` and
+         `not with a mouse it doesn't`."
+        | r who |
+        r := (self controlNamed: #splitter) screenRect.
+        who := self windowAtScreenX: ((r at: 1) + (r at: 3)) // 2
+                    y: ((r at: 2) + (r at: 4)) // 2.
+        ^Array with: who with: self splitterHwnd with: who = self splitterHwnd
+    ]
+
     WinShell class >> splitterWidth ^ <Integer> [
         | c r |
         c := self controlNamed: #splitter.
@@ -178,7 +224,23 @@ Object subclass: WinShell [
             on: Error do: [ :e | DrawError := e messageText. #defwindowproc ]
     ]
 
+    WinShell class >> splitterMsgs ^ <Object> [
+        "#(down move up), counted where they ARRIVE. A drag that starts and
+         never moves is a `down` with no `move`, and nothing else in the shell
+         can tell those apart from a drag that never started."
+        ^Array
+            with: (SplitDowns isNil ifTrue: [ 0 ] ifFalse: [ SplitDowns ])
+            with: (SplitMoves isNil ifTrue: [ 0 ] ifFalse: [ SplitMoves ])
+            with: (SplitUps isNil ifTrue: [ 0 ] ifFalse: [ SplitUps ])
+    ]
+
     WinShell class >> splitterMessageBody: msg <Integer> wParam: wp <Integer> lParam: lp <Integer> ^ <Object> [
+        msg = (WinApi constant: 'WM_LBUTTONDOWN')
+            ifTrue: [ SplitDowns := (SplitDowns isNil ifTrue: [ 0 ] ifFalse: [ SplitDowns ]) + 1 ].
+        msg = (WinApi constant: 'WM_MOUSEMOVE')
+            ifTrue: [ SplitMoves := (SplitMoves isNil ifTrue: [ 0 ] ifFalse: [ SplitMoves ]) + 1 ].
+        msg = (WinApi constant: 'WM_LBUTTONUP')
+            ifTrue: [ SplitUps := (SplitUps isNil ifTrue: [ 0 ] ifFalse: [ SplitUps ]) + 1 ].
         msg = (WinApi constant: 'WM_LBUTTONDOWN') ifTrue: [ ^self splitterDown: lp ].
         msg = (WinApi constant: 'WM_MOUSEMOVE') ifTrue: [ ^self splitterMove: lp ].
         msg = (WinApi constant: 'WM_LBUTTONUP') ifTrue: [ ^self splitterUp ].
