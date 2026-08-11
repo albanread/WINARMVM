@@ -7,6 +7,7 @@
 //! so the VM learns nothing new.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::mem::ManuallyDrop;
 
 use windows::core::Interface;
@@ -50,12 +51,27 @@ struct Renderer {
 }
 
 thread_local! {
-    /// ONE renderer, on the UI thread, and `thread_local` rather than a
-    /// `static` because COM interfaces are not `Send`. The pane, the pump and
-    /// every VM entry are all on that thread — the same quiescence the door
-    /// already relies on — so no lock is needed and none would help.
-    static R: RefCell<Option<Renderer>> = const { RefCell::new(None) };
+    /// ONE RENDERER PER PANE, keyed by hwnd — the Editor, the Workspace, and
+    /// anything else that wants a code surface. Each owns its own swapchain
+    /// because a swapchain is bound to a window; the font face and its metrics
+    /// are per-pane too, which costs a little and means a pane can differ in
+    /// size or DPI without any of them having to agree.
+    ///
+    /// `thread_local` rather than a `static` because COM interfaces are not
+    /// `Send`. Every pane, the pump and every VM entry are on the UI thread —
+    /// the quiescence the door already relies on — so no lock is needed.
+    static R: RefCell<HashMap<isize, Renderer>> = RefCell::new(HashMap::new());
     static LAST_ERROR: RefCell<Vec<u16>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Run `f` against the pane's renderer, or answer `absent` when that window
+/// has none. Every entry point below is one of these, which is what keeps
+/// "no renderer for this pane" a single, uniform, non-fatal answer.
+fn with_pane<T>(hwnd: i64, absent: T, f: impl FnOnce(&mut Renderer) -> T) -> T {
+    R.with(|c| match c.borrow_mut().get_mut(&(hwnd as isize)) {
+        Some(r) => f(r),
+        None => absent,
+    })
 }
 
 fn set_error(s: &str) {
@@ -258,38 +274,36 @@ impl Renderer {
     }
 }
 
-/// `MacvmRenderAttach(hwnd, ptTenths, dpi)` — device, swapchain, font, all of
-/// it, for ONE pane. Re-attaching replaces whatever was there, which is how a
-/// DPI change is handled: the shell re-attaches and every derived number is
-/// recomputed rather than carried forward stale.
+/// `MacvmRenderAttach(hwnd, ptTenths, dpi)` — device, swapchain, font, for ONE
+/// pane. Attaching a window that already has a renderer REPLACES it, which is
+/// how a DPI change is handled: every derived number is recomputed rather than
+/// carried forward stale.
 ///
 /// # Safety
 /// `hwnd` must be a live window owned by the calling thread.
 #[no_mangle]
-pub unsafe extern "C" fn MacvmRenderAttach(hwnd: isize, pt_tenths: i64, dpi: i64) -> i64 {
+pub unsafe extern "C" fn MacvmRenderAttach(hwnd: i64, pt_tenths: i64, dpi: i64) -> i64 {
     let pt = (pt_tenths.max(1) as f32) / 10.0;
     let dpi = if dpi <= 0 { 96.0 } else { dpi as f32 };
-    finish(build(HWND(hwnd as *mut _), pt, dpi).map(|r| R.with(|c| *c.borrow_mut() = Some(r))))
+    finish(build(HWND(hwnd as *mut _), pt, dpi).map(|r| {
+        R.with(|c| c.borrow_mut().insert(hwnd as isize, r));
+    }))
 }
 
-/// Release everything. Answers OK even when nothing was attached — detaching
-/// twice is not an error, and a pane being destroyed must never fail here.
+/// Release one pane's renderer. Answers OK even when it had none — detaching
+/// twice is not an error, and a window being destroyed must never fail here.
 #[no_mangle]
-pub extern "C" fn MacvmRenderDetach() -> i64 {
-    R.with(|c| *c.borrow_mut() = None);
+pub extern "C" fn MacvmRenderDetach(hwnd: i64) -> i64 {
+    R.with(|c| c.borrow_mut().remove(&(hwnd as isize)));
     set_error("");
     OK
 }
 
-/// `(cell_w << 16) | cell_h`, physical pixels, 0 when not attached.
-///
-/// One integer because the FFI marshals integers, and these two are small,
-/// stable, and always wanted together.
+/// `(cell_w << 16) | cell_h`, physical pixels, 0 when this pane has none.
 #[no_mangle]
-pub extern "C" fn MacvmRenderMetrics() -> i64 {
-    R.with(|c| match &*c.borrow() {
-        Some(r) => ((r.metrics.cell_w as i64) << 16) | (r.metrics.cell_h as i64),
-        None => 0,
+pub extern "C" fn MacvmRenderMetrics(hwnd: i64) -> i64 {
+    with_pane(hwnd, 0, |r| {
+        ((r.metrics.cell_w as i64) << 16) | (r.metrics.cell_h as i64)
     })
 }
 
@@ -300,27 +314,34 @@ pub extern "C" fn MacvmRenderMetrics() -> i64 {
 /// — so the guest must re-ask after a resize and must not cache it across one.
 /// Everything the renderer owns it also frees; the guest frees nothing.
 #[no_mangle]
-pub extern "C" fn MacvmRenderGrid(cols: i64, rows: i64) -> i64 {
+pub extern "C" fn MacvmRenderGrid(hwnd: i64, cols: i64, rows: i64) -> i64 {
     if cols <= 0 || rows <= 0 {
         set_error("grid dimensions must be positive");
         return 0;
     }
-    R.with(|c| match &mut *c.borrow_mut() {
-        Some(r) => {
-            let (cols, rows) = (cols as u32, rows as u32);
-            if r.cols != cols || r.rows != rows || r.cells.is_empty() {
-                r.cols = cols;
-                r.rows = rows;
-                r.cells = vec![Cell::blank(); (cols as usize) * (rows as usize)];
-            }
-            set_error("");
-            r.cells.as_mut_ptr() as i64
+    let got = with_pane(hwnd, 0i64, |r| {
+        let (cols, rows) = (cols as u32, rows as u32);
+        if r.cols != cols || r.rows != rows || r.cells.is_empty() {
+            r.cols = cols;
+            r.rows = rows;
+            r.cells = vec![Cell::blank(); (cols as usize) * (rows as usize)];
         }
-        None => {
-            set_error("no renderer attached");
-            0
-        }
-    })
+        r.cells.as_mut_ptr() as i64
+    });
+    if got == 0 {
+        set_error("no renderer attached to that window");
+    } else {
+        set_error("");
+    }
+    got
+}
+
+/// The grid's dimensions as `(cols << 16) | rows`, 0 when this pane has none —
+/// so the guest can ask what it GOT rather than assume its own arithmetic
+/// agreed with the renderer's.
+#[no_mangle]
+pub extern "C" fn MacvmRenderGridSize(hwnd: i64) -> i64 {
+    with_pane(hwnd, 0, |r| ((r.cols as i64) << 16) | (r.rows as i64))
 }
 
 /// Blank every cell to `fg` on `bg`, in Rust.
@@ -331,30 +352,17 @@ pub extern "C" fn MacvmRenderGrid(cols: i64, rows: i64) -> i64 {
 /// carry ink keeps the seam's cost proportional to the TEXT rather than to the
 /// viewport, which is the whole reason a cell grid is cheap.
 #[no_mangle]
-pub extern "C" fn MacvmRenderClear(fg: i64, bg: i64) -> i64 {
-    R.with(|c| {
-        if let Some(r) = &mut *c.borrow_mut() {
-            let cell = Cell {
-                cp: ' ' as u32,
-                fg: fg as u32,
-                bg: bg as u32,
-            };
-            for x in r.cells.iter_mut() {
-                *x = cell;
-            }
+pub extern "C" fn MacvmRenderClear(hwnd: i64, fg: i64, bg: i64) -> i64 {
+    with_pane(hwnd, OK, |r| {
+        let cell = Cell {
+            cp: ' ' as u32,
+            fg: fg as u32,
+            bg: bg as u32,
+        };
+        for x in r.cells.iter_mut() {
+            *x = cell;
         }
-    });
-    OK
-}
-
-/// The grid's dimensions as `(cols << 16) | rows`, 0 when not attached — so
-/// the guest can ask what it got rather than assuming its own arithmetic
-/// agreed with the renderer's.
-#[no_mangle]
-pub extern "C" fn MacvmRenderGridSize() -> i64 {
-    R.with(|c| match &*c.borrow() {
-        Some(r) => ((r.cols as i64) << 16) | (r.rows as i64),
-        None => 0,
+        OK
     })
 }
 
@@ -365,46 +373,43 @@ pub extern "C" fn MacvmRenderGridSize() -> i64 {
 /// because a caret walking the wrong axis is exactly the kind of defect this
 /// port finds by gate rather than by reading.
 #[no_mangle]
-pub extern "C" fn MacvmRenderSetCaret(col: i64, row: i64, on: i64) -> i64 {
-    R.with(|c| {
-        if let Some(r) = &mut *c.borrow_mut() {
-            r.caret = if on != 0 && col >= 0 && row >= 0 {
-                Some((col as u32, row as u32))
-            } else {
-                None
-            };
-        }
-    });
-    OK
-}
-
-/// Draw the grid and present it. The guest's whole paint handler.
-#[no_mangle]
-pub extern "C" fn MacvmRenderPresent() -> i64 {
-    finish(R.with(|c| match &mut *c.borrow_mut() {
-        Some(r) => r.present(),
-        None => Err("no renderer attached".into()),
-    }))
-}
-
-/// Frames presented since attach — the gate's proof that the pane is being
-/// driven at all, in place of GDI's `paintCalls`.
-#[no_mangle]
-pub extern "C" fn MacvmRenderFrames() -> i64 {
-    R.with(|c| match &*c.borrow() {
-        Some(r) => r.frames as i64,
-        None => 0,
+pub extern "C" fn MacvmRenderSetCaret(hwnd: i64, col: i64, row: i64, on: i64) -> i64 {
+    with_pane(hwnd, OK, |r| {
+        r.caret = if on != 0 && col >= 0 && row >= 0 {
+            Some((col as u32, row as u32))
+        } else {
+            None
+        };
+        OK
     })
 }
 
+/// Draw one pane's grid and present it. The guest's whole paint handler.
+#[no_mangle]
+pub extern "C" fn MacvmRenderPresent(hwnd: i64) -> i64 {
+    let r = with_pane(hwnd, Err("no renderer attached to that window".to_string()), |r| {
+        r.present()
+    });
+    finish(r)
+}
+
+/// Frames presented since attach — the gate's proof that a pane is being
+/// driven at all, in place of GDI's `paintCalls`.
+#[no_mangle]
+pub extern "C" fn MacvmRenderFrames(hwnd: i64) -> i64 {
+    with_pane(hwnd, 0, |r| r.frames as i64)
+}
+
 /// The last call's reason, UTF-16, NUL-terminated. Empty after a success.
+/// Process-wide rather than per-pane: it describes the LAST CALL, and the
+/// guest reads it immediately after the call it is about.
 #[no_mangle]
 pub extern "C" fn MacvmRenderLastError() -> *const u16 {
     LAST_ERROR.with(|e| e.borrow().as_ptr())
 }
 
 /// Its length EXCLUDING the NUL — the guest reads by count, and one extra unit
-/// puts a stray \0 on the end of every transcript line.
+/// puts a stray   on the end of every transcript line.
 #[no_mangle]
 pub extern "C" fn MacvmRenderLastErrorLen() -> i64 {
     LAST_ERROR.with(|e| e.borrow().len().saturating_sub(1) as i64)

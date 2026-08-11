@@ -34,36 +34,36 @@ Object subclass: WinRender [
         <primitive: FFI function: #MacvmRenderAttach library: #'winui_render.dll' ret: #g args: #(g g g)>
         ^self primitiveFailed: 'MacvmRenderAttach'
     ]
-    WinRender class >> rawDetach ^ <Integer> [
-        <primitive: FFI function: #MacvmRenderDetach library: #'winui_render.dll' ret: #g args: #()>
+    WinRender class >> rawDetach: hwnd <Integer> ^ <Integer> [
+        <primitive: FFI function: #MacvmRenderDetach library: #'winui_render.dll' ret: #g args: #(g)>
         ^self primitiveFailed: 'MacvmRenderDetach'
     ]
-    WinRender class >> rawMetrics ^ <Integer> [
-        <primitive: FFI function: #MacvmRenderMetrics library: #'winui_render.dll' ret: #g args: #()>
+    WinRender class >> rawMetrics: hwnd <Integer> ^ <Integer> [
+        <primitive: FFI function: #MacvmRenderMetrics library: #'winui_render.dll' ret: #g args: #(g)>
         ^self primitiveFailed: 'MacvmRenderMetrics'
     ]
-    WinRender class >> rawGrid: cols <Integer> rows: rows <Integer> ^ <Integer> [
-        <primitive: FFI function: #MacvmRenderGrid library: #'winui_render.dll' ret: #g args: #(g g)>
+    WinRender class >> rawGrid: hwnd <Integer> cols: cols <Integer> rows: rows <Integer> ^ <Integer> [
+        <primitive: FFI function: #MacvmRenderGrid library: #'winui_render.dll' ret: #g args: #(g g g)>
         ^self primitiveFailed: 'MacvmRenderGrid'
     ]
-    WinRender class >> rawGridSize ^ <Integer> [
-        <primitive: FFI function: #MacvmRenderGridSize library: #'winui_render.dll' ret: #g args: #()>
+    WinRender class >> rawGridSize: hwnd <Integer> ^ <Integer> [
+        <primitive: FFI function: #MacvmRenderGridSize library: #'winui_render.dll' ret: #g args: #(g)>
         ^self primitiveFailed: 'MacvmRenderGridSize'
     ]
-    WinRender class >> rawClear: fg <Integer> bg: bg <Integer> ^ <Integer> [
-        <primitive: FFI function: #MacvmRenderClear library: #'winui_render.dll' ret: #g args: #(g g)>
+    WinRender class >> rawClear: hwnd <Integer> fg: fg <Integer> bg: bg <Integer> ^ <Integer> [
+        <primitive: FFI function: #MacvmRenderClear library: #'winui_render.dll' ret: #g args: #(g g g)>
         ^self primitiveFailed: 'MacvmRenderClear'
     ]
-    WinRender class >> rawSetCaret: col <Integer> row: row <Integer> on: on <Integer> ^ <Integer> [
-        <primitive: FFI function: #MacvmRenderSetCaret library: #'winui_render.dll' ret: #g args: #(g g g)>
+    WinRender class >> rawSetCaret: hwnd <Integer> col: col <Integer> row: row <Integer> on: on <Integer> ^ <Integer> [
+        <primitive: FFI function: #MacvmRenderSetCaret library: #'winui_render.dll' ret: #g args: #(g g g g)>
         ^self primitiveFailed: 'MacvmRenderSetCaret'
     ]
-    WinRender class >> rawPresent ^ <Integer> [
-        <primitive: FFI function: #MacvmRenderPresent library: #'winui_render.dll' ret: #g args: #()>
+    WinRender class >> rawPresent: hwnd <Integer> ^ <Integer> [
+        <primitive: FFI function: #MacvmRenderPresent library: #'winui_render.dll' ret: #g args: #(g)>
         ^self primitiveFailed: 'MacvmRenderPresent'
     ]
-    WinRender class >> rawFrames ^ <Integer> [
-        <primitive: FFI function: #MacvmRenderFrames library: #'winui_render.dll' ret: #g args: #()>
+    WinRender class >> rawFrames: hwnd <Integer> ^ <Integer> [
+        <primitive: FFI function: #MacvmRenderFrames library: #'winui_render.dll' ret: #g args: #(g)>
         ^self primitiveFailed: 'MacvmRenderFrames'
     ]
     WinRender class >> rawLastError ^ <Integer> [
@@ -79,15 +79,16 @@ Object subclass: WinRender [
 
     WinRender class >> available ^ <Boolean> [
         "The same separation `WinHost available` exists for: a DLL that is not
-         beside the exe fails IDENTICALLY to a genuine renderer error — `the
-         primitive failed` either way — and those are entirely different
+         beside the exe fails IDENTICALLY to a genuine renderer error - `the
+         primitive failed` either way - and those are entirely different
          problems. Cached because a miss costs a LoadLibraryA per call and the
          answer cannot change within a run.
 
-         `rawMetrics` is the probe: it touches no device, allocates nothing,
-         and answers 0 when unattached, so asking is free and safe."
+         `rawMetrics:` on window 0 is the probe: no window has that handle, so
+         it touches no device, allocates nothing and answers 0 - asking is free
+         and safe."
         Available isNil ifTrue: [
-            Available := [ self rawMetrics. true ] on: Error do: [ :e | false ] ].
+            Available := [ self rawMetrics: 0. true ] on: Error do: [ :e | false ] ].
         ^Available
     ]
 
@@ -99,68 +100,75 @@ Object subclass: WinRender [
             on: Error do: [ :e | 'winui_render: ', e messageText ]
     ]
 
-    "── the friendly half ───────────────────────────────────────────────"
+    "-- the friendly half, and EVERY VERB NAMES ITS PANE -----------------
+     One renderer per window: the Editor, the Workspace, and anything else
+     that wants a code surface. Nothing here is global, which is what makes
+     `use the same tech for the workspace` a matter of attaching a second
+     window rather than of generalising a singleton after the fact."
 
     WinRender class >> attach: hwnd <Integer> points: pt <Integer> dpi: dpi <Integer> ^ <Boolean> [
-        self available ifFalse: [ ^false ].
+        (self available not or: [ hwnd = 0 ]) ifTrue: [ ^false ].
         ^[ (self rawAttach: hwnd pt: pt * 10 dpi: dpi) = 0 ] on: Error do: [ :e | false ]
     ]
 
-    WinRender class >> detach [
+    WinRender class >> detach: hwnd <Integer> [
         self available ifFalse: [ ^self ].
-        [ self rawDetach ] on: Error do: [ :e | nil ].
+        [ self rawDetach: hwnd ] on: Error do: [ :e | nil ].
         ^self
     ]
 
-    WinRender class >> cellWidth ^ <Integer> [
-        | m | m := self metricsWord.
+    WinRender class >> metricsWordFor: hwnd <Integer> ^ <Integer> [
+        (self available not or: [ hwnd = 0 ]) ifTrue: [ ^0 ].
+        ^[ self rawMetrics: hwnd ] on: Error do: [ :e | 0 ]
+    ]
+
+    WinRender class >> cellWidthFor: hwnd <Integer> ^ <Integer> [
+        | m | m := self metricsWordFor: hwnd.
         ^m = 0 ifTrue: [ 0 ] ifFalse: [ (m bitShift: 0 - 16) bitAnd: 16rFFFF ] ]
 
-    WinRender class >> cellHeight ^ <Integer> [
-        | m | m := self metricsWord.
+    WinRender class >> cellHeightFor: hwnd <Integer> ^ <Integer> [
+        | m | m := self metricsWordFor: hwnd.
         ^m = 0 ifTrue: [ 0 ] ifFalse: [ m bitAnd: 16rFFFF ] ]
 
-    WinRender class >> metricsWord ^ <Integer> [
-        self available ifFalse: [ ^0 ].
-        ^[ self rawMetrics ] on: Error do: [ :e | 0 ]
-    ]
-
-    WinRender class >> gridFor: cols <Integer> rows: rows <Integer> ^ <Integer> [
+    WinRender class >> gridFor: hwnd <Integer> cols: cols <Integer> rows: rows <Integer> ^ <Integer> [
         "The cell buffer's ADDRESS. It CHANGES when the dimensions do, because
-         the buffer is reallocated — so this is asked for on every fill rather
+         the buffer is reallocated - so this is asked for on every fill rather
          than cached, which costs one call and removes a whole class of
          dangling-pointer bug that would present as garbage on screen."
-        self available ifFalse: [ ^0 ].
-        ^[ self rawGrid: cols rows: rows ] on: Error do: [ :e | 0 ]
+        (self available not or: [ hwnd = 0 ]) ifTrue: [ ^0 ].
+        ^[ self rawGrid: hwnd cols: cols rows: rows ] on: Error do: [ :e | 0 ]
     ]
 
-    WinRender class >> clearTo: fg <Integer> on: bg <Integer> [
+    WinRender class >> gridSizeFor: hwnd <Integer> ^ <Array> [
+        | g |
+        g := (self available and: [ hwnd ~= 0 ])
+            ifTrue: [ [ self rawGridSize: hwnd ] on: Error do: [ :e | 0 ] ]
+            ifFalse: [ 0 ].
+        ^Array with: ((g bitShift: 0 - 16) bitAnd: 16rFFFF) with: (g bitAnd: 16rFFFF)
+    ]
+
+    WinRender class >> clear: hwnd <Integer> to: fg <Integer> on: bg <Integer> [
         self available ifFalse: [ ^self ].
-        [ self rawClear: fg bg: bg ] on: Error do: [ :e | nil ].
+        [ self rawClear: hwnd fg: fg bg: bg ] on: Error do: [ :e | nil ].
         ^self
     ]
 
-    WinRender class >> caretAtCol: col <Integer> row: row <Integer> visible: aBool <Boolean> [
+    WinRender class >> caretFor: hwnd <Integer> col: col <Integer> row: row <Integer> visible: aBool <Boolean> [
         self available ifFalse: [ ^self ].
-        [ self rawSetCaret: col row: row on: (aBool ifTrue: [ 1 ] ifFalse: [ 0 ]) ]
+        [ self rawSetCaret: hwnd col: col row: row on: (aBool ifTrue: [ 1 ] ifFalse: [ 0 ]) ]
             on: Error do: [ :e | nil ].
         ^self
     ]
 
-    WinRender class >> present ^ <Boolean> [
-        self available ifFalse: [ ^false ].
-        ^[ self rawPresent = 0 ] on: Error do: [ :e | false ]
+    WinRender class >> present: hwnd <Integer> ^ <Boolean> [
+        (self available not or: [ hwnd = 0 ]) ifTrue: [ ^false ].
+        ^[ (self rawPresent: hwnd) = 0 ] on: Error do: [ :e | false ]
     ]
 
-    WinRender class >> frames ^ <Integer> [
-        self available ifFalse: [ ^0 ].
-        ^[ self rawFrames ] on: Error do: [ :e | 0 ]
+    WinRender class >> framesFor: hwnd <Integer> ^ <Integer> [
+        (self available not or: [ hwnd = 0 ]) ifTrue: [ ^0 ].
+        ^[ self rawFrames: hwnd ] on: Error do: [ :e | 0 ]
     ]
-
-    "── the cell, poked ─────────────────────────────────────────────────
-     12 bytes: codepoint, fg, bg — each a u32, little-endian, in the order
-     the Rust `#[repr(C)] struct Cell` declares them. Written with the arena's
-     own accessors, which is all `Alien forAddress:` under the hood."
 
     WinRender class >> cellBytes ^ <Integer> [ ^12 ]
 
@@ -202,7 +210,7 @@ Object subclass: WinShell [
     ]
 
     WinShell class >> detachEditorRenderer [
-        WinRender detach.
+        WinRender detach: self editorPaneHwnd.
         RenderAttached := false.
         ^self
     ]
@@ -245,9 +253,9 @@ Object subclass: WinShell [
         size := self editorGridSize.
         cols := size at: 1.
         rows := size at: 2.
-        base := WinRender gridFor: cols rows: rows.
+        base := WinRender gridFor: self editorPaneHwnd cols: cols rows: rows.
         base = 0 ifTrue: [ ^false ].
-        WinRender clearTo: 16r000000 on: 16rFFFFFF.
+        WinRender clear: self editorPaneHwnd to: 16r000000 on: 16rFFFFFF.
 
         text := self editorText.
         sel := self editorSelection.
@@ -286,7 +294,7 @@ Object subclass: WinShell [
          reading, so the gate asserts the caret CELL."
         cc := self editorLineColOf: self editorCaret.
         caret := (cc at: 1) < rows and: [ (cc at: 2) < cols ].
-        WinRender caretAtCol: (cc at: 2) row: (cc at: 1) visible: caret.
+        WinRender caretFor: self editorPaneHwnd col: (cc at: 2) row: (cc at: 1) visible: caret.
         ^true
     ]
 
@@ -294,7 +302,7 @@ Object subclass: WinShell [
         "Fill and present. Called from the paint, and directly after an edit
          so the change is on screen without waiting for a pump turn."
         self fillEditorGrid ifFalse: [ ^self ].
-        WinRender present.
+        WinRender present: self editorPaneHwnd.
         ^self
     ]
 ]
@@ -320,14 +328,14 @@ Object subclass: WinShell [
 
     WinShell class >> editorCharWidth ^ <Integer> [
         | rw |
-        rw := WinRender cellWidth.
+        rw := WinRender cellWidthFor: self editorPaneHwnd.
         rw > 0 ifTrue: [ ^rw ].
         ^8
     ]
 
     WinShell class >> editorLineHeight ^ <Integer> [
         | rh |
-        rh := WinRender cellHeight.
+        rh := WinRender cellHeightFor: self editorPaneHwnd.
         rh > 0 ifTrue: [ ^rh ].
         ^16
     ]

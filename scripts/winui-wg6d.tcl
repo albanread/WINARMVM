@@ -31,8 +31,8 @@ gui drain now
 # different problems.
 puts "WG6D dll-available [gui eval {WinRender available}]"
 puts "WG6D attached [gui eval {WinShell renderAttached}]"
-puts "WG6D cell-w [gui eval {WinRender cellWidth}]"
-puts "WG6D cell-h [gui eval {WinRender cellHeight}]"
+puts "WG6D cell-w [gui eval {WinRender cellWidthFor: WinShell editorPaneHwnd}]"
+puts "WG6D cell-h [gui eval {WinRender cellHeightFor: WinShell editorPaneHwnd}]"
 puts "WG6D last-error [gui eval {WinRender lastError}]"
 
 # THE GRID IS THE VIEWPORT, and the guest's cols/rows must be the renderer's.
@@ -40,13 +40,13 @@ puts "WG6D last-error [gui eval {WinRender lastError}]"
 # landing on the wrong row — the seam's own version of the defect this whole
 # redesign exists to make unrepresentable.
 puts "WG6D guest-grid [gui eval {WinShell editorGridSize}]"
-puts "WG6D render-grid [gui eval {(WinRender rawGridSize bitShift: 0 - 16) printString, 'x', (WinRender rawGridSize bitAnd: 16rFFFF) printString}]"
+puts "WG6D render-grid [gui eval {WinRender gridSizeFor: WinShell editorPaneHwnd}]"
 
 # ── frames actually reach the screen ────────────────────────────────────
 gui doit {WinShell refreshEditorPane.}
 gui drain now
 gui drain now
-puts "WG6D frames [gui eval {WinRender frames}]"
+puts "WG6D frames [gui eval {WinRender framesFor: WinShell editorPaneHwnd}]"
 puts "WG6D paint-error [gui eval {WinShell paintError}]"
 
 # A selection, so the picture carries the background-as-cells claim: the
@@ -57,7 +57,7 @@ gui doit {WinShell editorSelectAll.}
 gui doit {WinShell refreshEditorPane.}
 gui drain now
 puts "WG6D selected [gui eval {WinShell editorSelectedText size}]"
-puts "WG6D frames-after [gui eval {WinRender frames}]"
+puts "WG6D frames-after [gui eval {WinRender framesFor: WinShell editorPaneHwnd}]"
 puts "WG6D last-error-after [gui eval {WinRender lastError}]"
 
 puts "WG6D snap [gui snap C:/projects/WINARM/target/winui-wg6d.png]"

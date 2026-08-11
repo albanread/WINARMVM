@@ -47,7 +47,7 @@ gui doit {WinShell invalidateEditorRectX: 40 y: 30 w: 120 h: 60.}
 gui drain now
 gui drain now
 puts "WG6C2 partial-paint-error [gui eval {WinShell paintError}]"
-puts "WG6C2 frames-after-partial [gui eval {WinRender frames}]"
+puts "WG6C2 frames-after-partial [gui eval {WinRender framesFor: WinShell editorPaneHwnd}]"
 
 # ── a picture, for the human half of the gate ───────────────────────────
 # TAKEN WITHOUT REPAIRING THE PANE FIRST, deliberately. A full repaint after
