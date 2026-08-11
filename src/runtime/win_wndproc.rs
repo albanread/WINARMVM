@@ -248,9 +248,33 @@ pub const WM_MOUSEMOVE: u32 = 0x0200;
 /// WINARM (WG6c-1). See [`perform_paint`] for why this one crosses.
 pub const WM_PAINT: u32 = 0x000F;
 
-pub const ALLOWLIST: [u32; 16] = [
+/// `WM_MOUSEWHEEL` (0x020A). WINARM (WG6f): the editor panes scroll.
+///
+/// The third exemption from §2.4a's flag-and-drain, and it gets the same
+/// three-part argument WG4 D5 used for `WM_MOUSEMOVE` and WG6c-1 for
+/// `WM_PAINT`:
+///
+/// 1. **Its meaning is Smalltalk's.** A wheel notch means "move this
+///    document", and only the guest knows which document, how many lines a
+///    notch is worth, and where the top already is. Rust deciding would be
+///    Rust owning the viewport.
+/// 2. **It is a RECORD, not work.** The handler adjusts one integer (the top
+///    line) and invalidates; the redraw happens through the pump exactly as
+///    every other repaint does. Nothing is drawn inside the door.
+/// 3. **It is bounded.** A wheel generates far fewer messages than the
+///    `WM_MOUSEMOVE` already admitted, and the guest declines any wheel that
+///    is not over a pane it owns — the same shape as the drag.
+///
+/// `wParam`'s HIGH word is a SIGNED delta in multiples of `WHEEL_DELTA`
+/// (120), which the guest reads with the same signed-half arithmetic
+/// `loWordSigned:`/`hiWordSigned:` already do for `lParam` — and for the same
+/// reason WG4 D5 records: the naive `bitAnd:` reads a scroll-down as 65416.
+pub const WM_MOUSEWHEEL: u32 = 0x020A;
+
+pub const ALLOWLIST: [u32; 17] = [
     WM_DRAWITEM,
     WM_PAINT,
+    WM_MOUSEWHEEL,
     WM_LBUTTONDOWN,
     WM_LBUTTONUP,
     WM_MOUSEMOVE,

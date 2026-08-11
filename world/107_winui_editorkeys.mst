@@ -72,6 +72,22 @@ Object subclass: WinShell [
          leaves the mouse captured for the life of the window, which is the
          hazard WG4 D5 records against exactly this trio."
         msg = (WinApi constant: 'WM_MOUSEMOVE') ifTrue: [ ^self editorDragTo: lp ].
+        "WG6f: the wheel. Newly allowlisted, with the argument in the door's
+         own header. wParam's HIGH word is a SIGNED delta in multiples of
+         WHEEL_DELTA (120) — read with the same signed-half arithmetic lParam
+         needs, because the naive `bitAnd:` reads a scroll-down as 65416."
+        msg = (WinApi constant: 'WM_MOUSEWHEEL')
+            ifTrue: [ ^self editorWheel: (self hiWordSigned: wp) ].
+        "WG6f: THE PANE WAS RESIZED, so repaint it NOW rather than whenever
+         something else happens to invalidate it. Reported as `it always
+         rescales before it resets`: the swapchain's back buffer is still the
+         old size until a present runs `ResizeBuffers`, so every frame in
+         between showed the old buffer fitted to the new pane. `DXGI_SCALING_
+         NONE` stops that being a STRETCH; this stops it being a WAIT.
+         A bigger pane means MORE CELLS, which is what the fill recomputes."
+        msg = (WinApi constant: 'WM_SIZE') ifTrue: [
+            self refreshEditorPane.
+            ^0 ].
         msg = (WinApi constant: 'WM_LBUTTONUP') ifTrue: [ ^self editorEndDrag ].
         msg = (WinApi constant: 'WM_KEYDOWN') ifTrue: [ ^self editorKeyDown: wp ].
         msg = (WinApi constant: 'WM_CHAR') ifTrue: [ ^self editorChar: wp ].
@@ -209,6 +225,10 @@ Object subclass: WinShell [
          repaint would be a selection the user cannot see."
         self editorCaret: n.
         self shiftIsDown ifFalse: [ EditorAnchor := self editorCaret ].
+        "WG6f: the view follows the caret. Here rather than in each key, for
+         the reason this method exists at all — six keys agreeing about
+         scrolling and a seventh not is the bug one choke point prevents."
+        self editorScrollToCaret.
         self refreshEditorPane.
         self syncEditorCaret.
         ^0
@@ -228,7 +248,10 @@ Object subclass: WinShell [
          does and what a user means."
         | text targetLine targetCol i line col |
         text := self editorText.
-        targetLine := py // self editorLineHeight.
+        "WG6f: the row under the pointer is a VIEWPORT row; the document line
+         is that plus the scroll offset. Forgetting this is a click that lands
+         further and further from the pointer the more you have scrolled."
+        targetLine := (py // self editorLineHeight) + self editorTopLine.
         targetCol := (px + (self editorCharWidth // 2)) // self editorCharWidth.
         i := 1.
         line := 0.
@@ -296,6 +319,17 @@ Object subclass: WinShell [
 
     "── Keys ─────────────────────────────────────────────────────────────"
 
+    WinShell class >> editorWheel: delta <Integer> ^ <Object> [
+        "One notch is WHEEL_DELTA (120) and moves three lines, which is the
+         Windows default and what every other application here will feel like.
+         Negative delta is a scroll DOWN, i.e. later lines — the sign flip is
+         Win32's, not ours."
+        | notches |
+        notches := delta // 120.
+        notches = 0 ifTrue: [ ^0 ].
+        ^self editorScrollBy: 0 - (notches * 3)
+    ]
+
     WinShell class >> editorKeys ^ <Integer> [
         ^EditorKeys isNil ifTrue: [ 0 ] ifFalse: [ EditorKeys ] ]
 
@@ -322,6 +356,11 @@ Object subclass: WinShell [
         vk = 16r28 ifTrue: [ ^self editorMoveLine: 1 ].           "Down"
         vk = 16r24 ifTrue: [ ^self editorMoveToLineEdge: #home ]. "Home"
         vk = 16r23 ifTrue: [ ^self editorMoveToLineEdge: #end ].  "End"
+        "WG6f. A page moves the CARET a screen, and the view follows it — the
+         same choke point every other navigation key goes through, so shift
+         extends a selection by a page for free and cannot disagree."
+        vk = 16r21 ifTrue: [ ^self editorMoveLine: 0 - self editorPageRows ]. "PgUp"
+        vk = 16r22 ifTrue: [ ^self editorMoveLine: self editorPageRows ].     "PgDn"
         vk = 16r08 ifTrue: [ ^self editorApply: 'Backspace' ].    "Backspace"
         vk = 16r2E ifTrue: [ ^self editorApply: 'Delete' ].       "Delete"
         vk = 16r0D ifTrue: [ ^self editorApply: 'Enter' ].        "Enter"

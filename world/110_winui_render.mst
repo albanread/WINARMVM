@@ -192,7 +192,7 @@ Object subclass: WinRender [
 ]
 
 Object subclass: WinShell [
-    <classVars: GridCols GridRows RenderAttached>
+    <classVars: GridCols GridRows RenderAttached EditorTop>
 
     "── attach / detach ─────────────────────────────────────────────────"
 
@@ -239,6 +239,81 @@ Object subclass: WinShell [
 
     "── the fill: the ONLY thing this side does now ─────────────────────"
 
+    "── scrolling: ONE integer, and it is a LINE not a pixel ────────────
+     The grid is the viewport and the rope is the document, so scrolling is
+     choosing which document line lands on grid row 0. That is the whole of
+     it: no pixel offset, no partial rows, no smooth-scroll accumulator to
+     drift. A cell grid makes the cheap thing the correct thing.
+
+     `docs/editor_design.md` M0-M6 always meant to get here — 60's own note
+     says `viewport windowing and scrolling it as the caret leaves the screen
+     is the next step; a class fits on screen, so the whole buffer is the
+     viewport FOR NOW`. This is that step."
+
+    WinShell class >> editorTopLine ^ <Integer> [
+        ^EditorTop isNil ifTrue: [ 0 ] ifFalse: [ EditorTop ] ]
+
+    WinShell class >> resetEditorCaret [
+        "A NEW DOCUMENT SCROLLS TO THE TOP, and this override exists because
+         forgetting it is the exact defect the caret already taught us: a
+         shorter class inheriting the previous one's top line opens somewhere
+         in the middle, or past its end entirely, and looks empty. The caret
+         half is 107's and is delegated to unchanged."
+        EditorTop := 0.
+        ^self editorCaretAt: 1
+    ]
+
+    WinShell class >> editorLineCount ^ <Integer> [
+        | t n |
+        t := self editorText.
+        n := 1.
+        1 to: t size do: [ :i | (t at: i) = Character nl ifTrue: [ n := n + 1 ] ].
+        ^n
+    ]
+
+    WinShell class >> editorPageRows ^ <Integer> [
+        "How many lines a Page Up moves. The viewport minus one, so a page
+         keeps one line of context — what every editor does, and what stops a
+         reader losing their place at the seam."
+        ^((self editorGridSize at: 2) - 1) max: 1
+    ]
+
+    WinShell class >> editorMaxTop ^ <Integer> [
+        "The last line may be scrolled to the TOP, not merely into view: a
+         document you cannot scroll past its penultimate screen feels stuck."
+        ^(self editorLineCount - 1) max: 0
+    ]
+
+    WinShell class >> editorTopLine: n <Integer> [
+        EditorTop := (n max: 0) min: self editorMaxTop.
+        ^self
+    ]
+
+    WinShell class >> editorScrollBy: lines <Integer> ^ <Object> [
+        "Scrolling moves the VIEW, never the caret — the caret is a document
+         position and the wheel is not an edit. That is why a wheel scroll
+         does not drag the selection either."
+        | before |
+        before := self editorTopLine.
+        self editorTopLine: before + lines.
+        self editorTopLine = before ifTrue: [ ^0 ].
+        self refreshEditorPane.
+        ^0
+    ]
+
+    WinShell class >> editorScrollToCaret [
+        "The other direction: the CARET moved, so the view follows it. Called
+         after every navigation, which is what makes arrowing off the bottom
+         edge scroll instead of hiding the caret."
+        | line top rows |
+        line := (self editorLineColOf: self editorCaret) at: 1.
+        top := self editorTopLine.
+        rows := self editorGridSize at: 2.
+        line < top ifTrue: [ ^self editorTopLine: line ].
+        line >= (top + rows) ifTrue: [ ^self editorTopLine: line - rows + 1 ].
+        ^self
+    ]
+
     WinShell class >> fillEditorGrid ^ <Boolean> [
         "Walk the tokenizer's runs once and write a cell per character. The
          SAME walk the GDI paint did — it is the run-splitting that was always
@@ -248,7 +323,7 @@ Object subclass: WinShell [
          Everything the old paint needed a special case for is a cell
          property here: the selection is a background, the caret is a cell,
          and a character off the right-hand edge is simply not written."
-        | base cols rows size text runs lineIndex col sel selLo selHi caret cc |
+        | base cols rows size text runs lineIndex col sel selLo selHi caret cc top |
         self renderAttached ifFalse: [ ^false ].
         size := self editorGridSize.
         cols := size at: 1.
@@ -256,6 +331,7 @@ Object subclass: WinShell [
         base := WinRender gridFor: self editorPaneHwnd cols: cols rows: rows.
         base = 0 ifTrue: [ ^false ].
         WinRender clear: self editorPaneHwnd to: 16r000000 on: 16rFFFFFF.
+        top := self editorTopLine.
 
         text := self editorText.
         sel := self editorSelection.
@@ -275,8 +351,8 @@ Object subclass: WinShell [
                 (text at: i) = Character nl
                     ifTrue: [ lineIndex := lineIndex + 1. col := 0 ]
                     ifFalse: [
-                        (lineIndex < rows and: [ col < cols ]) ifTrue: [
-                            WinRender at: base col: col row: lineIndex cols: cols
+                        (lineIndex >= top and: [ lineIndex - top < rows and: [ col < cols ] ]) ifTrue: [
+                            WinRender at: base col: col row: lineIndex - top cols: cols
                                 put: (text at: i) asInteger
                                 fg: colour
                                 bg: ((i >= selLo and: [ i < selHi ])
@@ -293,8 +369,9 @@ Object subclass: WinShell [
          exactly the kind of thing this port finds by gate rather than by
          reading, so the gate asserts the caret CELL."
         cc := self editorLineColOf: self editorCaret.
-        caret := (cc at: 1) < rows and: [ (cc at: 2) < cols ].
-        WinRender caretFor: self editorPaneHwnd col: (cc at: 2) row: (cc at: 1) visible: caret.
+        caret := ((cc at: 1) >= top and: [ (cc at: 1) - top < rows and: [ (cc at: 2) < cols ] ]).
+        WinRender caretFor: self editorPaneHwnd
+            col: (cc at: 2) row: (cc at: 1) - top visible: caret.
         ^true
     ]
 

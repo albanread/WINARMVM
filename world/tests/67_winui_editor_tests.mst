@@ -44,7 +44,13 @@ TestCase subclass: WinUiEditorWg6cTests [
         self runTest: #testUtf16UnitsAreNotByteCounts
              do: [ self testUtf16UnitsAreNotByteCounts ].
         self runTest: #testTwoPanesKeepTheirOwnDocumentAndCaret
-             do: [ self testTwoPanesKeepTheirOwnDocumentAndCaret ]
+             do: [ self testTwoPanesKeepTheirOwnDocumentAndCaret ].
+        self runTest: #testScrollingIsALineOffsetAndItClamps
+             do: [ self testScrollingIsALineOffsetAndItClamps ].
+        self runTest: #testHitTestingFollowsTheScroll
+             do: [ self testHitTestingFollowsTheScroll ].
+        self runTest: #testANewDocumentScrollsToTheTop
+             do: [ self testANewDocumentScrollsToTheTop ]
     ]
 
     threeLines [ ^'one', (String with: Character nl), 'two', (String with: Character nl), 'three' ]
@@ -348,6 +354,73 @@ TestCase subclass: WinUiEditorWg6cTests [
         "And the caret each pane adopted after its own edit is its own."
         self assert: a caret = 2 description: 'A''s caret followed A''s edit'.
         self assert: b caret = 1 description: 'B''s did not move at all'
+    ]
+
+    "── WG6f: scrolling, which is one integer ────────────────────────────"
+
+    tenLines [
+        | ws |
+        ws := WriteStream on: String new.
+        1 to: 10 do: [ :i |
+            ws nextPutAll: 'line' , i printString.
+            i < 10 ifTrue: [ ws nextPut: Character nl ] ].
+        ^ws contents
+    ]
+
+    testScrollingIsALineOffsetAndItClamps [
+        "The grid is the viewport and the rope is the document, so scrolling is
+         choosing which document LINE lands on grid row 0 — no pixel offset, no
+         partial rows, nothing to accumulate and drift.
+
+         Clamped at both ends: past the top is 0, and the furthest down is the
+         LAST line at row 0. A document you cannot scroll past its penultimate
+         screen feels stuck, and one that scrolls into empty space looks
+         broken."
+        WinShell openEditorOn: self tenLines.
+        self assert: WinShell editorLineCount = 10
+            description: 'ten lines, but counted ' , WinShell editorLineCount printString.
+        WinShell editorTopLine: 0 - 5.
+        self assert: WinShell editorTopLine = 0 description: 'clamped at the top'.
+        WinShell editorTopLine: 99999.
+        self assert: WinShell editorTopLine = 9
+            description: 'the last line can reach row 0, but got '
+                , WinShell editorTopLine printString.
+        WinShell editorTopLine: 3.
+        self assert: WinShell editorTopLine = 3 description: 'and an ordinary value stands'
+    ]
+
+    testHitTestingFollowsTheScroll [
+        "A click's row is a VIEWPORT row; the document line is that plus the
+         scroll offset. Forgetting it is a click that lands further from the
+         pointer the more you have scrolled — and it would pass every test
+         written at the top of a document."
+        | unscrolled scrolled |
+        WinShell openEditorOn: self tenLines.
+        WinShell editorTopLine: 0.
+        unscrolled := WinShell editorOffsetAtX: 0 y: 0.
+        WinShell editorTopLine: 2.
+        scrolled := WinShell editorOffsetAtX: 0 y: 0.
+        self assert: unscrolled = 1
+            description: 'unscrolled, the top-left pixel is offset 1'.
+        self assert: scrolled > unscrolled
+            description: 'scrolled down two lines, the SAME pixel is a later offset, but got '
+                , scrolled printString.
+        self assert: (WinShell editorLineColOf: scrolled) first = 2
+            description: 'and it is line 2 exactly, not line '
+                , (WinShell editorLineColOf: scrolled) first printString
+    ]
+
+    testANewDocumentScrollsToTheTop [
+        "The same defect the caret already taught, one field along: a shorter
+         class inheriting the previous one's top line opens somewhere in the
+         middle, or past its end entirely, and looks empty."
+        WinShell openEditorOn: self tenLines.
+        WinShell editorTopLine: 8.
+        self assert: WinShell editorTopLine = 8 description: 'scrolled down'.
+        WinShell openEditorOn: 'ab'.
+        self assert: WinShell editorTopLine = 0
+            description: 'a new document starts at the top, but is at line '
+                , WinShell editorTopLine printString
     ]
 
     testUtf16UnitsAreNotByteCounts [

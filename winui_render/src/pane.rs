@@ -27,7 +27,7 @@ use windows::Win32::Graphics::Dxgi::Common::{
 };
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory2, IDXGIDevice, IDXGIFactory2, IDXGISurface, IDXGISwapChain1,
-    DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
+    DXGI_SCALING_NONE, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
     DXGI_USAGE_RENDER_TARGET_OUTPUT,
 };
 
@@ -152,7 +152,15 @@ fn build(hwnd: HWND, pt: f32, dpi: f32) -> Result<Renderer, String> {
             // makes this tear-free and is the whole reason for a swapchain
             // rather than the legacy hwnd render target.
             BufferCount: 2,
-            Scaling: DXGI_SCALING_STRETCH,
+            // NONE, NEVER STRETCH. With `DXGI_SCALING_STRETCH` the back buffer
+            // is scaled to fit the window whenever the two disagree — which
+            // they do for every frame between a resize and the `ResizeBuffers`
+            // that follows it — so growing the pane briefly SCALES THE TEXT
+            // instead of showing more of it. That is exactly backwards for a
+            // cell grid: the cell size is fixed by the font, and a bigger pane
+            // means MORE CELLS, not bigger ones. Reported by the author before
+            // it could be shipped.
+            Scaling: DXGI_SCALING_NONE,
             SwapEffect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
             AlphaMode: Default::default(),
             Flags: 0,
