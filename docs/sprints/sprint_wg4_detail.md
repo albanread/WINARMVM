@@ -101,12 +101,25 @@ So D1's gate is **two claims, not one**:
 
 ### D2. Metrics, read off the primary
 
-Only once D1 holds. `VmMetrics` is sampled **on the primary** and pushed to
-the UI VM as an ordinary `#uiReq`; the cluster's existing selector is the
-receiver. The five values keep travelling **as one sample** — a cluster
-showing a mixture of two moments is the small lie a metrics readout must not
-tell, and that is now a property of the *transport*, not of a setter's
-signature.
+Only once D1 holds.
+
+**Correction to this section's first draft, made when the Mac's own path was
+read properly.** The draft said the sample would travel as an ordinary
+`#uiReq`. It should not, and `cocoa_gui` does not do that: a metric is a
+*sample*, not a *request*, and putting a 4 Hz push on the request seam would
+load the very channel whose latency the Do It path depends on — for data
+nobody is waiting on. The Mac publishes the primary's `VmMetrics` into a
+shared `Mutex` (the VM monitor registry's own shape) and the UI side reads
+it, formats it, and execs the update. Same claim — *reading `VmMetrics` off
+the primary* — without borrowing the seam to do it.
+
+So: the primary's beat loop publishes `primary.metrics()` on every beat
+(250 ms — exactly the ~4 Hz the Mac's cluster rides), and the UI thread
+samples that shared snapshot in the pump, formats it, and calls the
+cluster's existing selector. The five values keep travelling **as one
+sample** — a cluster showing a mixture of two moments is the small lie a
+metrics readout must not tell, and one `Mutex<VmMetrics>` copy makes that
+structural rather than a matter of care.
 
 What this buys that the placeholder cannot: a **stale** sample is
 detectable (the UI knows when it last heard), a **dead primary** is visible

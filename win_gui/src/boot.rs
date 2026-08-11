@@ -42,10 +42,11 @@
 
 use std::path::PathBuf;
 use std::sync::mpsc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
+use std::time::Instant;
 
-use macvm::embed::{FatalMode, VmHandle};
+use macvm::embed::{FatalMode, VmHandle, VmMetrics};
 use macvm::runtime::workers::{HostedInbox, InboxSender, InboxWakeFn};
 use macvm::runtime::{VmError, VmOptions};
 
@@ -65,6 +66,20 @@ fn vm_options() -> VmOptions {
     }
 }
 
+/// The primary's most recent `VmMetrics`, and when it was taken.
+///
+/// WG4 D2. Shared rather than messaged, and the distinction is the design: a
+/// metric is a SAMPLE, not a REQUEST. Routing a 4 Hz push over the
+/// `#uiReq`/`#uiReply` seam would load the very channel Do It's latency
+/// depends on, to carry data nobody is waiting on. `cocoa_gui` publishes into
+/// a `Mutex` for the same reason and this is its twin.
+///
+/// The `Instant` is what makes STALENESS observable: a display fed by hand
+/// cannot go stale, and one read off a live primary can — if the primary is
+/// wedged in a long doit, or dead, the numbers stop moving and the UI is the
+/// only place that can notice.
+pub type MetricsSnapshot = Arc<Mutex<Option<(VmMetrics, Instant)>>>;
+
 /// The two wired VMs, handed back to `main` for the window + pump phase.
 ///
 /// `ui_worker` runs on the caller's (main) thread; the primary lives on
@@ -80,6 +95,8 @@ pub struct WiredVms {
     /// is never joined — it parks for the process lifetime — so this is a
     /// liveness token, not a handle anyone waits on.
     pub primary_thread: JoinHandle<()>,
+    /// WG4 D2: the primary's own metrics, republished every beat.
+    pub metrics: MetricsSnapshot,
 }
 
 /// Wire the two VMs and hand back a live [`WiredVms`]. Runs on the thread that
@@ -100,10 +117,12 @@ pub fn handshake_wire_vms(
     #[allow(clippy::type_complexity)]
     let (ready_tx, ready_rx) = mpsc::channel::<Result<(u32, HostedInbox, InboxSender), VmError>>();
 
+    let metrics: MetricsSnapshot = Arc::new(Mutex::new(None));
     let world_for_primary = world_dir.clone();
+    let metrics_for_primary = metrics.clone();
     let primary_thread = std::thread::Builder::new()
         .name("macvm-winui-primary".into())
-        .spawn(move || primary_thread_main(world_for_primary, wake, ready_tx))
+        .spawn(move || primary_thread_main(world_for_primary, wake, ready_tx, metrics_for_primary))
         .map_err(|e| VmError {
             msg: format!("could not spawn the primary VM thread: {e}"),
         })?;
@@ -147,6 +166,7 @@ pub fn handshake_wire_vms(
         hosted_id,
         hosted_inbox,
         primary_thread,
+        metrics,
     })
 }
 
@@ -156,6 +176,7 @@ fn primary_thread_main(
     world_dir: PathBuf,
     wake: InboxWakeFn,
     ready_tx: mpsc::Sender<Result<(u32, HostedInbox, InboxSender), VmError>>,
+    metrics: MetricsSnapshot,
 ) {
     // The persistent primary — the environment's state, the VM a user would
     // call "their image". `ExitThread` (boot's default) is right here: a
@@ -215,6 +236,13 @@ fn primary_thread_main(
     let mut beats: u64 = 0;
     loop {
         beats += 1;
+        // WG4 D2: republish this VM's own metrics for the UI to read. Taken
+        // HERE, on the primary's thread, between beats — the only place the
+        // primary's heap can be read without racing the mutator.
+        if let Ok(mut slot) = metrics.lock() {
+            *slot = Some((primary.metrics(), Instant::now()));
+        }
+
         // WG4 D1 bring-up trace: `MACVM_WINUI_PRIMARY_TRACE=1` reports what the
         // beat actually saw. Temporary, and cheap enough to leave until D1 has
         // its gate — "the primary is serving" is otherwise unobservable from

@@ -227,6 +227,99 @@ mod app {
         vm.exec(src)
     }
 
+    /// `1536` -> `"1.5K"`, base-1024, one decimal past the first suffix — the
+    /// same compact style the Mac's toolbar and the WKWebView GUI both use, so
+    /// a screenshot of either reads the same way (§2.1: this is identity, not
+    /// decoration).
+    fn format_bytes(n: u64) -> String {
+        const UNITS: [&str; 5] = ["B", "K", "M", "G", "T"];
+        let mut v = n as f64;
+        let mut u = 0;
+        while v >= 1024.0 && u < UNITS.len() - 1 {
+            v /= 1024.0;
+            u += 1;
+        }
+        if u == 0 {
+            format!("{n}{}", UNITS[0])
+        } else {
+            format!("{v:.1}{}", UNITS[u])
+        }
+    }
+
+    /// WG4 D2: sample the PRIMARY's live metrics and push one formatted readout
+    /// into the cluster.
+    ///
+    /// The sample is read off the shared snapshot the primary republishes each
+    /// beat — not asked for over the request seam, because a metric is a sample
+    /// and not a request (see `boot::MetricsSnapshot`). The five values travel
+    /// as ONE call, so the cluster can never show a mixture of two moments.
+    ///
+    /// Throttled to ~4 Hz: this runs from the pump, which turns as fast as
+    /// Windows delivers messages, and a resize drag would otherwise spend a VM
+    /// entry per frame formatting numbers nobody can read that fast.
+    fn refresh_metrics(
+        vm: &mut VmHandle,
+        snap: &crate::boot::MetricsSnapshot,
+        prev_alloc: &mut Option<u64>,
+    ) {
+        use std::time::{Duration, Instant};
+        static LAST: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+        {
+            let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(t) = *last {
+                if t.elapsed() < Duration::from_millis(250) {
+                    return;
+                }
+            }
+            *last = Some(Instant::now());
+        }
+        let Some((m, taken)) = (match snap.lock() {
+            Ok(g) => *g,
+            Err(e) => *e.into_inner(),
+        }) else {
+            return; // the primary has not published its first sample yet
+        };
+        // `old_reserved`, not `old_committed`: the committed figure starts small
+        // and grows on demand, so it reads as "this VM can only ever use 20 MiB"
+        // — misleadingly small against a 512 MiB reservation. Same choice the
+        // Mac's own cluster makes, and for the same reason.
+        let mem = format!(
+            "{}/{}",
+            format_bytes(m.eden_used + m.old_used),
+            format_bytes(m.eden_capacity + m.old_reserved)
+        );
+        let jit = if m.compilations == 0 {
+            "—".to_string()
+        } else {
+            format!("{}c", m.compilations)
+        };
+        let code = format!("{} nm", m.nmethods);
+        let alloc = match *prev_alloc {
+            // One beat is 250ms, so *4 approximates bytes/sec.
+            Some(prev) => format!(
+                "{}/s",
+                format_bytes(m.bytes_allocated.saturating_sub(prev).saturating_mul(4))
+            ),
+            None => "—".to_string(),
+        };
+        *prev_alloc = Some(m.bytes_allocated);
+        let gc = format!("{}·{}", m.scavenges, m.full_gcs);
+        // STALENESS, which is the whole point of reading a live primary rather
+        // than being fed literals: if the primary is wedged in a long doit or
+        // dead, its samples stop and the cluster says so instead of showing a
+        // confident, frozen, wrong number.
+        let age = taken.elapsed().as_millis();
+        let gc = if age > 2000 {
+            format!("{gc} (stale {}s)", age / 1000)
+        } else {
+            gc
+        };
+        let doit = format!(
+            "WinShell updateMetricsMem: '{mem}' jit: '{jit}' code: '{code}' alloc: '{alloc}' gc: '{gc}'."
+        );
+        let _ = guarded_exec(vm, &doit);
+    }
+
     /// The UI window's HWND, cached for ONE purpose: the primary's wake.
     ///
     /// `shell_hwnd` deliberately never caches — `WinShell` is the authority and
@@ -763,8 +856,12 @@ mod app {
         rx: Option<&Receiver<CtlReq>>,
         window: HWND,
         inbox: Option<&macvm::runtime::workers::HostedInbox>,
+        metrics: Option<&crate::boot::MetricsSnapshot>,
     ) -> i32 {
         let mut msg = MSG::default();
+        // The previous allocation total, so ALLOC can report a RATE rather than
+        // a running sum — the Mac's own cluster does the same.
+        let mut prev_alloc: Option<u64> = None;
         let mut had_window = !window.0.is_null();
         loop {
             let rc = unsafe { GetMessageW(&mut msg, None, 0, 0) }.0;
@@ -800,6 +897,13 @@ mod app {
                     // and provably not inside a callback. An envelope
                     // dispatched from the door would be a nested VM entry —
                     // the exact failure the drain exists to prevent.
+                    // WG4 D2: the metrics cluster, sampled off the primary.
+                    // Runs on the same "between dispatches" beat as the inbox
+                    // pump and throttles itself to ~4 Hz.
+                    if let Some(snap) = metrics {
+                        let vm: &mut VmHandle = unsafe { &mut *vmp };
+                        refresh_metrics(vm, snap, &mut prev_alloc);
+                    }
                     if let Some(inbox) = inbox {
                         // SAFETY: as above — between dispatches, on the one
                         // thread that dispatches, no door running.
@@ -936,7 +1040,10 @@ mod app {
                         w.primary_thread.thread().name().unwrap_or("?"),
                         w.hosted_id,
                     );
-                    (boxed, Some((w.hosted_id, w.hosted_inbox, w.primary_thread)))
+                    (
+                        boxed,
+                        Some((w.hosted_id, w.hosted_inbox, w.primary_thread, w.metrics)),
+                    )
                 }
                 Err(e) => {
                     eprintln!("macvm-winui: {}", e.msg);
@@ -1037,7 +1144,8 @@ mod app {
             vmp,
             rx.as_ref(),
             window,
-            _wired.as_ref().map(|(_, ib, _)| ib),
+            _wired.as_ref().map(|(_, ib, _, _)| ib),
+            _wired.as_ref().map(|(_, _, _, mt)| mt),
         );
         println!("macvm-winui: {}", win_wndproc::stats_line());
         println!("macvm-winui: message loop ended, exit {code}");
