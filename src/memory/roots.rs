@@ -321,7 +321,10 @@ where
                     );
                 }
                 FrameView::Adapter { fp, kind, .. } => {
-                    eprintln!("DBGPIC frame ADAPTER {kind:?} fp={fp:#x} rootspill=[{:#x},{fp:#x})", fp - ROOTSPILL_BYTES as u64);
+                    eprintln!(
+                        "DBGPIC frame ADAPTER {kind:?} fp={fp:#x} rootspill=[{:#x},{fp:#x})",
+                        fp - ROOTSPILL_BYTES as u64
+                    );
                 }
                 _ => {}
             }
@@ -359,7 +362,7 @@ where
                     if want.parse::<u32>().ok() == Some(nm.0) {
                         let nm_ref = vm.code_table.get(nm).expect("checked above");
                         let base = nm_ref.code.base as u64;
-                                                    let sel = nm_ref.key_selector.as_string();
+                        let sel = nm_ref.key_selector.as_string();
                         eprintln!(
                             "DBGPIC-NM nm={} sel={sel} scav#{} fp={fp:#x} rel_pc={:#x} map_slots={} has41={}",
                             nm.0,
@@ -442,15 +445,27 @@ where
                             // overlap this address; the list names them.
                             for fv in &frames_dbg {
                                 match fv {
-                                    FrameView::Compiled { fp: cfp, nm: cnm, ret_pc: rpc } => {
-                                        let fs = vm.code_table.get(*cnm).map(|n| n.frame_slots).unwrap_or(0);
+                                    FrameView::Compiled {
+                                        fp: cfp,
+                                        nm: cnm,
+                                        ret_pc: rpc,
+                                    } => {
+                                        let fs = vm
+                                            .code_table
+                                            .get(*cnm)
+                                            .map(|n| n.frame_slots)
+                                            .unwrap_or(0);
                                         eprintln!(
                                             "DBGPIC   walk: COMPILED nm={} fp={cfp:#x} slots={fs} extent=[{:#x},{cfp:#x}) ret_pc={rpc:#x}",
                                             cnm.0,
                                             cfp - 8 * (fs as u64 + 1)
                                         );
                                     }
-                                    FrameView::Adapter { fp: afp, kind, caller_pc } => {
+                                    FrameView::Adapter {
+                                        fp: afp,
+                                        kind,
+                                        caller_pc,
+                                    } => {
                                         let n = real_oop_rootspill_slots(vm, *kind, *caller_pc);
                                         eprintln!(
                                             "DBGPIC   walk: ADAPTER {kind:?} fp={afp:#x} rootspill[{n}]=[{:#x},{:#x}) caller_pc={caller_pc:#x}",

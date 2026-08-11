@@ -451,17 +451,8 @@ mod app {
         // SetWindowPos dispatches WM_SIZE into the door SYNCHRONOUSLY from
         // here — which is exactly the point: no `eval` is live, no door entry
         // is live, so the depth guard is 0 and the message crosses.
-        let ok = unsafe {
-            SetWindowPos(
-                hwnd,
-                Some(HWND_TOP),
-                0,
-                0,
-                w,
-                h,
-                SWP_NOMOVE | SWP_NOZORDER,
-            )
-        };
+        let ok =
+            unsafe { SetWindowPos(hwnd, Some(HWND_TOP), 0, 0, w, h, SWP_NOMOVE | SWP_NOZORDER) };
         match ok {
             Ok(()) => format!("OK resized to {w}x{h}"),
             Err(e) => format!("ERR SetWindowPos: {e}"),
@@ -908,7 +899,11 @@ mod app {
         // 1. snap with no window — a named error, not a hang and not a
         //    zero-byte PNG. Checked FIRST, while there genuinely is no window.
         let (tx, rrx) = std::sync::mpsc::sync_channel::<String>(1);
-        snap::snap_hwnd(shell_hwnd(&mut vm), "target/winui-selftest-nowindow.png", tx);
+        snap::snap_hwnd(
+            shell_hwnd(&mut vm),
+            "target/winui-selftest-nowindow.png",
+            tx,
+        );
         let reply = rrx.recv().unwrap_or_else(|_| "<no reply>".into());
         println!("SELFTEST snap-before-window: {reply}");
         if reply != "ERR no window yet" {
@@ -1264,6 +1259,10 @@ mod app {
 #[cfg(windows)]
 fn main() {
     let selftest = std::env::args().any(|a| a == "--selftest");
-    let code = if selftest { app::selftest() } else { app::run() };
+    let code = if selftest {
+        app::selftest()
+    } else {
+        app::run()
+    };
     std::process::exit(code);
 }

@@ -507,8 +507,10 @@ core::arch::global_asm!(
 #[cfg(windows)]
 extern "C" {
     #[link_name = "winvm_setjmp"]
-    pub(crate) fn sigsetjmp(env: *mut core::ffi::c_int, savemask: core::ffi::c_int)
-        -> core::ffi::c_int;
+    pub(crate) fn sigsetjmp(
+        env: *mut core::ffi::c_int,
+        savemask: core::ffi::c_int,
+    ) -> core::ffi::c_int;
     #[link_name = "winvm_longjmp"]
     pub(crate) fn siglongjmp(env: *mut core::ffi::c_int, val: core::ffi::c_int) -> !;
 }
@@ -1805,8 +1807,7 @@ unsafe fn handle_win_fault(ctx: &mut Arm64NtContext, rec: &WinExceptionRecord) -
                 // apart from `GUEST_FATAL_JMP_VAL`.
                 let longjmp_addr = siglongjmp
                     as unsafe extern "C" fn(*mut core::ffi::c_int, core::ffi::c_int) -> !
-                    as *const ()
-                    as u64;
+                    as *const () as u64;
                 // SAFETY: `i` is this thread's own claimed slot.
                 ctx.X[0] = unsafe { jmp_buf_ptr(i) } as u64;
                 ctx.X[1] = 1;
@@ -3330,7 +3331,10 @@ mod tests {
         .join()
         .expect("worker completed normally");
 
-        assert_eq!(recoveries, 3, "every recovery must land back at the setjmp site");
+        assert_eq!(
+            recoveries, 3,
+            "every recovery must land back at the setjmp site"
+        );
         assert_eq!(
             DROPS.load(Ordering::SeqCst),
             0,
@@ -3366,26 +3370,48 @@ mod tests {
         "  stp d12, d13, [sp, #0x80]",
         "  stp d14, d15, [sp, #0x90]",
         "  stp x0,  x1,  [sp, #0xA0]",
-        "  movz x19, #0x1119", "  movz x20, #0x1120", "  movz x21, #0x1121",
-        "  movz x22, #0x1122", "  movz x23, #0x1123", "  movz x24, #0x1124",
-        "  movz x25, #0x1125", "  movz x26, #0x1126", "  movz x27, #0x1127",
+        "  movz x19, #0x1119",
+        "  movz x20, #0x1120",
+        "  movz x21, #0x1121",
+        "  movz x22, #0x1122",
+        "  movz x23, #0x1123",
+        "  movz x24, #0x1124",
+        "  movz x25, #0x1125",
+        "  movz x26, #0x1126",
+        "  movz x27, #0x1127",
         "  movz x28, #0x1128",
-        "  fmov d8,  #1.0", "  fmov d9,  #2.0", "  fmov d10, #3.0",
-        "  fmov d11, #4.0", "  fmov d12, #5.0", "  fmov d13, #6.0",
-        "  fmov d14, #7.0", "  fmov d15, #8.0",
+        "  fmov d8,  #1.0",
+        "  fmov d9,  #2.0",
+        "  fmov d10, #3.0",
+        "  fmov d11, #4.0",
+        "  fmov d12, #5.0",
+        "  fmov d13, #6.0",
+        "  fmov d14, #7.0",
+        "  fmov d15, #8.0",
         "  ldr x0, [sp, #0xA0]",
         "  mov w1, #1",
         "  bl winvm_setjmp",
         "  cbnz w0, 3f",
         // First pass: destroy every nonvolatile register, then jump. If the
         // buffer is incomplete, THESE are the values that come back.
-        "  movz x19, #0xDEAD", "  movz x20, #0xDEAD", "  movz x21, #0xDEAD",
-        "  movz x22, #0xDEAD", "  movz x23, #0xDEAD", "  movz x24, #0xDEAD",
-        "  movz x25, #0xDEAD", "  movz x26, #0xDEAD", "  movz x27, #0xDEAD",
+        "  movz x19, #0xDEAD",
+        "  movz x20, #0xDEAD",
+        "  movz x21, #0xDEAD",
+        "  movz x22, #0xDEAD",
+        "  movz x23, #0xDEAD",
+        "  movz x24, #0xDEAD",
+        "  movz x25, #0xDEAD",
+        "  movz x26, #0xDEAD",
+        "  movz x27, #0xDEAD",
         "  movz x28, #0xDEAD",
-        "  fmov d8,  #-1.0", "  fmov d9,  #-1.0", "  fmov d10, #-1.0",
-        "  fmov d11, #-1.0", "  fmov d12, #-1.0", "  fmov d13, #-1.0",
-        "  fmov d14, #-1.0", "  fmov d15, #-1.0",
+        "  fmov d8,  #-1.0",
+        "  fmov d9,  #-1.0",
+        "  fmov d10, #-1.0",
+        "  fmov d11, #-1.0",
+        "  fmov d12, #-1.0",
+        "  fmov d13, #-1.0",
+        "  fmov d14, #-1.0",
+        "  fmov d15, #-1.0",
         "  ldr x0, [sp, #0xA0]",
         "  mov w1, #9",
         "  bl winvm_longjmp",

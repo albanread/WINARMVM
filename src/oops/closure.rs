@@ -62,9 +62,10 @@ impl ClosureOop {
         #[cfg(debug_assertions)]
         {
             let n = self.ncopied();
-            debug_assert!(            i < n,
-            "ClosureOop::set_copied: index {i} out of bounds ({n})"
-        );
+            debug_assert!(
+                i < n,
+                "ClosureOop::set_copied: index {i} out of bounds ({n})"
+            );
         }
         self.as_mem().set_tail_oop_at(i, v);
     }

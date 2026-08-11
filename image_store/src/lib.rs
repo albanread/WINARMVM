@@ -364,7 +364,9 @@ impl Image {
     /// importer processes `world.list` before any other `*.list` file, so
     /// this is also a reasonable "most-foundational-first" default).
     pub fn package_lists(&self) -> rusqlite::Result<Vec<String>> {
-        let mut stmt = self.conn.prepare("SELECT name FROM package_lists ORDER BY list_id")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT name FROM package_lists ORDER BY list_id")?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
         rows.collect()
     }
@@ -386,7 +388,11 @@ impl Image {
     /// or an incremental reseed calls this again for the same pair). Creates
     /// `list_name`'s own `package_lists` row on first mention; no separate
     /// "create the list" step exists or is needed.
-    pub fn ensure_package_list_member(&self, list_name: &str, package: &str) -> rusqlite::Result<()> {
+    pub fn ensure_package_list_member(
+        &self,
+        list_name: &str,
+        package: &str,
+    ) -> rusqlite::Result<()> {
         self.conn.execute(
             "INSERT OR IGNORE INTO package_lists (name) VALUES (?1)",
             params![list_name],
@@ -744,8 +750,7 @@ impl Image {
                  WHERE mv.deleted = 0 \
                  AND mv.version_id NOT IN (SELECT DISTINCT method_version_id FROM method_sends)",
             )?;
-            let it =
-                stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+            let it = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
             it.collect::<rusqlite::Result<Vec<_>>>()?
         };
         if pending.is_empty() {
@@ -1743,7 +1748,9 @@ mod tests {
             .unwrap();
 
         // A reopen that adds `<classVars: …>` ADDS them (the GamePane fix).
-        assert!(img.reimport_class_shell("Widget", "", "State Count").unwrap());
+        assert!(img
+            .reimport_class_shell("Widget", "", "State Count")
+            .unwrap());
         assert_eq!(cvars_of(&img, "Widget"), "State Count");
 
         // A method-only reopen (no pragma -> empty vars) must NOT wipe them —
@@ -2339,8 +2346,16 @@ mod tests {
         img.add_class("Object", None, "Kernel", "The root.", "", "", lo)
             .unwrap();
         let lo = img.next_load_order().unwrap();
-        img.add_class("Collection", Some("Object"), "Collections", "Abstract.", "", "", lo)
-            .unwrap();
+        img.add_class(
+            "Collection",
+            Some("Object"),
+            "Collections",
+            "Abstract.",
+            "",
+            "",
+            lo,
+        )
+        .unwrap();
         img.add_method(
             "Collection",
             Side::Instance,
@@ -2377,7 +2392,8 @@ mod tests {
                 .unwrap_or_else(|| panic!("{} missing from:\n{text}", stored.selector));
             assert_eq!(
                 got.source, stored.source,
-                "{} did not round-trip", stored.selector
+                "{} did not round-trip",
+                stored.selector
             );
         }
         assert_eq!(

@@ -1245,7 +1245,8 @@ fn array_op_kind_on(vm: &VmState, method: MethodOop, ic_idx: u16) -> Option<bool
     // `MethodOop::try_from` rejects — the fuse would then DECAY to a
     // CallSend and stay decayed (the CallSend keeps the callee warm). Same
     // staleness `is_double_inlinable_on`/`array_size_on` already guard.
-    let target = crate::compiler::feedback::resolve_method_ro(vm, vm.universe.array_klass, ic.selector())?;
+    let target =
+        crate::compiler::feedback::resolve_method_ro(vm, vm.universe.array_klass, ic.selector())?;
     match target.primitive() {
         26 => Some(false),
         27 => Some(true),
@@ -1317,7 +1318,7 @@ fn alloc_guard_census(irm: &IrMethod) -> (u64, u64, u64) {
                     move_src.insert(dst.0, src.0);
                 }
                 Ir::RefCmpBr { .. } => {}
-            _ => {}
+                _ => {}
             }
         }
     }
@@ -1581,12 +1582,9 @@ fn classify_double_send(vm: &VmState, method: MethodOop, ic_idx: u16) -> DoubleS
     // staleness `feedback::resolve_target` guards against — and unlike the
     // smi prims, which are compile_disabled forever, Double methods DO
     // compile, so the smi fuse never needed this).
-    let target = crate::compiler::feedback::resolve_method_ro(
-        vm,
-        vm.universe.double_klass,
-        ic.selector(),
-    )
-    .expect("classify_double_send: Double must understand an is_double_inlinable selector");
+    let target =
+        crate::compiler::feedback::resolve_method_ro(vm, vm.universe.double_klass, ic.selector())
+            .expect("classify_double_send: Double must understand an is_double_inlinable selector");
     match target.primitive() {
         100 => DoubleSendKind::Arith(FArithOp::Add),
         101 => DoubleSendKind::Arith(FArithOp::Sub),
@@ -1665,15 +1663,11 @@ enum GraftMode {
     /// root-level splice; the budgeted inliner's I2 passes the enclosing
     /// splice's own `InlineSite` so the graft's deopt scopes chain
     /// (depth ≥ 3: leaf-of-graft ← graft ← enclosing ← root).
-    Method {
-        parent: Option<Box<InlineSite>>,
-    },
+    Method { parent: Option<Box<InlineSite>> },
     // Constructed by B5 step 2 (block_is_spliceable_cfg + splice routing);
     // inert in step 1's byte-identical refactor.
     #[allow(dead_code)]
-    Block {
-        parent: Option<Box<InlineSite>>,
-    },
+    Block { parent: Option<Box<InlineSite>> },
 }
 
 /// threaded through every helper.
@@ -2104,28 +2098,26 @@ impl<'a> Translator<'a> {
         let u = &self.vm.universe;
         let (tk, fk) = (u.true_klass.oop().raw(), u.false_klass.oop().raw());
         let guard = ic.guard();
-        let boolean_only = if guard.raw() == u.nil_obj.raw()
-            || guard.raw() == tk
-            || guard.raw() == fk
-        {
-            true
-        } else if matches!(
-            crate::interpreter::ic::ic_state(holder, ic_idx),
-            crate::interpreter::ic::IcState::Poly(_)
-        ) {
-            match crate::oops::wrappers::ArrayOop::try_from(ic.target()) {
-                // Pairs region only — never `len()/2`: the array carries a
-                // count tail after the pairs (layout.rs IC_POLY_ARRAY_LEN)
-                // whose smis must not be mistaken for receiver klasses.
-                Some(pairs) => (0..crate::oops::layout::IC_POLY_MAX_PAIRS).all(|i| {
-                    let k = pairs.at(2 * i).raw();
-                    k == tk || k == fk || k == u.nil_obj.raw()
-                }),
-                None => false,
-            }
-        } else {
-            false
-        };
+        let boolean_only =
+            if guard.raw() == u.nil_obj.raw() || guard.raw() == tk || guard.raw() == fk {
+                true
+            } else if matches!(
+                crate::interpreter::ic::ic_state(holder, ic_idx),
+                crate::interpreter::ic::IcState::Poly(_)
+            ) {
+                match crate::oops::wrappers::ArrayOop::try_from(ic.target()) {
+                    // Pairs region only — never `len()/2`: the array carries a
+                    // count tail after the pairs (layout.rs IC_POLY_ARRAY_LEN)
+                    // whose smis must not be mistaken for receiver klasses.
+                    Some(pairs) => (0..crate::oops::layout::IC_POLY_MAX_PAIRS).all(|i| {
+                        let k = pairs.at(2 * i).raw();
+                        k == tk || k == fk || k == u.nil_obj.raw()
+                    }),
+                    None => false,
+                }
+            } else {
+                false
+            };
         if !boolean_only {
             if dbg {
                 eprintln!("[boolnot] DECLINE evidence guard={:x}", guard.raw());
@@ -2286,7 +2278,10 @@ impl<'a> Translator<'a> {
         };
         let ok = crate::compiler::driver::SMI_INLINE.contains(&target.primitive());
         if census && !ok {
-            eprintln!("smifuse decline ic={ic_idx}: prim {} not inlineable", target.primitive());
+            eprintln!(
+                "smifuse decline ic={ic_idx}: prim {} not inlineable",
+                target.primitive()
+            );
         }
         ok
     }
@@ -2405,8 +2400,7 @@ impl<'a> Translator<'a> {
     /// instance-side customization) no global class can match, so the scan
     /// doubles as the is-this-a-metaclass test.
     fn metaclass_sole_instance(&self, m: KlassOop) -> Option<KlassOop> {
-        let arr =
-            crate::oops::wrappers::ArrayOop::try_from(self.vm.universe.smalltalk)?;
+        let arr = crate::oops::wrappers::ArrayOop::try_from(self.vm.universe.smalltalk)?;
         let mut found: Option<KlassOop> = None;
         for i in 1..arr.len() {
             let Some(assoc) = crate::oops::wrappers::MemOop::try_from(arr.at(i)) else {
@@ -2418,9 +2412,7 @@ impl<'a> Translator<'a> {
             // `body_oop(1)` debug-asserts (heap.rs:202) and, in release, reads
             // out of bounds and can hand a garbage KlassOop to the caller's
             // inline-allocation decision.
-            if assoc.instance_size_words()
-                < crate::oops::layout::HEADER_WORDS + 2
-            {
+            if assoc.instance_size_words() < crate::oops::layout::HEADER_WORDS + 2 {
                 continue;
             }
             if let Some(c) = KlassOop::try_from(assoc.body_oop(1)) {
@@ -3058,9 +3050,13 @@ impl<'a> Translator<'a> {
                     // (see `alloc_site_klass_on`). Checked FIRST — an argc-0
                     // basicNew can't collide with the array/smi/double fuses.
                     if let Some(recv_v) = cstack.last().copied() {
-                        if let Some((klass, size_words, from_self)) =
-                            self.alloc_site_klass_on(callee, ic, recv_v, callee_self, callee_self_klass)
-                        {
+                        if let Some((klass, size_words, from_self)) = self.alloc_site_klass_on(
+                            callee,
+                            ic,
+                            recv_v,
+                            callee_self,
+                            callee_self_klass,
+                        ) {
                             // Alloc deopts by RE-EXECUTING the basicNew send
                             // interpreted (reexecute=true) inside the INLINED
                             // frame: record the body stack with the receiver
@@ -3213,14 +3209,19 @@ impl<'a> Translator<'a> {
                         let recv = cstack.pop().expect("class fuse: missing receiver");
                         let mut reexec = cstack.clone();
                         reexec.push(recv);
-                        let fail = self.fresh_inlined_trap_block(inner_bci, reexec, inline_proto.clone());
+                        let fail =
+                            self.fresh_inlined_trap_block(inner_bci, reexec, inline_proto.clone());
                         let expect = self.pool.intern(guard_k.oop().raw(), Some(RelocKind::Oop));
                         let is_smi = guard_k.oop().raw() == self.vm.universe.smi_klass.oop().raw();
                         code.push(Ir::GuardKlass {
                             obj: recv,
                             expect,
                             fail,
-                            kind: if is_smi { GuardShape::SmiTest } else { GuardShape::KlassTest },
+                            kind: if is_smi {
+                                GuardShape::SmiTest
+                            } else {
+                                GuardShape::KlassTest
+                            },
                         });
                         let dst = self.push_well_known(guard_k.oop().raw(), code);
                         cstack.push(dst);
@@ -3232,7 +3233,8 @@ impl<'a> Translator<'a> {
                         let recv = cstack.pop().expect("byteSize fuse: missing receiver");
                         let mut reexec = cstack.clone();
                         reexec.push(recv);
-                        let fail = self.fresh_inlined_trap_block(inner_bci, reexec, inline_proto.clone());
+                        let fail =
+                            self.fresh_inlined_trap_block(inner_bci, reexec, inline_proto.clone());
                         let guard_raw = InterpreterIc::at(callee, ic).guard().raw();
                         let expect = self.pool.intern(guard_raw, Some(RelocKind::Oop));
                         code.push(Ir::GuardKlass {
@@ -3266,7 +3268,8 @@ impl<'a> Translator<'a> {
                         if let Some(v) = val {
                             reexec.push(v);
                         }
-                        let fail = self.fresh_inlined_trap_block(inner_bci, reexec, inline_proto.clone());
+                        let fail =
+                            self.fresh_inlined_trap_block(inner_bci, reexec, inline_proto.clone());
                         let guard_raw = InterpreterIc::at(callee, ic).guard().raw();
                         let klass = self.pool.intern(guard_raw, Some(RelocKind::Oop));
                         let dst = self.fresh(true);
@@ -3302,7 +3305,8 @@ impl<'a> Translator<'a> {
                         let mut reexec = cstack.clone();
                         reexec.push(a_op);
                         reexec.push(count_op);
-                        let fail = self.fresh_inlined_trap_block(inner_bci, reexec, inline_proto.clone());
+                        let fail =
+                            self.fresh_inlined_trap_block(inner_bci, reexec, inline_proto.clone());
                         let dst = self.fresh(true);
                         code.push(Ir::SmiShift {
                             dst,
@@ -3500,40 +3504,40 @@ impl<'a> Translator<'a> {
                     ) {
                         cstack.push(res);
                     } else {
-                    // A real compiled send inside the inlined body. Its site is
-                    // the callee's own (klass, selector) speculation-independent
-                    // dispatch — a plain S11 compiled IC.
-                    let mut send_args = vec![inner_recv];
-                    send_args.extend_from_slice(&inner_args);
-                    let site = self.call_sites.len() as u16;
-                    self.call_sites.push(CallSiteInfo {
-                        selector: inner_sel,
-                        argc: inner_argc + 1,
-                        static_klass: None,
-                    self_klass: None,
-                    });
-                    self.site_feedback.push(inner_fb);
-                    let dst = self.fresh(true);
-                    // Call-return safepoint (reexecute=false): recorded stack is
-                    // the inlined body's operand stack BELOW the send (receiver+
-                    // args already popped); the materializer pushes the result.
-                    deopt.push((
-                        code.len() as u32,
-                        DeoptRaw {
-                            stack: cstack.clone(),
-                            bci: inner_bci,
-                            kind: SafepointKind::Call,
-                            reexecute: false,
-                            stack_closures: Vec::new(),
-                            inline: Some(inline_proto.clone()),
-                        },
-                    ));
-                    code.push(Ir::CallSend {
-                        dst,
-                        site,
-                        args: send_args,
-                    });
-                    cstack.push(dst);
+                        // A real compiled send inside the inlined body. Its site is
+                        // the callee's own (klass, selector) speculation-independent
+                        // dispatch — a plain S11 compiled IC.
+                        let mut send_args = vec![inner_recv];
+                        send_args.extend_from_slice(&inner_args);
+                        let site = self.call_sites.len() as u16;
+                        self.call_sites.push(CallSiteInfo {
+                            selector: inner_sel,
+                            argc: inner_argc + 1,
+                            static_klass: None,
+                            self_klass: None,
+                        });
+                        self.site_feedback.push(inner_fb);
+                        let dst = self.fresh(true);
+                        // Call-return safepoint (reexecute=false): recorded stack is
+                        // the inlined body's operand stack BELOW the send (receiver+
+                        // args already popped); the materializer pushes the result.
+                        deopt.push((
+                            code.len() as u32,
+                            DeoptRaw {
+                                stack: cstack.clone(),
+                                bci: inner_bci,
+                                kind: SafepointKind::Call,
+                                reexecute: false,
+                                stack_closures: Vec::new(),
+                                inline: Some(inline_proto.clone()),
+                            },
+                        ));
+                        code.push(Ir::CallSend {
+                            dst,
+                            site,
+                            args: send_args,
+                        });
+                        cstack.push(dst);
                     }
                 }
                 Instr::ReturnTos => {
@@ -4107,16 +4111,19 @@ impl<'a> Translator<'a> {
                         // array/smi/double fuses. A phantom receiver can't be
                         // a class constant, so the ph shadow only truncates.
                         if let Some(recv_v) = cstack.last().copied() {
-                            if let Some((klass, size_words, from_self)) =
-                                self.alloc_site_klass_on(callee, ic, recv_v, callee_self, callee_self_klass)
-                            {
+                            if let Some((klass, size_words, from_self)) = self.alloc_site_klass_on(
+                                callee,
+                                ic,
+                                recv_v,
+                                callee_self,
+                                callee_self_klass,
+                            ) {
                                 let deopt_stack = cstack.clone();
                                 // Z4a twin: identity-guard a customized-self
                                 // receiver (see the root arm).
                                 if from_self {
-                                    let g_lit = self
-                                        .pool
-                                        .intern(klass.oop().raw(), Some(RelocKind::Oop));
+                                    let g_lit =
+                                        self.pool.intern(klass.oop().raw(), Some(RelocKind::Oop));
                                     let fail = self.fresh_inlined_trap_block(
                                         inner_bci,
                                         deopt_stack.clone(),
@@ -4249,9 +4256,7 @@ impl<'a> Translator<'a> {
                             .filter(|_| !cstack_ph.iter().rev().take(2).any(|&ph| ph))
                             .is_some()
                         {
-                            let neq = self
-                                .ref_eq_kind(callee, ic)
-                                .expect("guard just matched");
+                            let neq = self.ref_eq_kind(callee, ic).expect("guard just matched");
                             cstack_ph.truncate(cstack.len().saturating_sub(2));
                             let b_op = cstack.pop().expect("ref-eq fuse: missing rhs");
                             let a_op = cstack.pop().expect("ref-eq fuse: missing lhs");
@@ -4294,14 +4299,24 @@ impl<'a> Translator<'a> {
                             let recv = cstack.pop().expect("class fuse: missing receiver");
                             let mut reexec = cstack.clone();
                             reexec.push(recv);
-                            let fail = self.fresh_inlined_trap_block(inner_bci, reexec, inline_proto.clone());
-                            let expect = self.pool.intern(guard_k.oop().raw(), Some(RelocKind::Oop));
-                            let is_smi = guard_k.oop().raw() == self.vm.universe.smi_klass.oop().raw();
+                            let fail = self.fresh_inlined_trap_block(
+                                inner_bci,
+                                reexec,
+                                inline_proto.clone(),
+                            );
+                            let expect =
+                                self.pool.intern(guard_k.oop().raw(), Some(RelocKind::Oop));
+                            let is_smi =
+                                guard_k.oop().raw() == self.vm.universe.smi_klass.oop().raw();
                             bcode.push(Ir::GuardKlass {
                                 obj: recv,
                                 expect,
                                 fail,
-                                kind: if is_smi { GuardShape::SmiTest } else { GuardShape::KlassTest },
+                                kind: if is_smi {
+                                    GuardShape::SmiTest
+                                } else {
+                                    GuardShape::KlassTest
+                                },
                             });
                             let dst = self.push_well_known(guard_k.oop().raw(), &mut bcode);
                             cstack.push(dst);
@@ -4315,7 +4330,11 @@ impl<'a> Translator<'a> {
                             let recv = cstack.pop().expect("byteSize fuse: missing receiver");
                             let mut reexec = cstack.clone();
                             reexec.push(recv);
-                            let fail = self.fresh_inlined_trap_block(inner_bci, reexec, inline_proto.clone());
+                            let fail = self.fresh_inlined_trap_block(
+                                inner_bci,
+                                reexec,
+                                inline_proto.clone(),
+                            );
                             let guard_raw = InterpreterIc::at(callee, ic).guard().raw();
                             let expect = self.pool.intern(guard_raw, Some(RelocKind::Oop));
                             bcode.push(Ir::GuardKlass {
@@ -4335,9 +4354,15 @@ impl<'a> Translator<'a> {
                             bci = next;
                             continue;
                         }
-                        if let Some((is_put, len_off, tail_off)) = byte_at_op_on(self.vm, callee, ic) {
+                        if let Some((is_put, len_off, tail_off)) =
+                            byte_at_op_on(self.vm, callee, ic)
+                        {
                             // Z2 twin: in-body byte element access (see the root arm).
-                            cstack_ph.truncate(cstack.len().saturating_sub(if is_put { 3 } else { 2 }));
+                            cstack_ph.truncate(cstack.len().saturating_sub(if is_put {
+                                3
+                            } else {
+                                2
+                            }));
                             let val = if is_put {
                                 Some(cstack.pop().expect("byte fuse: missing value"))
                             } else {
@@ -4351,7 +4376,11 @@ impl<'a> Translator<'a> {
                             if let Some(v) = val {
                                 reexec.push(v);
                             }
-                            let fail = self.fresh_inlined_trap_block(inner_bci, reexec, inline_proto.clone());
+                            let fail = self.fresh_inlined_trap_block(
+                                inner_bci,
+                                reexec,
+                                inline_proto.clone(),
+                            );
                             let guard_raw = InterpreterIc::at(callee, ic).guard().raw();
                             let klass = self.pool.intern(guard_raw, Some(RelocKind::Oop));
                             let dst = self.fresh(true);
@@ -4389,7 +4418,11 @@ impl<'a> Translator<'a> {
                             let mut reexec = cstack.clone();
                             reexec.push(a_op);
                             reexec.push(count_op);
-                            let fail = self.fresh_inlined_trap_block(inner_bci, reexec, inline_proto.clone());
+                            let fail = self.fresh_inlined_trap_block(
+                                inner_bci,
+                                reexec,
+                                inline_proto.clone(),
+                            );
                             let dst = self.fresh(true);
                             bcode.push(Ir::SmiShift {
                                 dst,
@@ -4403,7 +4436,11 @@ impl<'a> Translator<'a> {
                             continue;
                         }
                         if is_smi_inlinable_on(self.vm, callee, ic)
-                            && !smi_fuse_arg_is_pooled(cstack.as_slice(), bcode.as_slice(), &self.pool)
+                            && !smi_fuse_arg_is_pooled(
+                                cstack.as_slice(),
+                                bcode.as_slice(),
+                                &self.pool,
+                            )
                         {
                             debug_assert_eq!(inner_argc, 1, "SMI_INLINE ops are all binary");
                             cstack_ph.truncate(cstack.len().saturating_sub(2));
@@ -4604,8 +4641,7 @@ impl<'a> Translator<'a> {
                             } = &inner_fb
                             {
                                 let m = *im;
-                                let budget =
-                                    crate::compiler::inline::budget_for_level(self.level);
+                                let budget = crate::compiler::inline::budget_for_level(self.level);
                                 let mut depth = 2u32; // enclosing + this graft
                                 let mut pp = inline_proto.parent.as_deref();
                                 while let Some(q) = pp {
@@ -4683,7 +4719,7 @@ impl<'a> Translator<'a> {
                             selector: inner_sel,
                             argc: inner_argc + 1,
                             static_klass: None,
-                    self_klass: None,
+                            self_klass: None,
                         });
                         self.site_feedback.push(inner_fb);
                         let dst = self.fresh(true);
@@ -5336,7 +5372,7 @@ impl<'a> Translator<'a> {
                     selector,
                     argc: real_argc + 1,
                     static_klass: Some(super_klass),
-                self_klass: None,
+                    self_klass: None,
                 });
                 // S14 step 2: annotate the site with its observed feedback (the
                 // inliner prefers the STATIC super_klass above, but the field is
@@ -5372,7 +5408,8 @@ impl<'a> Translator<'a> {
                 stack.push(dst);
             }
             Instr::Send { ic, .. }
-                if self.is_smi_inlinable(ic) && !smi_fuse_arg_is_pooled(stack, code, &self.pool) =>
+                if self.is_smi_inlinable(ic)
+                    && !smi_fuse_arg_is_pooled(stack, code, &self.pool) =>
             {
                 // S13 step 7b: a smi-overflow deopt is `reexecute=true` at the
                 // SEND's bci — the interpreter re-executes the WHOLE send, so
@@ -5949,7 +5986,9 @@ impl<'a> Translator<'a> {
                 // ever consults `const_class`, so a non-zero-argc send whose
                 // top-of-stack is an arg simply returns `None` here.
                 if let Some(receiver) = stack.last().copied() {
-                    if let Some((klass, size_words, from_self)) = self.alloc_site_klass(ic, receiver) {
+                    if let Some((klass, size_words, from_self)) =
+                        self.alloc_site_klass(ic, receiver)
+                    {
                         // S13 step 3b: an `Alloc` deopts by RE-EXECUTING the
                         // `basicNew` send in the interpreter (reexecute=true),
                         // so its recorded stack must still carry the receiver
@@ -6237,11 +6276,7 @@ impl<'a> Translator<'a> {
                 // per-call ceiling (never lowers; absent = base), and is
                 // published as the ceiling nested grafts under this site
                 // may max against.
-                self.allowance_ceiling = self
-                    .site_allowance
-                    .get(ic as usize)
-                    .copied()
-                    .unwrap_or(0);
+                self.allowance_ceiling = self.site_allowance.get(ic as usize).copied().unwrap_or(0);
                 if self.allowance_ceiling > budget.per_call_cost {
                     budget.per_call_cost = self.allowance_ceiling;
                 }
@@ -6343,7 +6378,7 @@ impl<'a> Translator<'a> {
                             selector,
                             argc: real_argc + 1,
                             static_klass: None,
-                    self_klass: None,
+                            self_klass: None,
                         });
                         self.site_feedback.push(feedback.clone());
                         self.finish_block(IrBlock {
@@ -6413,7 +6448,6 @@ impl<'a> Translator<'a> {
                     // generic CallSend tail below (nothing was emitted).
                 }
 
-
                 // dart124 items 2+3 slice 2 (ported from WINVM b45d2d6):
                 // SAME-TARGET poly. The membership guard (`GuardKlassIn`,
                 // hottest klass first) covers every observed klass; the ONE
@@ -6422,10 +6456,8 @@ impl<'a> Translator<'a> {
                 // identical rejoining real-send slow block. Deps: one
                 // (klass, selector) pair PER observed klass — an override
                 // arriving under ANY of them must invalidate.
-                if let crate::compiler::inline::InlineDecision::SameTargetPoly {
-                    klasses,
-                    callee,
-                } = &feedback_inline
+                if let crate::compiler::inline::InlineDecision::SameTargetPoly { klasses, callee } =
+                    &feedback_inline
                 {
                     let callee = *callee;
                     let klasses = klasses.clone();
@@ -6473,9 +6505,7 @@ impl<'a> Translator<'a> {
                         let selector = ic_view.selector();
                         let pre_pop_stack = stack.clone();
                         let mut inline_args: Vec<VReg> = (0..real_argc)
-                            .map(|_| {
-                                stack.pop().expect("same-target send: missing arg operand")
-                            })
+                            .map(|_| stack.pop().expect("same-target send: missing arg operand"))
                             .collect();
                         inline_args.reverse();
                         let receiver = stack
@@ -6493,7 +6523,7 @@ impl<'a> Translator<'a> {
                             selector,
                             argc: real_argc + 1,
                             static_klass: None,
-                    self_klass: None,
+                            self_klass: None,
                         });
                         self.site_feedback.push(feedback.clone());
                         self.finish_block(IrBlock {
@@ -6590,7 +6620,7 @@ impl<'a> Translator<'a> {
                             selector,
                             argc: real_argc + 1,
                             static_klass: None,
-                    self_klass: None,
+                            self_klass: None,
                         });
                         self.site_feedback.push(feedback.clone());
                         self.finish_block(IrBlock {
@@ -6647,10 +6677,7 @@ impl<'a> Translator<'a> {
                         self.finish_block(IrBlock {
                             id: cfg_cont,
                             bci,
-                            code: vec![
-                                Ir::Move { dst, src: result },
-                                Ir::Jump { target: my_cont },
-                            ],
+                            code: vec![Ir::Move { dst, src: result }, Ir::Jump { target: my_cont }],
                             entry_stack: Vec::new(),
                             deopt_sites: Vec::new(),
                         });
@@ -6699,7 +6726,7 @@ impl<'a> Translator<'a> {
                         selector,
                         argc: 2,
                         static_klass: None,
-                    self_klass: None,
+                        self_klass: None,
                     });
                     self.site_feedback.push(feedback.clone());
                     self.finish_block(IrBlock {
@@ -6733,10 +6760,7 @@ impl<'a> Translator<'a> {
                     if self.vm.options.trace.is_enabled("polycmp") {
                         eprintln!(
                             "[polycmp] {} legs={}",
-                            crate::memory::print::print_oop(
-                                &self.vm.universe,
-                                selector.oop()
-                            ),
+                            crate::memory::print::print_oop(&self.vm.universe, selector.oop()),
                             legs.len(),
                         );
                     }
@@ -6748,10 +6772,9 @@ impl<'a> Translator<'a> {
                     // wrong-receiver case.)
                     let side_ids: Vec<BlockId> =
                         legs[1..].iter().map(|_| self.fresh_block_id()).collect();
-                    let smi_lit = self.pool.intern(
-                        self.vm.universe.smi_klass.oop().raw(),
-                        Some(RelocKind::Oop),
-                    );
+                    let smi_lit = self
+                        .pool
+                        .intern(self.vm.universe.smi_klass.oop().raw(), Some(RelocKind::Oop));
                     for (i, leg) in legs.iter().enumerate() {
                         // legs[0] emits into the current block (falls through
                         // to the continuation via the translate loop's own
@@ -6779,8 +6802,7 @@ impl<'a> Translator<'a> {
                                 self.record_inline_dep(self.vm.universe.smi_klass, selector);
                             }
                             PolyCmpLeg::Ident(k) => {
-                                let k_lit =
-                                    self.pool.intern(k.oop().raw(), Some(RelocKind::Oop));
+                                let k_lit = self.pool.intern(k.oop().raw(), Some(RelocKind::Oop));
                                 leg_code.push(Ir::GuardKlass {
                                     obj: probe_op,
                                     expect: k_lit,
@@ -7898,14 +7920,19 @@ impl<'a> Translator<'a> {
                         let recv = bstack.pop().expect("class fuse: missing receiver");
                         let mut reexec = bstack.clone();
                         reexec.push(recv);
-                        let fail = self.fresh_inlined_trap_block(inner_bci, reexec, inline_proto.clone());
+                        let fail =
+                            self.fresh_inlined_trap_block(inner_bci, reexec, inline_proto.clone());
                         let expect = self.pool.intern(guard_k.oop().raw(), Some(RelocKind::Oop));
                         let is_smi = guard_k.oop().raw() == self.vm.universe.smi_klass.oop().raw();
                         code.push(Ir::GuardKlass {
                             obj: recv,
                             expect,
                             fail,
-                            kind: if is_smi { GuardShape::SmiTest } else { GuardShape::KlassTest },
+                            kind: if is_smi {
+                                GuardShape::SmiTest
+                            } else {
+                                GuardShape::KlassTest
+                            },
                         });
                         let dst = self.push_well_known(guard_k.oop().raw(), code);
                         bstack.push(dst);
@@ -7917,7 +7944,8 @@ impl<'a> Translator<'a> {
                         let recv = bstack.pop().expect("byteSize fuse: missing receiver");
                         let mut reexec = bstack.clone();
                         reexec.push(recv);
-                        let fail = self.fresh_inlined_trap_block(inner_bci, reexec, inline_proto.clone());
+                        let fail =
+                            self.fresh_inlined_trap_block(inner_bci, reexec, inline_proto.clone());
                         let guard_raw = InterpreterIc::at(block, inner_ic_idx).guard().raw();
                         let expect = self.pool.intern(guard_raw, Some(RelocKind::Oop));
                         code.push(Ir::GuardKlass {
@@ -7936,7 +7964,9 @@ impl<'a> Translator<'a> {
                         bci = next;
                         continue;
                     }
-                    if let Some((is_put, len_off, tail_off)) = byte_at_op_on(self.vm, block, inner_ic_idx) {
+                    if let Some((is_put, len_off, tail_off)) =
+                        byte_at_op_on(self.vm, block, inner_ic_idx)
+                    {
                         // Z2 twin: in-body byte element access (see the root arm).
                         let val = if is_put {
                             Some(bstack.pop().expect("byte fuse: missing value"))
@@ -7951,7 +7981,8 @@ impl<'a> Translator<'a> {
                         if let Some(v) = val {
                             reexec.push(v);
                         }
-                        let fail = self.fresh_inlined_trap_block(inner_bci, reexec, inline_proto.clone());
+                        let fail =
+                            self.fresh_inlined_trap_block(inner_bci, reexec, inline_proto.clone());
                         let guard_raw = InterpreterIc::at(block, inner_ic_idx).guard().raw();
                         let klass = self.pool.intern(guard_raw, Some(RelocKind::Oop));
                         let dst = self.fresh(true);
@@ -7987,7 +8018,8 @@ impl<'a> Translator<'a> {
                         let mut reexec = bstack.clone();
                         reexec.push(a_op);
                         reexec.push(count_op);
-                        let fail = self.fresh_inlined_trap_block(inner_bci, reexec, inline_proto.clone());
+                        let fail =
+                            self.fresh_inlined_trap_block(inner_bci, reexec, inline_proto.clone());
                         let dst = self.fresh(true);
                         code.push(Ir::SmiShift {
                             dst,
@@ -8197,7 +8229,7 @@ impl<'a> Translator<'a> {
                         selector: inner_sel,
                         argc: inner_argc + 1,
                         static_klass: None,
-                    self_klass: None,
+                        self_klass: None,
                     });
                     self.site_feedback.push(inner_fb);
                     let dst = self.fresh(true);
@@ -8569,7 +8601,6 @@ fn map_uses(op: &mut Ir, mut f: impl FnMut(VReg) -> VReg) {
     }
 }
 
-
 /// Fuse `RefCmpVal` + `BoolBr` into `RefCmpBr` (docs/regalloc_findings.md).
 ///
 /// Measured motivation: in a richards run, 23 of 47 `BoolBr`s (49%) are
@@ -8628,8 +8659,15 @@ pub(crate) fn fuse_ref_cmp_br(m: &mut IrMethod) {
     let mut plan: Vec<(usize, usize, Ir)> = Vec::new();
     for (bi, b) in m.blocks.iter().enumerate() {
         for i in 0..b.code.len().saturating_sub(1) {
-            let (Ir::RefCmpVal { dst, a, b: rb, neq }, Ir::BoolBr { val, if_true, if_false, not_bool }) =
-                (&b.code[i], &b.code[i + 1])
+            let (
+                Ir::RefCmpVal { dst, a, b: rb, neq },
+                Ir::BoolBr {
+                    val,
+                    if_true,
+                    if_false,
+                    not_bool,
+                },
+            ) = (&b.code[i], &b.code[i + 1])
             else {
                 continue;
             };
@@ -8659,7 +8697,6 @@ pub(crate) fn fuse_ref_cmp_br(m: &mut IrMethod) {
         code.remove(i + 1);
     }
 }
-
 
 pub(crate) fn copy_propagate(m: &mut IrMethod) {
     let n = m.vregs.len();
@@ -8929,7 +8966,9 @@ pub(crate) fn copy_propagate(m: &mut IrMethod) {
 fn splice_promote_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        std::env::var("MACVM_SPLICE_PROMOTE").map(|v| v == "1").unwrap_or(false)
+        std::env::var("MACVM_SPLICE_PROMOTE")
+            .map(|v| v == "1")
+            .unwrap_or(false)
     })
 }
 
@@ -8939,7 +8978,11 @@ fn splice_promote_enabled() -> bool {
 /// byte-identical. Read once (env-cost lesson).
 fn deoptlive_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("MACVM_DEOPTLIVE").map(|v| v == "1").unwrap_or(false))
+    *ON.get_or_init(|| {
+        std::env::var("MACVM_DEOPTLIVE")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+    })
 }
 
 /// Float fast-path rule 4 (`docs/float_fastpath_design.md` B5): FLOAT-TEMP
@@ -9419,8 +9462,8 @@ fn promote_float_temps_spliced(m: &mut IrMethod, osr_bci: Option<u16>) {
     // ── Qualification. ──────────────────────────────────────────────────
     // A chased def's rewrite, planned at its exact (block index, op index).
     enum DefRw {
-        Fp(VReg, VReg),   // Move { dst, fp_src }
-        Bits(VReg, u64),  // FConst { dst, bits }
+        Fp(VReg, VReg),  // Move { dst, fp_src }
+        Bits(VReg, u64), // FConst { dst, bits }
     }
     struct Promo {
         tree: Vec<u32>,
@@ -9429,9 +9472,9 @@ fn promote_float_temps_spliced(m: &mut IrMethod, osr_bci: Option<u16>) {
     }
     let mut promos: Vec<Promo> = Vec::new();
     let mut claimed = vec![false; n]; // each vreg joins at most one tree
-    // Debugger (MACVM_DBG_IR's promotion companion): MACVM_DBG_PROMOTE=<N>
-    // prints which gate rejects vreg N in every compile that considers it.
-    // Debug builds only, stderr.
+                                      // Debugger (MACVM_DBG_IR's promotion companion): MACVM_DBG_PROMOTE=<N>
+                                      // prints which gate rejects vreg N in every compile that considers it.
+                                      // Debug builds only, stderr.
     #[cfg(debug_assertions)]
     let dbg_promote: Option<u32> = std::env::var("MACVM_DBG_PROMOTE")
         .ok()
@@ -9529,9 +9572,7 @@ fn promote_float_temps_spliced(m: &mut IrMethod, osr_bci: Option<u16>) {
         // iteration; the rewrite's final pass).
         for &node in &tree {
             let ni = node as usize;
-            if op_uses[ni]
-                != funbox_uses[ni] + move_copy_of[ni].len() as u32 + ret_uses[ni]
-            {
+            if op_uses[ni] != funbox_uses[ni] + move_copy_of[ni].len() as u32 + ret_uses[ni] {
                 dbg_reject!(
                     t,
                     "node v{node} use mismatch: op_uses={} funbox={} moves={} rets={}",
@@ -9571,7 +9612,10 @@ fn promote_float_temps_spliced(m: &mut IrMethod, osr_bci: Option<u16>) {
                     });
                     if uses_u {
                         if redefined {
-                            dbg_reject!(t, "FUnbox dst v{u}: use stranded past a redefinition of v{node}");
+                            dbg_reject!(
+                                t,
+                                "FUnbox dst v{u}: use stranded past a redefinition of v{node}"
+                            );
                             continue 'cand; // stranded past a redefinition
                         }
                         in_window += 1;
@@ -9587,7 +9631,11 @@ fn promote_float_temps_spliced(m: &mut IrMethod, osr_bci: Option<u16>) {
                     }
                 }
                 if in_window != op_uses[u as usize] {
-                    dbg_reject!(t, "FUnbox dst v{u}: cross-block use ({in_window} of {})", op_uses[u as usize]);
+                    dbg_reject!(
+                        t,
+                        "FUnbox dst v{u}: cross-block use ({in_window} of {})",
+                        op_uses[u as usize]
+                    );
                     continue 'cand; // cross-block use of the unboxed value
                 }
             }
@@ -9668,9 +9716,8 @@ fn promote_float_temps_spliced(m: &mut IrMethod, osr_bci: Option<u16>) {
         loop {
             let mut changed = false;
             for bi in 0..nb {
-                let inn = bi == 0
-                    || Some(bi) == osr_header
-                    || preds[bi].iter().any(|&p| undef_out[p]);
+                let inn =
+                    bi == 0 || Some(bi) == osr_header || preds[bi].iter().any(|&p| undef_out[p]);
                 let out = if first_def[bi].is_some() { false } else { inn };
                 if inn != undef_in[bi] || out != undef_out[bi] {
                     undef_in[bi] = inn;
@@ -9690,7 +9737,11 @@ fn promote_float_temps_spliced(m: &mut IrMethod, osr_bci: Option<u16>) {
                 // Observed while possibly undefined — unless a real def in
                 // this block strictly precedes the observation.
                 if first_def[bi].is_none_or(|d| o <= d) {
-                    dbg_reject!(t, "observed-while-undef in block index {bi} (obs at {o}, def {:?})", first_def[bi]);
+                    dbg_reject!(
+                        t,
+                        "observed-while-undef in block index {bi} (obs at {o}, def {:?})",
+                        first_def[bi]
+                    );
                     continue 'cand;
                 }
             }
@@ -9866,7 +9917,10 @@ fn promote_float_temps_spliced(m: &mut IrMethod, osr_bci: Option<u16>) {
         });
         let b = &mut m.blocks[bi];
         let ret_ix = b.code.len() - 1;
-        b.code[ret_ix] = Ir::FBox { dst: boxed, src: val };
+        b.code[ret_ix] = Ir::FBox {
+            dst: boxed,
+            src: val,
+        };
         b.code.push(Ir::Ret { val: boxed });
     }
 }
@@ -9974,17 +10028,23 @@ pub(crate) fn range_reduce(
                 }
                 Ir::Move { src, .. } => Some(DefK::MoveFrom(src.0)),
                 Ir::SmiArith {
-                    op: SmiOp::Add, a, b, ..
+                    op: SmiOp::Add,
+                    a,
+                    b,
+                    ..
                 }
                 | Ir::SmiArithNoOv {
-                    op: SmiOp::Add, a, b, ..
+                    op: SmiOp::Add,
+                    a,
+                    b,
+                    ..
                 } => Some(DefK::AddOf(a.0, b.0)),
                 Ir::CallSend { site, args, .. }
                     if args.len() == 2
                         && guarded_meta.contains(&args[0].0)
-                        && m.call_sites
-                            .get(*site as usize)
-                            .is_some_and(|cs| matches!(cs.selector.as_string().as_str(), "new:" | "basicNew:")) =>
+                        && m.call_sites.get(*site as usize).is_some_and(|cs| {
+                            matches!(cs.selector.as_string().as_str(), "new:" | "basicNew:")
+                        }) =>
                 {
                     Some(DefK::NewArr {
                         size: args[1].0,
@@ -10170,16 +10230,13 @@ pub(crate) fn range_reduce(
             }
         }
         let redefines = |blk_id: u32, v: u32| -> bool {
-            m.blocks
-                .iter()
-                .find(|b| b.id.0 == blk_id)
-                .is_some_and(|b| {
-                    b.code.iter().any(|op| {
-                        let mut d = false;
-                        op.defs(|dv| d |= dv.0 == v);
-                        d
-                    })
+            m.blocks.iter().find(|b| b.id.0 == blk_id).is_some_and(|b| {
+                b.code.iter().any(|op| {
+                    let mut d = false;
+                    op.defs(|dv| d |= dv.0 == v);
+                    d
                 })
+            })
         };
         loop {
             let mut grew = false;
@@ -10782,7 +10839,10 @@ pub(crate) fn reduce_float_boxes(m: &mut IrMethod, osr_bci: Option<u16>) {
                 targets.sort_unstable();
                 targets.dedup();
                 for t in targets {
-                    insertions[t].push(Ir::FBox { dst: *dst, src: *src });
+                    insertions[t].push(Ir::FBox {
+                        dst: *dst,
+                        src: *src,
+                    });
                 }
             }
         }
@@ -10914,10 +10974,7 @@ fn rank_site_allowances(vm: &VmState, method: MethodOop, cfg: &Cfg) -> Vec<u32> 
         let (instr, next) = crate::bytecode::opcode::decode_at(method, bci);
         if let crate::bytecode::opcode::Instr::Send { ic, super_ } = instr {
             max_ic = max_ic.max(ic as usize + 1);
-            let depth = ranges
-                .iter()
-                .filter(|&&(s, e)| s <= bci && bci < e)
-                .count();
+            let depth = ranges.iter().filter(|&&(s, e)| s <= bci && bci < e).count();
             if !super_ && depth > 0 {
                 if let crate::compiler::feedback::SiteFeedback::Mono { method: m, .. } =
                     crate::compiler::feedback::read_send_site(vm, method, ic, None)
@@ -11003,7 +11060,10 @@ pub fn convert(
         method.has_ctx() && !method.is_block() && escape.as_ref().is_some_and(|e| !e.all_elidable);
 
     let self_vreg = VReg(0);
-    let mut vregs = vec![VRegInfo { is_oop: true, is_fp: false }];
+    let mut vregs = vec![VRegInfo {
+        is_oop: true,
+        is_fp: false,
+    }];
     // `temp_vregs[i]` is the unified arg/temp slot `Frame::temp_index` also
     // uses (SPEC §5.1): `0..argc` are args, `argc..argc+ntemps` are the
     // method's own local temps — `method.ntemps()` alone is only the
@@ -11012,7 +11072,10 @@ pub fn convert(
     // `argc + ntemps` total entries, not `ntemps`.
     let temp_vregs: Vec<VReg> = (0..method.argc() + method.ntemps())
         .map(|i| {
-            vregs.push(VRegInfo { is_oop: true, is_fp: false });
+            vregs.push(VRegInfo {
+                is_oop: true,
+                is_fp: false,
+            });
             VReg((i + 1) as u32)
         })
         .collect();
@@ -11034,7 +11097,10 @@ pub fn convert(
         (0..method.nctx())
             .map(|_| {
                 let n = vregs.len() as u32;
-                vregs.push(VRegInfo { is_oop: true, is_fp: false });
+                vregs.push(VRegInfo {
+                    is_oop: true,
+                    is_fp: false,
+                });
                 VReg(n)
             })
             .collect()
@@ -11045,14 +11111,20 @@ pub fn convert(
     // and the home Context are prologue-synthesized LoadFields off it.
     let block_closure_vreg: Option<VReg> = if method.is_block() {
         let n = vregs.len() as u32;
-        vregs.push(VRegInfo { is_oop: true, is_fp: false });
+        vregs.push(VRegInfo {
+            is_oop: true,
+            is_fp: false,
+        });
         Some(VReg(n))
     } else {
         None
     };
     let block_ctx_vreg: Option<VReg> = if method.is_block() && method.captures_ctx() {
         let n = vregs.len() as u32;
-        vregs.push(VRegInfo { is_oop: true, is_fp: false });
+        vregs.push(VRegInfo {
+            is_oop: true,
+            is_fp: false,
+        });
         Some(VReg(n))
     } else {
         None
@@ -11063,7 +11135,10 @@ pub fn convert(
     // per-slot promotion) — mutually exclusive per method.
     let method_ctx_vreg: Option<VReg> = if materialize_ctx {
         let n = vregs.len() as u32;
-        vregs.push(VRegInfo { is_oop: true, is_fp: false });
+        vregs.push(VRegInfo {
+            is_oop: true,
+            is_fp: false,
+        });
         Some(VReg(n))
     } else {
         None
@@ -11195,12 +11270,14 @@ pub fn convert(
         .intern(vm.universe.double_klass.oop().raw(), Some(RelocKind::Oop));
     // SIMD: the Float64x2 / Float32x4 klasses, for VecArith's guards + box
     // header (docs/SIMD.md).
-    let float64x2_klass_lit = t
-        .pool
-        .intern(vm.universe.float64x2_klass.oop().raw(), Some(RelocKind::Oop));
-    let float32x4_klass_lit = t
-        .pool
-        .intern(vm.universe.float32x4_klass.oop().raw(), Some(RelocKind::Oop));
+    let float64x2_klass_lit = t.pool.intern(
+        vm.universe.float64x2_klass.oop().raw(),
+        Some(RelocKind::Oop),
+    );
+    let float32x4_klass_lit = t.pool.intern(
+        vm.universe.float32x4_klass.oop().raw(),
+        Some(RelocKind::Oop),
+    );
     let int32x4_klass_lit = t
         .pool
         .intern(vm.universe.int32x4_klass.oop().raw(), Some(RelocKind::Oop));
@@ -11651,7 +11728,12 @@ pub fn convert(
                         // `deopt.bci` is the comparison SEND's own bci (NOT
                         // `cfg_block.bci_start`, which is the block's first
                         // instruction) — the reexecute resume point.
-                        PendingCmp::Smi { op, a, b: b_, deopt } => {
+                        PendingCmp::Smi {
+                            op,
+                            a,
+                            b: b_,
+                            deopt,
+                        } => {
                             let fail_id = t.fail_and_branch(deopt.bci, deopt.stack);
                             code.push(Ir::SmiCmpBr {
                                 op,
@@ -11787,8 +11869,8 @@ pub fn convert(
     // proves a `new:` receiver IS the Array class, whose postcondition
     // (fresh Array of exactly the argument's size) becomes compiler
     // knowledge, dep-protected against redefinition.
-    let array_meta = crate::oops::wrappers::MemOop::try_from(vm.universe.array_klass.oop())
-        .map(|mo| mo.klass());
+    let array_meta =
+        crate::oops::wrappers::MemOop::try_from(vm.universe.array_klass.oop()).map(|mo| mo.klass());
     let (rr_ovf, rr_bounds) = range_reduce(&mut irm, array_meta);
     if (rr_ovf > 0 || rr_bounds > 0) && std::env::var_os("MACVM_RANGE_COUNT").is_some() {
         eprintln!(
@@ -11979,7 +12061,9 @@ fn root_trap_live_slots(
             if out_map.contains_key(&raw.bci) {
                 continue; // one live set per bci
             }
-            let Some(bi) = block_of(raw.bci) else { continue };
+            let Some(bi) = block_of(raw.bci) else {
+                continue;
+            };
             let mut liveset = vec![false; n_slots];
             for s in succs(bi) {
                 for t in 0..n_slots {
@@ -12563,12 +12647,10 @@ mod tests {
         // guard-fail trap block DURING the send's own translation, so the
         // straight-line block is not necessarily first.
         assert!(
-            ir.blocks
+            ir.blocks.iter().any(|blk| blk
+                .code
                 .iter()
-                .any(|blk| blk
-                    .code
-                    .iter()
-                    .any(|op| matches!(op, Ir::FCmpBr { op: CmpOp::Lt, .. }))),
+                .any(|op| matches!(op, Ir::FCmpBr { op: CmpOp::Lt, .. }))),
             "must fuse into a single FCmpBr"
         );
         assert!(

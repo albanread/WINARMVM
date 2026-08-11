@@ -408,7 +408,12 @@ fn build_action_delegate() -> Id {
     objc::add_method(cls, sel("selectTheme:"), act_theme as *const _, "v@:@");
     #[cfg(feature = "gamepane")]
     {
-        objc::add_method(cls, sel("demoBreakout:"), act_demo_breakout as *const _, "v@:@");
+        objc::add_method(
+            cls,
+            sel("demoBreakout:"),
+            act_demo_breakout as *const _,
+            "v@:@",
+        );
         objc::add_method(
             cls,
             sel("demoGalaxigans:"),
@@ -428,7 +433,12 @@ fn build_action_delegate() -> Id {
             act_demo_parallel_mandel as *const _,
             "v@:@",
         );
-        objc::add_method(cls, sel("demoCocoaPad:"), act_demo_cocoapad as *const _, "v@:@");
+        objc::add_method(
+            cls,
+            sel("demoCocoaPad:"),
+            act_demo_cocoapad as *const _,
+            "v@:@",
+        );
     }
     objc::register_class(cls);
     objc::alloc_init("MacvmMenuDelegate")
@@ -566,7 +576,11 @@ pub fn build_menu_bar() {
                 "demoParallelMandel:",
                 "",
             ),
-            targeted("CocoaPad — a native window from Smalltalk", "demoCocoaPad:", ""),
+            targeted(
+                "CocoaPad — a native window from Smalltalk",
+                "demoCocoaPad:",
+                "",
+            ),
         ],
     );
 
@@ -764,7 +778,12 @@ pub fn start_metrics_timer() {
     let target = METRICS_TIMER_TARGET
         .get_or_init(|| {
             let cls = objc::allocate_class(objc::get_class("NSObject"), "MacvmMetricsTimer");
-            objc::add_method(cls, sel("metricsTick:"), on_metrics_tick as *const _, "v@:@");
+            objc::add_method(
+                cls,
+                sel("metricsTick:"),
+                on_metrics_tick as *const _,
+                "v@:@",
+            );
             objc::register_class(cls);
             MainThreadPtr(objc::alloc_init("MacvmMetricsTimer"))
         })
@@ -786,7 +805,11 @@ pub fn run() {
     // Quit when the (only) window closes, so a `cargo run` test session exits
     // cleanly instead of lingering window-less — same pattern as MacModula2's
     // demo lifecycle.
-    objc::send1_id(app, sel("setDelegate:"), build_quit_on_last_window_delegate());
+    objc::send1_id(
+        app,
+        sel("setDelegate:"),
+        build_quit_on_last_window_delegate(),
+    );
     objc::send1_bool(app, sel("activateIgnoringOtherApps:"), true);
     objc::send0(app, sel("run"));
 }

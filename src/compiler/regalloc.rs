@@ -458,16 +458,15 @@ pub fn compute_intervals(
                 // `resolve_frame_loc` and re-execution never reads them. Any
                 // other kind (LoopPoll, an inlined-body trap), or the flag
                 // off (`deopt_live_slots == None`), keeps membership.
-                let reduced = if matches!(raw.kind, SafepointKind::UncommonTrap)
-                    && raw.inline.is_none()
-                {
-                    method
-                        .deopt_live_slots
-                        .as_ref()
-                        .and_then(|m| m.get(&raw.bci))
-                } else {
-                    None
-                };
+                let reduced =
+                    if matches!(raw.kind, SafepointKind::UncommonTrap) && raw.inline.is_none() {
+                        method
+                            .deopt_live_slots
+                            .as_ref()
+                            .and_then(|m| m.get(&raw.bci))
+                    } else {
+                        None
+                    };
                 match reduced {
                     Some(live) => {
                         for &v in live {
@@ -647,7 +646,6 @@ pub fn compute_intervals(
         deopt_live_exact.extend(loop_map_facts);
     }
 
-
     let mut changed = true;
     while changed {
         changed = false;
@@ -716,7 +714,6 @@ pub fn compute_intervals(
         }
     }
 
-
     // GC visibility for EVERY loop-touching value (tests/repros/README.md
     // entry 11 — the GC_STRESS=1 stale-slot corruption): a vreg whose span
     // sits (wholly or partly) inside a loop leaves its LAST value in its
@@ -747,8 +744,7 @@ pub fn compute_intervals(
     // residue.
     let mut map_only_facts: Vec<(u32, u32)> = Vec::new();
     {
-        let mut gap_facts: std::collections::HashSet<(u32, u32)> =
-            std::collections::HashSet::new();
+        let mut gap_facts: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
         let vregs: std::collections::HashSet<u32> =
             min_def.keys().chain(max_use.keys()).copied().collect();
         for &v in &vregs {
@@ -954,7 +950,12 @@ pub fn assign_residents(intervals: &mut [LiveInterval]) {
         if dbg {
             eprintln!(
                 "[residents] v{} len={} [{}..{}] fp={} -> {:?}",
-                intervals[i].vreg.0, e - s, s, e, intervals[i].is_fp, intervals[i].resident_reg
+                intervals[i].vreg.0,
+                e - s,
+                s,
+                e,
+                intervals[i].is_fp,
+                intervals[i].resident_reg
             );
         }
     }
@@ -1142,7 +1143,11 @@ pub struct RegallocResult {
 pub(crate) fn f3c_census(method: &IrMethod, ra: &RegallocResult) -> (u32, u32, u32) {
     use std::collections::HashSet;
     if method.is_osr {
-        let crossing = ra.intervals.iter().filter(|iv| iv.crosses_safepoint).count() as u32;
+        let crossing = ra
+            .intervals
+            .iter()
+            .filter(|iv| iv.crosses_safepoint)
+            .count() as u32;
         return (0, crossing, 0);
     }
     let n_slots = method.argc as u32 + method.ntemps as u32;
@@ -1242,9 +1247,7 @@ pub(crate) fn f3c_census(method: &IrMethod, ra: &RegallocResult) -> (u32, u32, u
         if iv.is_fp || iv.end <= iv.start {
             continue;
         }
-        let crossed_polls = poll_positions
-            .iter()
-            .any(|&p| iv.start <= p && iv.end > p);
+        let crossed_polls = poll_positions.iter().any(|&p| iv.start <= p && iv.end > p);
         let crossed_call_shaped = call_shaped_positions
             .iter()
             .any(|&p| iv.start <= p && iv.end > p);
@@ -1487,7 +1490,10 @@ mod tests {
             is_osr: false,
             blocks,
             vregs,
-            pool: vec![crate::compiler::ir::PoolEntry { value: 0, kind: None }],
+            pool: vec![crate::compiler::ir::PoolEntry {
+                value: 0,
+                kind: None,
+            }],
             argc: 0,
             ntemps: 0,
             ctx_vregs: Vec::new(),
@@ -1529,22 +1535,70 @@ mod tests {
             id: BlockId(0),
             bci: 0,
             code: vec![
-                Ir::ConstSmi { dst: v(0), value: 7 },              // v0 smi
-                Ir::Param { dst: v(1), index: 0 },                 // v1 poison
-                Ir::Move { dst: v(2), src: v(0) },                 // v2 <- known
-                Ir::Move { dst: v(3), src: v(1) },                 // v3 <- poison
-                Ir::SmiArith { op: SmiOp::Add, dst: v(4), a: v(0), b: v(2), fail: BlockId(0) },
-                Ir::ConstPool { dst: v(5), lit: PoolLit(0) },      // smi pool word
-                Ir::ConstPool { dst: v(6), lit: PoolLit(1) },      // nil, never redefined
-                Ir::ConstPool { dst: v(7), lit: PoolLit(1) },      // nil, dead: redefined below unread
-                Ir::Move { dst: v(7), src: v(0) },
-                Ir::ConstPool { dst: v(8), lit: PoolLit(1) },      // nil, READ before redef
-                Ir::Move { dst: v(9), src: v(8) },
-                Ir::Move { dst: v(8), src: v(0) },
+                Ir::ConstSmi {
+                    dst: v(0),
+                    value: 7,
+                }, // v0 smi
+                Ir::Param {
+                    dst: v(1),
+                    index: 0,
+                }, // v1 poison
+                Ir::Move {
+                    dst: v(2),
+                    src: v(0),
+                }, // v2 <- known
+                Ir::Move {
+                    dst: v(3),
+                    src: v(1),
+                }, // v3 <- poison
+                Ir::SmiArith {
+                    op: SmiOp::Add,
+                    dst: v(4),
+                    a: v(0),
+                    b: v(2),
+                    fail: BlockId(0),
+                },
+                Ir::ConstPool {
+                    dst: v(5),
+                    lit: PoolLit(0),
+                }, // smi pool word
+                Ir::ConstPool {
+                    dst: v(6),
+                    lit: PoolLit(1),
+                }, // nil, never redefined
+                Ir::ConstPool {
+                    dst: v(7),
+                    lit: PoolLit(1),
+                }, // nil, dead: redefined below unread
+                Ir::Move {
+                    dst: v(7),
+                    src: v(0),
+                },
+                Ir::ConstPool {
+                    dst: v(8),
+                    lit: PoolLit(1),
+                }, // nil, READ before redef
+                Ir::Move {
+                    dst: v(9),
+                    src: v(8),
+                },
+                Ir::Move {
+                    dst: v(8),
+                    src: v(0),
+                },
                 // Move cycle among smi-fed temps: both stay known.
-                Ir::ConstSmi { dst: v(10), value: 1 },
-                Ir::Move { dst: v(11), src: v(10) },
-                Ir::Move { dst: v(10), src: v(11) },
+                Ir::ConstSmi {
+                    dst: v(10),
+                    value: 1,
+                },
+                Ir::Move {
+                    dst: v(11),
+                    src: v(10),
+                },
+                Ir::Move {
+                    dst: v(10),
+                    src: v(11),
+                },
                 Ir::Ret { val: v(4) },
             ],
             entry_stack: Vec::new(),
@@ -1560,8 +1614,14 @@ mod tests {
                 .collect(),
         );
         m.pool = vec![
-            PoolEntry { value: 7 << 2, kind: None },  // tagged smi literal
-            PoolEntry { value: 0x1, kind: None },     // nil-shaped (tag 01)
+            PoolEntry {
+                value: 7 << 2,
+                kind: None,
+            }, // tagged smi literal
+            PoolEntry {
+                value: 0x1,
+                kind: None,
+            }, // nil-shaped (tag 01)
         ];
         let known = crate::compiler::ir::known_smi_vregs(&m);
         for k in [0u32, 2, 4, 5, 7, 10, 11] {
@@ -1600,7 +1660,16 @@ mod tests {
         };
         let method = hand_method(
             vec![block],
-            vec![VRegInfo { is_oop: true, is_fp: false }, VRegInfo { is_oop: true, is_fp: false }],
+            vec![
+                VRegInfo {
+                    is_oop: true,
+                    is_fp: false,
+                },
+                VRegInfo {
+                    is_oop: true,
+                    is_fp: false,
+                },
+            ],
         );
 
         let (_order, intervals, _safepoints, _bsp, _extra) = compute_intervals(&method);
@@ -1635,7 +1704,13 @@ mod tests {
             entry_stack: Vec::new(),
             deopt_sites: Vec::new(),
         };
-        let method = hand_method(vec![block0, block1], vec![VRegInfo { is_oop: true, is_fp: false }]);
+        let method = hand_method(
+            vec![block0, block1],
+            vec![VRegInfo {
+                is_oop: true,
+                is_fp: false,
+            }],
+        );
 
         let (order, intervals, _safepoints, _bsp, _extra) = compute_intervals(&method);
         assert_eq!(
@@ -1671,7 +1746,13 @@ mod tests {
             entry_stack: Vec::new(),
             deopt_sites: Vec::new(),
         };
-        let method = hand_method(vec![block], vec![VRegInfo { is_oop: true, is_fp: false }]);
+        let method = hand_method(
+            vec![block],
+            vec![VRegInfo {
+                is_oop: true,
+                is_fp: false,
+            }],
+        );
 
         let (_order, mut intervals, _safepoints, _bsp, _extra) = compute_intervals(&method);
         assert!(
@@ -1746,12 +1827,7 @@ mod tests {
         let cold = IrBlock {
             id: BlockId(1),
             bci: 4,
-            code: vec![
-                Ir::Poll,
-                Ir::Poll,
-                Ir::Poll,
-                Ir::UncommonTrap { bci: 4 },
-            ],
+            code: vec![Ir::Poll, Ir::Poll, Ir::Poll, Ir::UncommonTrap { bci: 4 }],
             entry_stack: Vec::new(),
             deopt_sites: Vec::new(),
         };
@@ -2106,7 +2182,12 @@ mod tests {
 
         let method = hand_method(
             vec![entry, header, body, exit, bailout],
-            (0..6).map(|_| VRegInfo { is_oop: true, is_fp: false }).collect(),
+            (0..6)
+                .map(|_| VRegInfo {
+                    is_oop: true,
+                    is_fp: false,
+                })
+                .collect(),
         );
         let (order, intervals, _safepoints, _bsp, _extra) = compute_intervals(&method);
 

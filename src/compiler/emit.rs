@@ -48,13 +48,12 @@
 //! [`emit_mov_imm64`] does the multi-instruction expansion itself.
 
 use crate::compiler::assembler::{
-    d, imm, mem, mem_post, mem_pre, q, sp, v2d, v4s, vd_lane, x, xr, Assembler, CodeBlob, Cond, Label, LiteralId,
-    Operand, Reg, RelocKind,
+    d, imm, mem, mem_post, mem_pre, q, sp, v2d, v4s, vd_lane, x, xr, Assembler, CodeBlob, Cond,
+    Label, LiteralId, Operand, Reg, RelocKind,
 };
 use crate::compiler::ir::{
     BailoutReason, BlockId, CallSiteInfo, CmpOp, FArithOp, GuardShape, Ir, IrMethod, PoolLit,
-    SmiOp, StubId,
-    VReg,
+    SmiOp, StubId, VReg,
 };
 use crate::compiler::regalloc::{Assignment, RegallocResult};
 use crate::oops::wrappers::SymbolOop;
@@ -449,11 +448,7 @@ fn proven_smi_positions(
     // operands on the fall-through (the fail edge leaves for a trap block,
     // which consumes no facts — harmless imprecision there); smi-producing
     // defs prove their dst; every OTHER def kills.
-    fn step(
-        cur: &mut HashSet<u32>,
-        op: &Ir,
-        pool: &[crate::compiler::ir::PoolEntry],
-    ) {
+    fn step(cur: &mut HashSet<u32>, op: &Ir, pool: &[crate::compiler::ir::PoolEntry]) {
         match op {
             Ir::SmiArith { dst, a, b, .. } | Ir::SmiArithNoOv { dst, a, b, .. } => {
                 cur.insert(a.0);
@@ -511,7 +506,9 @@ fn proven_smi_positions(
     loop {
         let mut changed = false;
         for bid in regalloc.block_order.iter() {
-            let Some(blk) = block_of.get(&bid.0) else { continue };
+            let Some(blk) = block_of.get(&bid.0) else {
+                continue;
+            };
             let mut cur = match ins.get(&bid.0).and_then(|o| o.clone()) {
                 Some(set) => set,
                 None => continue, // universe: wait for a concrete in-set
@@ -523,9 +520,7 @@ fn proven_smi_positions(
                 let slot = ins.get_mut(&su.0).expect("all blocks seeded");
                 let new = match slot.as_ref() {
                     None => Some(cur.clone()),
-                    Some(prev) => Some(
-                        prev.intersection(&cur).copied().collect::<HashSet<u32>>(),
-                    ),
+                    Some(prev) => Some(prev.intersection(&cur).copied().collect::<HashSet<u32>>()),
                 };
                 if new != *slot {
                     *slot = new;
@@ -542,11 +537,10 @@ fn proven_smi_positions(
     let mut out: HashSet<(u32, u32)> = HashSet::new();
     let mut pos: u32 = 0;
     for bid in regalloc.block_order.iter() {
-        let Some(blk) = block_of.get(&bid.0) else { continue };
-        let mut cur = ins
-            .get(&bid.0)
-            .and_then(|o| o.clone())
-            .unwrap_or_default();
+        let Some(blk) = block_of.get(&bid.0) else {
+            continue;
+        };
+        let mut cur = ins.get(&bid.0).and_then(|o| o.clone()).unwrap_or_default();
         for op in &blk.code {
             match op {
                 Ir::SmiArith { a, b, .. }
@@ -955,9 +949,7 @@ impl<'a> Emitter<'a> {
         let live: Vec<(u8, crate::compiler::regalloc::SpillSlot)> = self
             .s2_spill_stores
             .iter()
-            .filter(|&&(v, s, e, _, _)| {
-                (s <= pos && e > pos) || self.s2_extra.contains(&(v, pos))
-            })
+            .filter(|&&(v, s, e, _, _)| (s <= pos && e > pos) || self.s2_extra.contains(&(v, pos)))
             .map(|&(_, _, _, rr, slot)| (rr, slot))
             .collect();
         for (rr, slot) in live {
@@ -1020,7 +1012,11 @@ impl<'a> Emitter<'a> {
     /// Under `MACVM_R1A=2` the hit ALSO loads the canonical slot into
     /// `scratch` and `brk`s on disagreement (`R1A_POISON_BRK` is
     /// unregistered — the trap handler aborts with a dossier).
-    fn r1a_lookup(&mut self, slot: crate::compiler::regalloc::SpillSlot, scratch: u8) -> Option<Reg> {
+    fn r1a_lookup(
+        &mut self,
+        slot: crate::compiler::regalloc::SpillSlot,
+        scratch: u8,
+    ) -> Option<Reg> {
         let sr = *self.r1a_shadow.get(&slot.0)?;
         if r1a_mode() == 2 {
             emit_spill_access(self.asm, "ldr", x(scratch), slot);
@@ -1045,10 +1041,8 @@ impl<'a> Emitter<'a> {
         // A side is guard-free when smi BY CONSTRUCTION (S1, known_smi) or
         // PROVEN on every path to this op (F2, proven_smi_at — an earlier
         // guard passed / a smi def reached, keyed by this op's position).
-        let a_ok = self.known_smi.contains(&a.0)
-            || self.proven_smi_at.contains(&(self.pos, a.0));
-        let b_ok = self.known_smi.contains(&b.0)
-            || self.proven_smi_at.contains(&(self.pos, b.0));
+        let a_ok = self.known_smi.contains(&a.0) || self.proven_smi_at.contains(&(self.pos, a.0));
+        let b_ok = self.known_smi.contains(&b.0) || self.proven_smi_at.contains(&(self.pos, b.0));
         if a_ok && b_ok {
             return;
         }
@@ -1126,7 +1120,13 @@ impl<'a> Emitter<'a> {
     /// is the size slot): base = arr + 2*idx, load at [base + 15].
     /// `guards: None` is the R2 proven form (`ArrayAtNC`) — receiver/index/
     /// bounds all statically proven, straight to the access.
-    fn emit_array_at(&mut self, dst: VReg, arr: VReg, idx: VReg, guards: Option<(PoolLit, BlockId)>) {
+    fn emit_array_at(
+        &mut self,
+        dst: VReg,
+        arr: VReg,
+        idx: VReg,
+        guards: Option<(PoolLit, BlockId)>,
+    ) {
         let rarr = self.resolve(arr, 16);
         let ridx = self.resolve(idx, 17);
         if let Some((klass, fail)) = guards {
@@ -1266,12 +1266,12 @@ impl<'a> Emitter<'a> {
         let ridx = self.resolve(idx, 17);
         self.emit_byte_guards(robj, ridx, klass, len_off, fail);
         self.asm.emit("asr", &[x(19), Operand::Reg(ridx), imm(2)]);
-        self.asm
-            .emit("add", &[x(19), x(19), Operand::Reg(robj)]);
+        self.asm.emit("add", &[x(19), x(19), Operand::Reg(robj)]);
         let d = self.dest_target(dst);
         self.asm
             .emit("ldurb", &[Operand::Reg(d), mem(19, (tail_off - 2) as i64)]);
-        self.asm.emit("lsl", &[Operand::Reg(d), Operand::Reg(d), imm(2)]);
+        self.asm
+            .emit("lsl", &[Operand::Reg(d), Operand::Reg(d), imm(2)]);
         self.commit(dst, d);
     }
 
@@ -1299,8 +1299,7 @@ impl<'a> Emitter<'a> {
         // dead, so a spilled `val` may safely load into x16 (the
         // emit_array_at_put ordering, same reason).
         self.asm.emit("asr", &[x(19), Operand::Reg(ridx), imm(2)]);
-        self.asm
-            .emit("add", &[x(19), x(19), Operand::Reg(robj)]);
+        self.asm.emit("add", &[x(19), x(19), Operand::Reg(robj)]);
         let rval = match self.resident[val.0 as usize] {
             Some(rr) => xr(rr),
             None => match self.assignment_of(val) {
@@ -1427,7 +1426,7 @@ impl<'a> Emitter<'a> {
         self.asm.emit("asr", &[x(20), Operand::Reg(rb), imm(2)]); // b, untagged
         self.asm.emit("sdiv", &[x(16), x(19), x(20)]); // q (truncated)
         self.asm.emit("msub", &[x(17), x(16), x(20), x(19)]); // r = a - q*b
-        // Floored correction: r != 0 && sign(r) != sign(b) → q-1, r+b.
+                                                              // Floored correction: r != 0 && sign(r) != sign(b) → q-1, r+b.
         let done = self.asm.new_label();
         self.asm.cbz(xr(17), done);
         self.asm.emit("eor", &[x(19), x(17), x(20)]);
@@ -1777,7 +1776,12 @@ impl<'a> Emitter<'a> {
     // x16 (not `emit_spill_access`'s x19) stays the deep-slot scratch: the FP
     // path's callers hold no address in x16 across a spill access, and d-regs
     // can never alias it.
-    fn fp_spill_access(&mut self, mnemonic: &str, dreg: u8, slot: crate::compiler::regalloc::SpillSlot) {
+    fn fp_spill_access(
+        &mut self,
+        mnemonic: &str,
+        dreg: u8,
+        slot: crate::compiler::regalloc::SpillSlot,
+    ) {
         let off = spill_offset(slot);
         debug_assert!(off < 0, "spill slots are below fp");
         if off >= -256 {
@@ -2412,9 +2416,7 @@ impl<'a> Emitter<'a> {
             .iter()
             .enumerate()
             .filter_map(|(i, src)| match *src {
-                ArgSrc::Asn(Assignment::Reg(r)) if r != i as u8 => {
-                    Some((i as u8, Src::Reg(r)))
-                }
+                ArgSrc::Asn(Assignment::Reg(r)) if r != i as u8 => Some((i as u8, Src::Reg(r))),
                 ArgSrc::Asn(Assignment::Reg(_)) => None,
                 ArgSrc::Asn(Assignment::Spill(slot)) => Some((i as u8, Src::Mem(slot))),
                 ArgSrc::Imm(v) => Some((i as u8, Src::Imm(v))),
@@ -2789,12 +2791,17 @@ pub fn emit(
         let spilled = r2_pool_set
             .keys()
             .filter(|&&v| {
-                regalloc.intervals.iter().any(|iv| {
-                    iv.vreg.0 == v && matches!(iv.assignment, Some(Assignment::Spill(_)))
-                })
+                regalloc
+                    .intervals
+                    .iter()
+                    .any(|iv| iv.vreg.0 == v && matches!(iv.assignment, Some(Assignment::Spill(_))))
             })
             .count();
-        eprintln!("r2census pool-consts={} spilled={}", r2_pool_set.len(), spilled);
+        eprintln!(
+            "r2census pool-consts={} spilled={}",
+            r2_pool_set.len(),
+            spilled
+        );
     }
     // S2 selection (env-gated: with MACVM_S2/MACVM_S2_POISON unset the set
     // is empty and emission is byte-identical to the S1+S3 tree). Rules
@@ -2901,8 +2908,7 @@ pub fn emit(
     // dominated observation is reached through the def regardless of
     // where execution entered upstream.
     if s2_active {
-        let mut preds: std::collections::HashMap<u32, Vec<u32>> =
-            std::collections::HashMap::new();
+        let mut preds: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
         for b in &method.blocks {
             for s in crate::compiler::regalloc::successors(b) {
                 preds.entry(s.0).or_default().push(b.id.0);
@@ -3113,12 +3119,18 @@ pub fn emit(
     // corruption later.
     let frame_bytes = ((8 * regalloc.frame_slots as i64) + 15) & !15;
     if frameless {
-        assert_eq!(regalloc.frame_slots, 0, "frameless unit must have no spill slots");
+        assert_eq!(
+            regalloc.frame_slots, 0,
+            "frameless unit must have no spill slots"
+        );
         assert!(
             regalloc.deopt_nil_init_slots.is_empty(),
             "frameless unit must have no deopt slots"
         );
-        assert!(prim_shim.is_none(), "frameless unit cannot be a prim-shim method");
+        assert!(
+            prim_shim.is_none(),
+            "frameless unit cannot be a prim-shim method"
+        );
         assert!(osr.is_none(), "frameless unit has no Poll, so no OSR entry");
         assert!(
             regalloc.safepoint_positions.is_empty(),
@@ -3484,23 +3496,34 @@ fn emit_ir(e: &mut Emitter, ir: &Ir, next_in_order: Option<BlockId>) {
                 e.asm
                     .emit("mul", &[Operand::Reg(d), x(16), Operand::Reg(rb)]);
             } else {
-                let mnem = if matches!(op, SmiOp::Add) { "add" } else { "sub" };
+                let mnem = if matches!(op, SmiOp::Add) {
+                    "add"
+                } else {
+                    "sub"
+                };
                 e.asm
                     .emit(mnem, &[Operand::Reg(d), Operand::Reg(ra), Operand::Reg(rb)]);
             }
             e.commit(dst, d);
         }
-        Ir::SmiArithNoOvImm { op, dst, a, imm: addend } => {
+        Ir::SmiArithNoOvImm {
+            op,
+            dst,
+            a,
+            imm: addend,
+        } => {
             // The peephole's add/sub-immediate: proven-in-range (same license
             // as SmiArithNoOv), tagged addend = value << 2, guaranteed to fit
             // imm12 by fold_noov_imm's 0..=1023 guard.
             let ra = e.resolve(a, 16);
             let d = e.dest_target_direct(dst);
-            let mnem = if matches!(op, SmiOp::Add) { "add" } else { "sub" };
-            e.asm.emit(
-                mnem,
-                &[Operand::Reg(d), Operand::Reg(ra), imm(addend << 2)],
-            );
+            let mnem = if matches!(op, SmiOp::Add) {
+                "add"
+            } else {
+                "sub"
+            };
+            e.asm
+                .emit(mnem, &[Operand::Reg(d), Operand::Reg(ra), imm(addend << 2)]);
             e.commit(dst, d);
         }
         Ir::ArrayAt {
@@ -3519,9 +3542,7 @@ fn emit_ir(e: &mut Emitter, ir: &Ir, next_in_order: Option<BlockId>) {
             fail,
         } => e.emit_array_at_put(dst, arr, idx, val, Some((klass, fail))),
         Ir::ArrayAtNC { dst, arr, idx } => e.emit_array_at(dst, arr, idx, None),
-        Ir::ArrayAtPutNC { dst, arr, idx, val } => {
-            e.emit_array_at_put(dst, arr, idx, val, None)
-        }
+        Ir::ArrayAtPutNC { dst, arr, idx, val } => e.emit_array_at_put(dst, arr, idx, val, None),
         Ir::ByteAt {
             dst,
             obj,
@@ -3541,7 +3562,12 @@ fn emit_ir(e: &mut Emitter, ir: &Ir, next_in_order: Option<BlockId>) {
             tail_off,
             fail,
         } => e.emit_byte_at_put(dst, obj, idx, val, klass, len_off, tail_off, fail),
-        Ir::SmiShift { dst, a, count, fail } => e.emit_smi_shift(dst, a, count, fail),
+        Ir::SmiShift {
+            dst,
+            a,
+            count,
+            fail,
+        } => e.emit_smi_shift(dst, a, count, fail),
         Ir::SmiCmpBr {
             op,
             a,
@@ -3716,11 +3742,10 @@ mod tests {
         // depth-3 trap at position 18 names v5 via an exact fact. v9's
         // window is over by 18 — the old spans-p predicate saw no conflict,
         // and the trap-site store copied v9's `true` into v5's slot.
-        let intervals = vec![
-            iv(5, 7, 11, 4, Some(23)),
-            iv(9, 11, 12, 5, Some(23)),
+        let intervals = vec![iv(5, 7, 11, 4, Some(23)), iv(9, 11, 12, 5, Some(23))];
+        let mut s2 = vec![
+            false, false, false, false, false, true, false, false, false, false,
         ];
-        let mut s2 = vec![false, false, false, false, false, true, false, false, false, false];
         s2_demote_stale_resident_extras(&mut s2, &intervals, &[(VReg(5), 18)]);
         assert!(
             !s2[5],
@@ -3732,26 +3757,43 @@ mod tests {
 
         // Must NOT demote — each case exercises one arm of the predicate.
         // (a) In-window fact: `assign_residents` exclusivity covers it.
-        let mut s2a = vec![false, false, false, false, false, true, false, false, false, false];
+        let mut s2a = vec![
+            false, false, false, false, false, true, false, false, false, false,
+        ];
         s2_demote_stale_resident_extras(&mut s2a, &intervals, &[(VReg(5), 9)]);
         assert!(s2a[5], "an in-interval fact needs no demotion");
         // (b) Sharing window entirely BEFORE v's own: v's defs rewrite the
         // register afterwards, so the register is v's again at any p.
         let before = vec![iv(9, 1, 6, 5, Some(23)), iv(5, 7, 11, 4, Some(23))];
-        let mut s2b = vec![false, false, false, false, false, true, false, false, false, false];
+        let mut s2b = vec![
+            false, false, false, false, false, true, false, false, false, false,
+        ];
         s2_demote_stale_resident_extras(&mut s2b, &before, &[(VReg(5), 18)]);
-        assert!(s2b[5], "a window that closed before v's own defs is harmless");
+        assert!(
+            s2b[5],
+            "a window that closed before v's own defs is harmless"
+        );
         // (c) Sharing window entirely AFTER the fact: its defs run after
         // the store, so the store still reads v's value.
         let after = vec![iv(5, 7, 11, 4, Some(23)), iv(9, 20, 25, 5, Some(23))];
-        let mut s2c = vec![false, false, false, false, false, true, false, false, false, false];
+        let mut s2c = vec![
+            false, false, false, false, false, true, false, false, false, false,
+        ];
         s2_demote_stale_resident_extras(&mut s2c, &after, &[(VReg(5), 18)]);
-        assert!(s2c[5], "a window that opens after the fact position is harmless");
+        assert!(
+            s2c[5],
+            "a window that opens after the fact position is harmless"
+        );
         // (d) A different register: no interaction at all.
         let other_reg = vec![iv(5, 7, 11, 4, Some(23)), iv(9, 11, 12, 5, Some(22))];
-        let mut s2d = vec![false, false, false, false, false, true, false, false, false, false];
+        let mut s2d = vec![
+            false, false, false, false, false, true, false, false, false, false,
+        ];
         s2_demote_stale_resident_extras(&mut s2d, &other_reg, &[(VReg(5), 18)]);
-        assert!(s2d[5], "a window on a different resident register is harmless");
+        assert!(
+            s2d[5],
+            "a window on a different resident register is harmless"
+        );
     }
 
     /// Listing format: "<pc_off>  <hex_word>  <mnemonic> [<operands>]".
@@ -3839,7 +3881,12 @@ mod tests {
     /// proven correct end to end and gives `pcdesc_block_starts` a real
     /// multi-block method to check without re-deriving one.
     fn branchy_method() -> IrMethod {
-        let vregs: Vec<VRegInfo> = (0..7).map(|_| VRegInfo { is_oop: true, is_fp: false }).collect();
+        let vregs: Vec<VRegInfo> = (0..7)
+            .map(|_| VRegInfo {
+                is_oop: true,
+                is_fp: false,
+            })
+            .collect();
         let block0 = IrBlock {
             id: BlockId(0),
             bci: 0,
@@ -3923,7 +3970,9 @@ mod tests {
         let method = branchy_method();
         let ra = regalloc::regalloc(&method);
         let mut asm = JasmAssembler::new();
-        let (_blob, block_pcs, _verified_entry_off, _ic_sites, _safepoints, _osr_off, _lids) =            emit(&mut asm, &method, &ra, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, None, None, false);
+        let (_blob, block_pcs, _verified_entry_off, _ic_sites, _safepoints, _osr_off, _lids) = emit(
+            &mut asm, &method, &ra, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, None, None, false,
+        );
 
         assert_eq!(
             block_pcs.len(),
@@ -3960,7 +4009,12 @@ mod tests {
     /// it does for add/sub, so this sequence is the only correct one).
     #[test]
     fn emit_smi_mul_overflow_seq() {
-        let vregs: Vec<VRegInfo> = (0..4).map(|_| VRegInfo { is_oop: true, is_fp: false }).collect();
+        let vregs: Vec<VRegInfo> = (0..4)
+            .map(|_| VRegInfo {
+                is_oop: true,
+                is_fp: false,
+            })
+            .collect();
         let block0 = IrBlock {
             id: BlockId(0),
             bci: 0,
@@ -4001,7 +4055,9 @@ mod tests {
         let method = hand_method(vec![block0, block1], vregs, 2);
         let ra = regalloc::regalloc(&method);
         let mut asm = JasmAssembler::new();
-        let (blob, _pcs, _verified_entry_off, _ic_sites, _safepoints, _osr_off, _lids) =            emit(&mut asm, &method, &ra, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, None, None, false);
+        let (blob, _pcs, _verified_entry_off, _ic_sites, _safepoints, _osr_off, _lids) = emit(
+            &mut asm, &method, &ra, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, None, None, false,
+        );
 
         let mnemonics: Vec<&str> = blob.listing.iter().map(|l| mnemonic(l)).collect();
         let asr_pos = mnemonics.iter().position(|&m| m == "asr");
@@ -4044,7 +4100,12 @@ mod tests {
     #[test]
     fn emit_ldur_vs_untag_split() {
         let make = |index: u8| {
-            let vregs: Vec<VRegInfo> = (0..2).map(|_| VRegInfo { is_oop: true, is_fp: false }).collect();
+            let vregs: Vec<VRegInfo> = (0..2)
+                .map(|_| VRegInfo {
+                    is_oop: true,
+                    is_fp: false,
+                })
+                .collect();
             let byte_off = crate::oops::layout::BODY_OFFSET as i32 + 8 * index as i32;
             let block0 = IrBlock {
                 id: BlockId(0),
@@ -4072,7 +4133,9 @@ mod tests {
         let near = make(30);
         let ra = regalloc::regalloc(&near);
         let mut asm = JasmAssembler::new();
-        let (blob, _pcs, _verified_entry_off, _ic_sites, _safepoints, _osr_off, _lids) =            emit(&mut asm, &near, &ra, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, None, None, false);
+        let (blob, _pcs, _verified_entry_off, _ic_sites, _safepoints, _osr_off, _lids) = emit(
+            &mut asm, &near, &ra, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, None, None, false,
+        );
         let near_mnemonics: Vec<String> = blob.listing.iter().map(|l| mnemonic(l)).collect();
         assert!(
             near_mnemonics.iter().any(|m| m == "ldur"),
@@ -4088,7 +4151,9 @@ mod tests {
         let far = make(31);
         let ra2 = regalloc::regalloc(&far);
         let mut asm2 = JasmAssembler::new();
-        let (blob2, _pcs2, _verified_entry_off2, _ic_sites2, _safepoints, _osr_off, _lids) =            emit(&mut asm2, &far, &ra2, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, None, None, false);
+        let (blob2, _pcs2, _verified_entry_off2, _ic_sites2, _safepoints, _osr_off, _lids) = emit(
+            &mut asm2, &far, &ra2, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, None, None, false,
+        );
         let mnemonics: Vec<String> = blob2.listing.iter().map(|l| mnemonic(l)).collect();
         assert!(
             mnemonics.iter().any(|m| m == "sub"),
@@ -4112,7 +4177,12 @@ mod tests {
     #[test]
     fn barrier_emitted_conditions() {
         let make = |barrier: bool| {
-            let vregs: Vec<VRegInfo> = (0..2).map(|_| VRegInfo { is_oop: true, is_fp: false }).collect();
+            let vregs: Vec<VRegInfo> = (0..2)
+                .map(|_| VRegInfo {
+                    is_oop: true,
+                    is_fp: false,
+                })
+                .collect();
             let block0 = IrBlock {
                 id: BlockId(0),
                 bci: 0,
@@ -4239,7 +4309,10 @@ mod tests {
                 entry_stack: Vec::new(),
                 deopt_sites: Vec::new(),
             }],
-            vregs: vec![VRegInfo { is_oop: true, is_fp: false }],
+            vregs: vec![VRegInfo {
+                is_oop: true,
+                is_fp: false,
+            }],
             pool: vec![
                 PoolEntry {
                     value: 0x1111,
@@ -4282,7 +4355,9 @@ mod tests {
         };
         let ra = regalloc::regalloc(&method);
         let mut asm = JasmAssembler::new();
-        let (blob, _pcs, _ve, _ic, _safepoints, _osr_off, _lids) =            emit(&mut asm, &method, &ra, 0, 0, 0xAABB, 0, 0, 0, 0, 0, 0, None, None, None, false);
+        let (blob, _pcs, _ve, _ic, _safepoints, _osr_off, _lids) = emit(
+            &mut asm, &method, &ra, 0, 0, 0xAABB, 0, 0, 0, 0, 0, 0, None, None, None, false,
+        );
         let listing = blob.listing.join("\n");
         let mnemonic = |l: &str| l.split_whitespace().nth(2).unwrap_or("").to_string();
         let mnemonics: Vec<String> = blob.listing.iter().map(|l| mnemonic(l)).collect();
@@ -4344,7 +4419,10 @@ mod tests {
     /// branch a real receiver would take).
     #[test]
     fn entry_guard_smi_and_heap() {
-        let vregs = vec![VRegInfo { is_oop: true, is_fp: false }];
+        let vregs = vec![VRegInfo {
+            is_oop: true,
+            is_fp: false,
+        }];
         let block0 = IrBlock {
             id: BlockId(0),
             bci: 0,
@@ -4484,7 +4562,21 @@ mod tests {
             resolve_addr: 0x3000,
         };
         let (blob, _pcs, verified_entry_off, _ic_sites, _safepoints, _osr_off, _lids) = emit(
-            &mut asm, &method, &ra, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, Some(guard), None,
+            &mut asm,
+            &method,
+            &ra,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            None,
+            Some(guard),
+            None,
             false,
         );
         let guard_lines: Vec<&str> = blob
@@ -4520,7 +4612,10 @@ mod tests {
     /// literals and an ordinary body literal in one method.
     #[test]
     fn pool_relocs_after_literal_off() {
-        let vregs = vec![VRegInfo { is_oop: true, is_fp: false }];
+        let vregs = vec![VRegInfo {
+            is_oop: true,
+            is_fp: false,
+        }];
         let block0 = IrBlock {
             id: BlockId(0),
             bci: 0,
@@ -4606,7 +4701,12 @@ mod tests {
     /// actually occur, rather than merely being reasoned about.
     #[test]
     fn ic_site_recorded_per_send() {
-        let vregs: Vec<VRegInfo> = (0..6).map(|_| VRegInfo { is_oop: true, is_fp: false }).collect();
+        let vregs: Vec<VRegInfo> = (0..6)
+            .map(|_| VRegInfo {
+                is_oop: true,
+                is_fp: false,
+            })
+            .collect();
         let block0 = IrBlock {
             id: BlockId(0),
             bci: 0,
@@ -4650,7 +4750,10 @@ mod tests {
             vregs,
             // One dummy word so nil_lit resolves for the prologue oop-slot
             // nil-fill (this fixture's cross-call values spill).
-            pool: vec![crate::compiler::ir::PoolEntry { value: 0, kind: None }],
+            pool: vec![crate::compiler::ir::PoolEntry {
+                value: 0,
+                kind: None,
+            }],
             argc: 3,
             ntemps: 0,
             ctx_vregs: Vec::new(),
@@ -4698,7 +4801,9 @@ mod tests {
         };
         let ra = regalloc::regalloc(&method);
         let mut asm = JasmAssembler::new();
-        let (blob, _pcs, _verified_entry_off, ic_sites, _safepoints, _osr_off, _lids) =            emit(&mut asm, &method, &ra, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, None, None, false);
+        let (blob, _pcs, _verified_entry_off, ic_sites, _safepoints, _osr_off, _lids) = emit(
+            &mut asm, &method, &ra, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, None, None, false,
+        );
 
         assert_eq!(
             ic_sites.len(),
@@ -4741,11 +4846,11 @@ mod tests {
 
 #[cfg(test)]
 mod frameless_tests {
+    use super::tests::hand_method;
     use super::*;
     use crate::compiler::ir::{BlockId, Ir, IrBlock, VReg, VRegInfo};
     use crate::compiler::jasm_assembler::JasmAssembler;
     use crate::compiler::regalloc;
-    use super::tests::hand_method;
 
     /// Listing format: "<pc_off>  <hex_word>  <mnemonic> [<operands>]".
     fn mnemonic(line: &str) -> &str {
@@ -4758,12 +4863,18 @@ mod frameless_tests {
     #[test]
     fn frameless_unit_has_no_prologue_or_epilogue() {
         let make = || {
-            let vregs = vec![VRegInfo { is_oop: true, is_fp: false }];
+            let vregs = vec![VRegInfo {
+                is_oop: true,
+                is_fp: false,
+            }];
             let block0 = IrBlock {
                 id: BlockId(0),
                 bci: 0,
                 code: vec![
-                    Ir::Param { dst: VReg(0), index: 0 },
+                    Ir::Param {
+                        dst: VReg(0),
+                        index: 0,
+                    },
                     Ir::RetSelf,
                 ],
                 entry_stack: Vec::new(),
@@ -4782,27 +4893,57 @@ mod frameless_tests {
                 resolve_addr: 0x3000,
             };
             let (blob, _pcs, verified_entry_off, _ics, safepoints, _osr, _lids) = emit(
-                &mut asm, &method, &ra, 0, 0, 0, 0, 0, 0, 0, 0, 0, None,
-                Some(guard), None, frameless,
+                &mut asm,
+                &method,
+                &ra,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                None,
+                Some(guard),
+                None,
+                frameless,
             );
             (blob, verified_entry_off, safepoints.len())
         };
 
         let (framed, _, _) = emit_with(false);
         let framed_mnems: Vec<&str> = framed.listing.iter().map(|l| mnemonic(l)).collect();
-        assert!(framed_mnems.contains(&"stp"), "framed keeps its prologue: {framed_mnems:?}");
-        assert!(framed_mnems.contains(&"ldp"), "framed keeps its epilogue: {framed_mnems:?}");
+        assert!(
+            framed_mnems.contains(&"stp"),
+            "framed keeps its prologue: {framed_mnems:?}"
+        );
+        assert!(
+            framed_mnems.contains(&"ldp"),
+            "framed keeps its epilogue: {framed_mnems:?}"
+        );
 
         let (blob, verified_entry_off, n_safepoints) = emit_with(true);
         let mnems: Vec<&str> = blob.listing.iter().map(|l| mnemonic(l)).collect();
-        assert!(!mnems.contains(&"stp"), "frameless must not push a frame: {mnems:?}");
-        assert!(!mnems.contains(&"ldp"), "frameless must not pop a frame: {mnems:?}");
+        assert!(
+            !mnems.contains(&"stp"),
+            "frameless must not push a frame: {mnems:?}"
+        );
+        assert!(
+            !mnems.contains(&"ldp"),
+            "frameless must not pop a frame: {mnems:?}"
+        );
         assert!(
             !blob.listing.iter().any(|l| l.contains("is_sp: true")),
             "frameless must never touch sp (listing prints operands as Reg {{ .., is_sp }}): {:?}",
             blob.listing
         );
-        assert_eq!(mnems.last(), Some(&"ret"), "frameless body ends in a bare ret");
+        assert_eq!(
+            mnems.last(),
+            Some(&"ret"),
+            "frameless body ends in a bare ret"
+        );
         assert_eq!(n_safepoints, 0, "frameless unit records no safepoints");
         // The guard still precedes the (now prologue-free) verified entry.
         assert!(verified_entry_off > 0, "guard precedes the verified entry");

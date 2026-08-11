@@ -887,7 +887,10 @@ mod tests {
         };
         let html = render_categories_pane(&world, &sel);
         assert!(html.contains("instance variables"), "label: {html}");
-        assert!(html.contains(">x</div>") && html.contains(">y</div>"), "ivars shown: {html}");
+        assert!(
+            html.contains(">x</div>") && html.contains(">y</div>"),
+            "ivars shown: {html}"
+        );
         assert!(
             html.contains("st-smappl-new-var-src") && html.contains("data-var-kind=\"instance\""),
             "instance add field: {html}"
@@ -904,12 +907,18 @@ mod tests {
             html_c.contains("class variables") && html_c.contains(">Registry</div>"),
             "class vars: {html_c}"
         );
-        assert!(html_c.contains("data-var-kind=\"class\""), "class add field: {html_c}");
+        assert!(
+            html_c.contains("data-var-kind=\"class\""),
+            "class add field: {html_c}"
+        );
 
         // Image-based: a mock add shows IMMEDIATELY (no restart).
         world.add_var("Widget", false, "z");
         let html2 = render_categories_pane(&world, &sel);
-        assert!(html2.contains(">z</div>"), "added ivar shows at once: {html2}");
+        assert!(
+            html2.contains(">z</div>"),
+            "added ivar shows at once: {html2}"
+        );
     }
 
     #[test]

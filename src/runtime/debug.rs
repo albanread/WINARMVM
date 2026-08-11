@@ -456,7 +456,9 @@ fn gui_halt(vm: &mut VmState, bci: usize, reason_line: &str) {
     let mut selected: usize = 0;
     let mut out_text = String::new();
     let status = format!("HALTED {reason_line}");
-    fe.publish(&build_report(vm, &status, &frames, selected, bci, &out_text));
+    fe.publish(&build_report(
+        vm, &status, &frames, selected, bci, &out_text,
+    ));
     loop {
         let line = fe.next_command();
         let words: Vec<&str> = line.split_whitespace().collect();
@@ -476,8 +478,7 @@ fn gui_halt(vm: &mut VmState, bci: usize, reason_line: &str) {
                     out_text.clear();
                 }
                 _ => {
-                    out_text =
-                        format!("frame: expected 0..{}", frames.len().saturating_sub(1));
+                    out_text = format!("frame: expected 0..{}", frames.len().saturating_sub(1));
                 }
             },
             ["step"] | ["s"] => {
@@ -499,7 +500,9 @@ fn gui_halt(vm: &mut VmState, bci: usize, reason_line: &str) {
             }
             other => out_text = format!("unknown: {other:?}"),
         }
-        fe.publish(&build_report(vm, &status, &frames, selected, bci, &out_text));
+        fe.publish(&build_report(
+            vm, &status, &frames, selected, bci, &out_text,
+        ));
     }
     fe.publish("RUNNING\n");
 }
@@ -544,7 +547,9 @@ fn build_report(
         let line = line_for(vm, &key, bci_val)
             .map(|l| l.to_string())
             .unwrap_or_default();
-        r.push_str(&format!("{i}{SEP}{holder}{SEP}{sel}{SEP}{bci_val}{SEP}{line}\n"));
+        r.push_str(&format!(
+            "{i}{SEP}{holder}{SEP}{sel}{SEP}{bci_val}{SEP}{line}\n"
+        ));
     }
     r.push_str("==FRAME==\n");
     if let Some(&fp) = frames.get(selected) {

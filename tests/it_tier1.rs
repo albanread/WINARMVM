@@ -82,7 +82,12 @@ fn run_ir_raw() {
     let stubs = stubs::install(&mut cache);
 
     // vregs: 0=self, 1=a, 2=b, 3=sum, 4=const10, 5=result_true, 6=result_false
-    let vregs: Vec<VRegInfo> = (0..7).map(|_| VRegInfo { is_oop: true, is_fp: false }).collect();
+    let vregs: Vec<VRegInfo> = (0..7)
+        .map(|_| VRegInfo {
+            is_oop: true,
+            is_fp: false,
+        })
+        .collect();
 
     let block0 = IrBlock {
         id: BlockId(0),
@@ -160,12 +165,14 @@ fn run_ir_raw() {
     };
 
     let method = IrMethod {
-
         osr_cold_sends: 0,
         is_osr: false,
         blocks: vec![block0, block1, block2, block3],
         vregs,
-        pool: vec![macvm::compiler::ir::PoolEntry { value: 0, kind: None }],
+        pool: vec![macvm::compiler::ir::PoolEntry {
+            value: 0,
+            kind: None,
+        }],
         argc: 2,
         ntemps: 0,
         ctx_vregs: Vec::new(),
@@ -321,8 +328,16 @@ fn mul_method() -> IrMethod {
         osr_cold_sends: 0,
         is_osr: false,
         blocks: vec![block0, block1],
-        vregs: (0..4).map(|_| VRegInfo { is_oop: true, is_fp: false }).collect(),
-        pool: vec![macvm::compiler::ir::PoolEntry { value: 0, kind: None }],
+        vregs: (0..4)
+            .map(|_| VRegInfo {
+                is_oop: true,
+                is_fp: false,
+            })
+            .collect(),
+        pool: vec![macvm::compiler::ir::PoolEntry {
+            value: 0,
+            kind: None,
+        }],
         argc: 2,
         ntemps: 0,
         ctx_vregs: Vec::new(),
@@ -404,7 +419,10 @@ fn run_ir_raw_forces_spill() {
     let stubs = stubs::install(&mut cache);
 
     let n = 20u32;
-    let mut vregs: Vec<VRegInfo> = vec![VRegInfo { is_oop: true, is_fp: false }]; // v0 = self
+    let mut vregs: Vec<VRegInfo> = vec![VRegInfo {
+        is_oop: true,
+        is_fp: false,
+    }]; // v0 = self
     let mut code = vec![Ir::Param {
         dst: VReg(0),
         index: 0,
@@ -412,7 +430,10 @@ fn run_ir_raw_forces_spill() {
 
     // v1..=v20: constants 1..=20, all defined up front (all live at once).
     for i in 1..=n {
-        vregs.push(VRegInfo { is_oop: true, is_fp: false });
+        vregs.push(VRegInfo {
+            is_oop: true,
+            is_fp: false,
+        });
         code.push(Ir::ConstSmi {
             dst: VReg(i),
             value: i as i64,
@@ -424,7 +445,10 @@ fn run_ir_raw_forces_spill() {
     let bailout = BlockId(1);
     let mut acc = VReg(1);
     for i in 2..=n {
-        vregs.push(VRegInfo { is_oop: true, is_fp: false });
+        vregs.push(VRegInfo {
+            is_oop: true,
+            is_fp: false,
+        });
         let dst = VReg(n + i - 1);
         code.push(Ir::SmiArith {
             op: SmiOp::Add,
@@ -458,7 +482,10 @@ fn run_ir_raw_forces_spill() {
         is_osr: false,
         blocks: vec![block0, block1],
         vregs,
-        pool: vec![macvm::compiler::ir::PoolEntry { value: 0, kind: None }],
+        pool: vec![macvm::compiler::ir::PoolEntry {
+            value: 0,
+            kind: None,
+        }],
         argc: 0,
         ntemps: 0,
         ctx_vregs: Vec::new(),
@@ -2560,7 +2587,12 @@ fn mono_resolve_patches_call_site_and_dispatches() {
 
     // Caller: one param (the target receiver), one send of `foo:with:`
     // against two fresh smi constants -- self=x0, arg0=x1, arg1=x2.
-    let vregs: Vec<VRegInfo> = (0..4).map(|_| VRegInfo { is_oop: true, is_fp: false }).collect();
+    let vregs: Vec<VRegInfo> = (0..4)
+        .map(|_| VRegInfo {
+            is_oop: true,
+            is_fp: false,
+        })
+        .collect();
     let block0 = IrBlock {
         id: BlockId(0),
         bci: 0,
@@ -2592,7 +2624,10 @@ fn mono_resolve_patches_call_site_and_dispatches() {
         is_osr: false,
         blocks: vec![block0],
         vregs,
-        pool: vec![macvm::compiler::ir::PoolEntry { value: 0, kind: None }],
+        pool: vec![macvm::compiler::ir::PoolEntry {
+            value: 0,
+            kind: None,
+        }],
         argc: 1,
         ntemps: 0,
         ctx_vregs: Vec::new(),
@@ -2616,7 +2651,7 @@ fn mono_resolve_patches_call_site_and_dispatches() {
             selector: foo_sel,
             argc: 3,
             static_klass: None,
-                self_klass: None,
+            self_klass: None,
         }],
         site_feedback: Vec::new(),
         inline_deps: Vec::new(),
@@ -2626,24 +2661,25 @@ fn mono_resolve_patches_call_site_and_dispatches() {
     };
     let ra = regalloc::regalloc(&caller_method);
     let mut asm = JasmAssembler::new();
-    let (blob, _pcs, _verified_entry_off, emitted_ic_sites, _safepoints, _osr_off, _lids) = emit::emit(
-        &mut asm,
-        &caller_method,
-        &ra,
-        vm.stubs.stub_poll_addr(),
-        vm.stubs.must_be_boolean_addr(),
-        vm.stubs.alloc_slow_addr(),
-        vm.stubs.box_double_addr(),
-        vm.stubs.box_float64x2_addr(),
-        vm.stubs.box_float32x4_addr(),
-        vm.stubs.box_int32x4_addr(),
-        vm.stubs.call_primitive_addr(),
-        vm.stubs.nlr_originate_addr(),
-        None,
-        None,
-        None,
-        false,
-    );
+    let (blob, _pcs, _verified_entry_off, emitted_ic_sites, _safepoints, _osr_off, _lids) =
+        emit::emit(
+            &mut asm,
+            &caller_method,
+            &ra,
+            vm.stubs.stub_poll_addr(),
+            vm.stubs.must_be_boolean_addr(),
+            vm.stubs.alloc_slow_addr(),
+            vm.stubs.box_double_addr(),
+            vm.stubs.box_float64x2_addr(),
+            vm.stubs.box_float32x4_addr(),
+            vm.stubs.box_int32x4_addr(),
+            vm.stubs.call_primitive_addr(),
+            vm.stubs.nlr_originate_addr(),
+            None,
+            None,
+            None,
+            false,
+        );
     assert_eq!(emitted_ic_sites.len(), 1, "exactly one Ir::CallSend");
 
     let h = vm.code_cache.alloc(blob.code.len()).unwrap();
@@ -2757,7 +2793,12 @@ fn build_c2i_scenario(vm: &mut VmState) -> (u64, KlassOop, NmethodId) {
     let foo_method = fb.finish(vm, foo_sel, 2, 0);
     install_method(vm, target_klass, foo_sel, foo_method);
 
-    let vregs: Vec<VRegInfo> = (0..4).map(|_| VRegInfo { is_oop: true, is_fp: false }).collect();
+    let vregs: Vec<VRegInfo> = (0..4)
+        .map(|_| VRegInfo {
+            is_oop: true,
+            is_fp: false,
+        })
+        .collect();
     let block0 = IrBlock {
         id: BlockId(0),
         bci: 0,
@@ -2789,7 +2830,10 @@ fn build_c2i_scenario(vm: &mut VmState) -> (u64, KlassOop, NmethodId) {
         is_osr: false,
         blocks: vec![block0],
         vregs,
-        pool: vec![macvm::compiler::ir::PoolEntry { value: 0, kind: None }],
+        pool: vec![macvm::compiler::ir::PoolEntry {
+            value: 0,
+            kind: None,
+        }],
         argc: 1,
         ntemps: 0,
         ctx_vregs: Vec::new(),
@@ -2813,7 +2857,7 @@ fn build_c2i_scenario(vm: &mut VmState) -> (u64, KlassOop, NmethodId) {
             selector: foo_sel,
             argc: 3,
             static_klass: None,
-                self_klass: None,
+            self_klass: None,
         }],
         site_feedback: Vec::new(),
         inline_deps: Vec::new(),
@@ -2823,24 +2867,25 @@ fn build_c2i_scenario(vm: &mut VmState) -> (u64, KlassOop, NmethodId) {
     };
     let ra = regalloc::regalloc(&caller_method);
     let mut asm = JasmAssembler::new();
-    let (blob, _pcs, _verified_entry_off, emitted_ic_sites, _safepoints, _osr_off, _lids) = emit::emit(
-        &mut asm,
-        &caller_method,
-        &ra,
-        vm.stubs.stub_poll_addr(),
-        vm.stubs.must_be_boolean_addr(),
-        vm.stubs.alloc_slow_addr(),
-        vm.stubs.box_double_addr(),
-        vm.stubs.box_float64x2_addr(),
-        vm.stubs.box_float32x4_addr(),
-        vm.stubs.box_int32x4_addr(),
-        vm.stubs.call_primitive_addr(),
-        vm.stubs.nlr_originate_addr(),
-        None,
-        None,
-        None,
-        false,
-    );
+    let (blob, _pcs, _verified_entry_off, emitted_ic_sites, _safepoints, _osr_off, _lids) =
+        emit::emit(
+            &mut asm,
+            &caller_method,
+            &ra,
+            vm.stubs.stub_poll_addr(),
+            vm.stubs.must_be_boolean_addr(),
+            vm.stubs.alloc_slow_addr(),
+            vm.stubs.box_double_addr(),
+            vm.stubs.box_float64x2_addr(),
+            vm.stubs.box_float32x4_addr(),
+            vm.stubs.box_int32x4_addr(),
+            vm.stubs.call_primitive_addr(),
+            vm.stubs.nlr_originate_addr(),
+            None,
+            None,
+            None,
+            false,
+        );
     assert_eq!(emitted_ic_sites.len(), 1, "exactly one Ir::CallSend");
 
     let h = vm.code_cache.alloc(blob.code.len()).unwrap();
@@ -3026,7 +3071,12 @@ fn full_ic_lattice_mono_to_pic_to_mega() {
     }
 
     // Caller: one param (the target receiver), one send of `foo`.
-    let vregs: Vec<VRegInfo> = (0..2).map(|_| VRegInfo { is_oop: true, is_fp: false }).collect();
+    let vregs: Vec<VRegInfo> = (0..2)
+        .map(|_| VRegInfo {
+            is_oop: true,
+            is_fp: false,
+        })
+        .collect();
     let block0 = IrBlock {
         id: BlockId(0),
         bci: 0,
@@ -3050,7 +3100,10 @@ fn full_ic_lattice_mono_to_pic_to_mega() {
         is_osr: false,
         blocks: vec![block0],
         vregs,
-        pool: vec![macvm::compiler::ir::PoolEntry { value: 0, kind: None }],
+        pool: vec![macvm::compiler::ir::PoolEntry {
+            value: 0,
+            kind: None,
+        }],
         argc: 1,
         ntemps: 0,
         ctx_vregs: Vec::new(),
@@ -3074,7 +3127,7 @@ fn full_ic_lattice_mono_to_pic_to_mega() {
             selector: foo_sel,
             argc: 1,
             static_klass: None,
-                self_klass: None,
+            self_klass: None,
         }],
         site_feedback: Vec::new(),
         inline_deps: Vec::new(),
@@ -3084,24 +3137,25 @@ fn full_ic_lattice_mono_to_pic_to_mega() {
     };
     let ra = regalloc::regalloc(&caller_method);
     let mut asm = JasmAssembler::new();
-    let (blob, _pcs, _verified_entry_off, emitted_ic_sites, _safepoints, _osr_off, _lids) = emit::emit(
-        &mut asm,
-        &caller_method,
-        &ra,
-        vm.stubs.stub_poll_addr(),
-        vm.stubs.must_be_boolean_addr(),
-        vm.stubs.alloc_slow_addr(),
-        vm.stubs.box_double_addr(),
-        vm.stubs.box_float64x2_addr(),
-        vm.stubs.box_float32x4_addr(),
-        vm.stubs.box_int32x4_addr(),
-        vm.stubs.call_primitive_addr(),
-        vm.stubs.nlr_originate_addr(),
-        None,
-        None,
-        None,
-        false,
-    );
+    let (blob, _pcs, _verified_entry_off, emitted_ic_sites, _safepoints, _osr_off, _lids) =
+        emit::emit(
+            &mut asm,
+            &caller_method,
+            &ra,
+            vm.stubs.stub_poll_addr(),
+            vm.stubs.must_be_boolean_addr(),
+            vm.stubs.alloc_slow_addr(),
+            vm.stubs.box_double_addr(),
+            vm.stubs.box_float64x2_addr(),
+            vm.stubs.box_float32x4_addr(),
+            vm.stubs.box_int32x4_addr(),
+            vm.stubs.call_primitive_addr(),
+            vm.stubs.nlr_originate_addr(),
+            None,
+            None,
+            None,
+            false,
+        );
     assert_eq!(emitted_ic_sites.len(), 1);
 
     let h = vm.code_cache.alloc(blob.code.len()).unwrap();
@@ -3281,7 +3335,12 @@ fn dnu_from_compiled_code_reaches_does_not_understand() {
 
     // Caller: one param (the target receiver), one send of a selector
     // nothing anywhere implements -- must genuinely miss and reach rt_dnu.
-    let vregs: Vec<VRegInfo> = (0..2).map(|_| VRegInfo { is_oop: true, is_fp: false }).collect();
+    let vregs: Vec<VRegInfo> = (0..2)
+        .map(|_| VRegInfo {
+            is_oop: true,
+            is_fp: false,
+        })
+        .collect();
     let block0 = IrBlock {
         id: BlockId(0),
         bci: 0,
@@ -3305,7 +3364,10 @@ fn dnu_from_compiled_code_reaches_does_not_understand() {
         is_osr: false,
         blocks: vec![block0],
         vregs,
-        pool: vec![macvm::compiler::ir::PoolEntry { value: 0, kind: None }],
+        pool: vec![macvm::compiler::ir::PoolEntry {
+            value: 0,
+            kind: None,
+        }],
         argc: 1,
         ntemps: 0,
         ctx_vregs: Vec::new(),
@@ -3329,7 +3391,7 @@ fn dnu_from_compiled_code_reaches_does_not_understand() {
             selector: unknown_sel,
             argc: 1,
             static_klass: None,
-                self_klass: None,
+            self_klass: None,
         }],
         site_feedback: Vec::new(),
         inline_deps: Vec::new(),
@@ -3339,24 +3401,25 @@ fn dnu_from_compiled_code_reaches_does_not_understand() {
     };
     let ra = regalloc::regalloc(&caller_method);
     let mut asm = JasmAssembler::new();
-    let (blob, _pcs, _verified_entry_off, emitted_ic_sites, _safepoints, _osr_off, _lids) = emit::emit(
-        &mut asm,
-        &caller_method,
-        &ra,
-        vm.stubs.stub_poll_addr(),
-        vm.stubs.must_be_boolean_addr(),
-        vm.stubs.alloc_slow_addr(),
-        vm.stubs.box_double_addr(),
-        vm.stubs.box_float64x2_addr(),
-        vm.stubs.box_float32x4_addr(),
-        vm.stubs.box_int32x4_addr(),
-        vm.stubs.call_primitive_addr(),
-        vm.stubs.nlr_originate_addr(),
-        None,
-        None,
-        None,
-        false,
-    );
+    let (blob, _pcs, _verified_entry_off, emitted_ic_sites, _safepoints, _osr_off, _lids) =
+        emit::emit(
+            &mut asm,
+            &caller_method,
+            &ra,
+            vm.stubs.stub_poll_addr(),
+            vm.stubs.must_be_boolean_addr(),
+            vm.stubs.alloc_slow_addr(),
+            vm.stubs.box_double_addr(),
+            vm.stubs.box_float64x2_addr(),
+            vm.stubs.box_float32x4_addr(),
+            vm.stubs.box_int32x4_addr(),
+            vm.stubs.call_primitive_addr(),
+            vm.stubs.nlr_originate_addr(),
+            None,
+            None,
+            None,
+            false,
+        );
     assert_eq!(emitted_ic_sites.len(), 1);
 
     let h = vm.code_cache.alloc(blob.code.len()).unwrap();
@@ -4070,12 +4133,26 @@ fn deopt_resolve_frame_loc_from_real_regalloc() {
     // recorded stack names it (`extra_oop_live`'s exact-position fact),
     // not a widened range that would also (wrongly) cover unrelated code.
     assert_eq!(
-        resolve_frame_loc(VReg(0), p0, &ra.intervals, &ra.extra_oop_live, &Default::default(), &Default::default()),
+        resolve_frame_loc(
+            VReg(0),
+            p0,
+            &ra.intervals,
+            &ra.extra_oop_live,
+            &Default::default(),
+            &Default::default()
+        ),
         expected_self,
         "self must resolve at trap1, which reexecutes `self bar` and needs it"
     );
     assert_eq!(
-        resolve_frame_loc(VReg(0), p1, &ra.intervals, &ra.extra_oop_live, &Default::default(), &Default::default()),
+        resolve_frame_loc(
+            VReg(0),
+            p1,
+            &ra.intervals,
+            &ra.extra_oop_live,
+            &Default::default(),
+            &Default::default()
+        ),
         expected_self,
         "self must resolve at trap2 too, which reexecutes `self baz: a` and needs it"
     );
@@ -4087,7 +4164,14 @@ fn deopt_resolve_frame_loc_from_real_regalloc() {
     // which operands the specific reexecuted op reads).
     assert!(
         matches!(
-            resolve_frame_loc(VReg(1), p0, &ra.intervals, &ra.extra_oop_live, &Default::default(), &Default::default()),
+            resolve_frame_loc(
+                VReg(1),
+                p0,
+                &ra.intervals,
+                &ra.extra_oop_live,
+                &Default::default(),
+                &Default::default()
+            ),
             ValueLoc::FrameSlot(_)
         ),
         "the arg `a`, a unified slot, must resolve to a frame slot at trap1 too, even though \
@@ -4095,7 +4179,14 @@ fn deopt_resolve_frame_loc_from_real_regalloc() {
     );
     assert!(
         matches!(
-            resolve_frame_loc(VReg(1), p1, &ra.intervals, &ra.extra_oop_live, &Default::default(), &Default::default()),
+            resolve_frame_loc(
+                VReg(1),
+                p1,
+                &ra.intervals,
+                &ra.extra_oop_live,
+                &Default::default(),
+                &Default::default()
+            ),
             ValueLoc::FrameSlot(_)
         ),
         "the arg `a`, read by trap2's own recorded stack, must resolve to a frame slot there"
@@ -4104,7 +4195,14 @@ fn deopt_resolve_frame_loc_from_real_regalloc() {
     // A vreg that doesn't exist (or is dead everywhere) → Nil, the
     // materialize-nil case for a value never read after the resume bci.
     assert_eq!(
-        resolve_frame_loc(VReg(9999), p0, &ra.intervals, &ra.extra_oop_live, &Default::default(), &Default::default()),
+        resolve_frame_loc(
+            VReg(9999),
+            p0,
+            &ra.intervals,
+            &ra.extra_oop_live,
+            &Default::default(),
+            &Default::default()
+        ),
         ValueLoc::Nil
     );
 }

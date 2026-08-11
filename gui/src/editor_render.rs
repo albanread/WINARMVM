@@ -61,8 +61,14 @@ mod tests {
     #[test]
     fn buffer_for_covers_the_three_outcomes() {
         assert_eq!(
-            buffer_for(Some("Mandelbrot"), Some("Object subclass: Mandelbrot [ ]".into())),
-            ("Mandelbrot".to_string(), "Object subclass: Mandelbrot [ ]".to_string())
+            buffer_for(
+                Some("Mandelbrot"),
+                Some("Object subclass: Mandelbrot [ ]".into())
+            ),
+            (
+                "Mandelbrot".to_string(),
+                "Object subclass: Mandelbrot [ ]".to_string()
+            )
         );
         let (cur, src) = buffer_for(Some("Nope"), None);
         assert_eq!(cur, "");

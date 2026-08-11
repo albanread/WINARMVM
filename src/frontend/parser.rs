@@ -1251,8 +1251,7 @@ impl<'a> Parser<'a> {
                         let param_ty = self.capture_type_annotation()?; // (D11)
                         let return_type = self.capture_return_type_annotation()?;
                         self.expect(&Tok::LBracket, "expected '['")?;
-                        let (primitive, ffi, temps, temp_types, body) =
-                            self.parse_method_body()?;
+                        let (primitive, ffi, temps, temp_types, body) = self.parse_method_body()?;
                         self.expect(&Tok::RBracket, "expected ']'")?;
                         methods.push(MethodNode {
                             pattern_selector: "|".to_string(),
@@ -1275,7 +1274,8 @@ impl<'a> Parser<'a> {
                             self.check_not_reserved(self.cur.1, &n)?;
                             names.push(n);
                             self.bump()?;
-                            inst_var_types.push(self.capture_type_annotation()?); // `| count <Integer> |` (D11)
+                            inst_var_types.push(self.capture_type_annotation()?);
+                            // `| count <Integer> |` (D11)
                         }
                         self.expect(&Tok::VBar, "expected closing '|' after instance variables")?;
                         inst_vars.extend(names);
@@ -2028,7 +2028,10 @@ mod tests {
             panic!("nested")
         };
         assert_eq!(elems.len(), 3);
-        assert!(matches!(elems[1], Expr::DynArray { .. }), "nested brace array");
+        assert!(
+            matches!(elems[1], Expr::DynArray { .. }),
+            "nested brace array"
+        );
     }
 
     #[test]
@@ -2074,7 +2077,10 @@ mod tests {
         let (TopItem::ClassDef(ca), TopItem::ClassDef(cb)) = (&a[0], &b[0]) else {
             panic!("both parse to a class def");
         };
-        assert_eq!(ca.inst_vars, cb.inst_vars, "ivar names identical, annotations gone");
+        assert_eq!(
+            ca.inst_vars, cb.inst_vars,
+            "ivar names identical, annotations gone"
+        );
         assert_eq!(ca.methods.len(), cb.methods.len());
         for (ma, mb) in ca.methods.iter().zip(&cb.methods) {
             assert_eq!(ma.pattern_selector, mb.pattern_selector);
@@ -2128,6 +2134,8 @@ mod tests {
         // Missing period BETWEEN statements is still garbage, not silence.
         assert!(parse_top_items("3 + 4  5").is_err());
         // Whitespace/comments-only answers an empty list, not an error.
-        assert!(parse_top_items(" \"just a comment\" ").expect("ok").is_empty());
+        assert!(parse_top_items(" \"just a comment\" ")
+            .expect("ok")
+            .is_empty());
     }
 }

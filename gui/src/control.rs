@@ -87,9 +87,7 @@ fn read_frame(s: &mut TcpStream) -> std::io::Result<Option<String>> {
     let len: usize = String::from_utf8_lossy(&len_line)
         .trim()
         .parse()
-        .map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, "control: bad length")
-        })?;
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "control: bad length"))?;
     if len > 1 << 20 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,

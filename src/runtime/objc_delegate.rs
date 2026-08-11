@@ -766,7 +766,6 @@ fn action_target_class() -> Option<*mut c_void> {
         .map(|p| p as *mut c_void)
 }
 
-
 // ── the `#app` role: NSApp's delegate, and the scripting properties ──────────
 //
 // `docs/applescript_design.md` §6.2. Scripting properties on `application` are
@@ -966,7 +965,6 @@ fn app_delegate_class() -> Option<*mut c_void> {
         .map(|p| p as *mut c_void)
 }
 
-
 // ── scripting commands (design §3, §6.2) ────────────────────────────────────
 //
 // Each verb in the sdef names an `NSScriptCommand` subclass; Cocoa Scripting
@@ -1044,10 +1042,16 @@ macro_rules! script_command {
 script_command!(imp_perform_evaluate, "performEvaluateCommand:");
 script_command!(imp_perform_browse, "performBrowseCommand:");
 script_command!(imp_perform_snapshot, "performSnapshotCommand:");
-script_command!(imp_perform_clear_transcript, "performClearTranscriptCommand:");
+script_command!(
+    imp_perform_clear_transcript,
+    "performClearTranscriptCommand:"
+);
 // World management (the World menu's verbs, scriptable too).
 script_command!(imp_perform_save_snapshot, "performSaveSnapshotCommand:");
-script_command!(imp_perform_restore_snapshot, "performRestoreSnapshotCommand:");
+script_command!(
+    imp_perform_restore_snapshot,
+    "performRestoreSnapshotCommand:"
+);
 script_command!(imp_perform_compact_world, "performCompactWorldCommand:");
 script_command!(imp_perform_revert_world, "performRevertWorldCommand:");
 script_command!(imp_perform_revert_last, "performRevertLastCommand:");
@@ -1069,10 +1073,7 @@ pub fn register_script_commands() -> bool {
                 "MacvmEvaluateCommand",
                 imp_ptr!(imp_perform_evaluate, ImpId0),
             ),
-            (
-                "MacvmBrowseCommand",
-                imp_ptr!(imp_perform_browse, ImpId0),
-            ),
+            ("MacvmBrowseCommand", imp_ptr!(imp_perform_browse, ImpId0)),
             (
                 "MacvmSnapshotCommand",
                 imp_ptr!(imp_perform_snapshot, ImpId0),

@@ -132,8 +132,15 @@ pub fn build_world_model(world_dir: &Path) -> Result<WorldModel, String> {
         let file_path = world_dir.join(line);
         let text = std::fs::read_to_string(&file_path)
             .map_err(|e| format!("cannot read {}: {e}", file_path.display()))?;
-        let items = parser::parse_file(&text)
-            .map_err(|e| format!("{}:{}:{}: {}", file_path.display(), e.span.line, e.span.col, e.msg))?;
+        let items = parser::parse_file(&text).map_err(|e| {
+            format!(
+                "{}:{}:{}: {}",
+                file_path.display(),
+                e.span.line,
+                e.span.col,
+                e.msg
+            )
+        })?;
         for item in items {
             if let TopItem::ClassDef(c) = item {
                 model.add_or_reopen(c);

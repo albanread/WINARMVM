@@ -63,13 +63,9 @@ fn find_method<'m>(model: &'m WorldModel, start_class: &str, selector: &str) -> 
         }
         current = class.superclass.clone();
     }
-    if model
-        .classes
-        .iter()
-        .any(|(name, class)| {
-            class.instance_methods.contains_key(selector) && is_descendant_of(model, name, start_class)
-        })
-    {
+    if model.classes.iter().any(|(name, class)| {
+        class.instance_methods.contains_key(selector) && is_descendant_of(model, name, start_class)
+    }) {
         return Lookup::PlausibleViaDescendant;
     }
     Lookup::NotFound
@@ -139,9 +135,9 @@ fn nominal_head(t: &ResolvedType) -> Option<String> {
         ResolvedType::Written(TypeExpr::Named(n)) => Some(n.clone()),
         ResolvedType::Written(TypeExpr::Generic { head, .. }) if head == "Self" => None,
         ResolvedType::Written(TypeExpr::Generic { head, .. }) => Some(head.clone()),
-        ResolvedType::Written(TypeExpr::Block { .. } | TypeExpr::Union(_) | TypeExpr::InferenceDef(_)) => {
-            None
-        }
+        ResolvedType::Written(
+            TypeExpr::Block { .. } | TypeExpr::Union(_) | TypeExpr::InferenceDef(_),
+        ) => None,
     }
 }
 
@@ -191,7 +187,11 @@ pub fn check_send(
             // `find_method` (instance-methods only) can't do correctly.
             return ResolvedType::Dynamic;
         }
-        match model.classes.get(self_class).and_then(|c| c.superclass.clone()) {
+        match model
+            .classes
+            .get(self_class)
+            .and_then(|c| c.superclass.clone())
+        {
             Some(super_name) => super_name,
             None => return ResolvedType::Dynamic, // Object's nil superclass, or unmodeled
         }

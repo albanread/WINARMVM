@@ -1830,7 +1830,13 @@ fn prim_game_set_pane_size(vm: &mut VmState, args: &[Oop]) -> PrimResult {
     if w <= 0 || h <= 0 || w > 4096 || h > 4096 {
         return PrimResult::Fail;
     }
-    game_emit(vm, GameCommand::SetPaneSize { w: w as u32, h: h as u32 });
+    game_emit(
+        vm,
+        GameCommand::SetPaneSize {
+            w: w as u32,
+            h: h as u32,
+        },
+    );
     PrimResult::Ok(args[0])
 }
 
@@ -1860,7 +1866,18 @@ fn prim_game_text(vm: &mut VmState, args: &[Oop]) -> PrimResult {
     };
     let (r, g, b) = unpack_rgb(rgb);
     let scale = scale.clamp(1, 16) as u32;
-    game_emit(vm, GameCommand::Text { x, y, text, r, g, b, scale });
+    game_emit(
+        vm,
+        GameCommand::Text {
+            x,
+            y,
+            text,
+            r,
+            g,
+            b,
+            scale,
+        },
+    );
     PrimResult::Ok(args[0])
 }
 
@@ -1920,7 +1937,13 @@ fn prim_game_shader_param(vm: &mut VmState, args: &[Oop]) -> PrimResult {
     if !(0..8).contains(&index) {
         return PrimResult::Fail;
     }
-    game_emit(vm, GameCommand::ShaderParam { index: index as usize, value });
+    game_emit(
+        vm,
+        GameCommand::ShaderParam {
+            index: index as usize,
+            value,
+        },
+    );
     PrimResult::Ok(args[0])
 }
 
@@ -1943,18 +1966,25 @@ fn prim_game_set_frame_rate(vm: &mut VmState, args: &[Oop]) -> PrimResult {
 /// `linePaletteAt:index:rgb:` (261): per-scanline palette override. Colour is a
 /// packed `0xRRGGBB` SmallInteger (see `unpack_rgb`).
 fn prim_game_line_palette(vm: &mut VmState, args: &[Oop]) -> PrimResult {
-    let (Some(line), Some(index), Some(rgb)) = (
-        smi_i64(args[1]),
-        smi_byte(args[2]),
-        smi_i64(args[3]),
-    ) else {
+    let (Some(line), Some(index), Some(rgb)) =
+        (smi_i64(args[1]), smi_byte(args[2]), smi_i64(args[3]))
+    else {
         return PrimResult::Fail;
     };
     if line < 0 || index == 0 || index > 15 {
         return PrimResult::Fail; // index 0 is transparent; per-line is 1..15
     }
     let (r, g, b) = unpack_rgb(rgb);
-    game_emit(vm, GameCommand::LinePalette { line: line as u32, index, r, g, b });
+    game_emit(
+        vm,
+        GameCommand::LinePalette {
+            line: line as u32,
+            index,
+            r,
+            g,
+            b,
+        },
+    );
     PrimResult::Ok(args[0])
 }
 
@@ -5675,7 +5705,11 @@ mod tests {
     /// The guest-side mirror is `frontend::codegen::check_limits`.
     #[test]
     fn prim_argc_within_buffer() {
-        let max = PRIMITIVES.iter().map(|d| d.argc as usize).max().unwrap_or(0);
+        let max = PRIMITIVES
+            .iter()
+            .map(|d| d.argc as usize)
+            .max()
+            .unwrap_or(0);
         assert!(
             max <= crate::oops::layout::MAX_PRIMITIVE_ARGS,
             "a primitive declares {max} args > MAX_PRIMITIVE_ARGS ({}) — it would \

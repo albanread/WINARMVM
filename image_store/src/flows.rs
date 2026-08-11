@@ -32,7 +32,10 @@ pub fn is_valid_var_name(s: &str) -> bool {
 /// from the image, exactly as the web reads it from its mirror): the .mst
 /// reopen that live-compiles ONE method into an existing class.
 pub fn reopen_one_method(superclass: &str, class_name: &str, method_text: &str) -> String {
-    format!("{superclass} subclass: {class_name} [\n{}\n]\n", method_text.trim())
+    format!(
+        "{superclass} subclass: {class_name} [\n{}\n]\n",
+        method_text.trim()
+    )
 }
 
 /// The class-variable reopen `vm_host`'s `SmapplAddVar` arm live-compiles
@@ -64,14 +67,30 @@ pub fn new_class_from_source(
     if matches!(img.class_named(&pc.name), Ok(Some(_))) {
         return Err(format!("A class named {} already exists.", pc.name));
     }
-    img.create_or_reopen_class(&pc.name, pc.superclass.as_deref(), "", "", &pc.instance_vars)
-        .map_err(|e| e.to_string())?;
+    img.create_or_reopen_class(
+        &pc.name,
+        pc.superclass.as_deref(),
+        "",
+        "",
+        &pc.instance_vars,
+    )
+    .map_err(|e| e.to_string())?;
     let source_file = default_source_file.unwrap_or(INTERACTIVE_SOURCE_FILE);
     let mut failed = 0usize;
     for m in &pc.methods {
-        let side = if m.is_class_side { Side::Class } else { Side::Instance };
+        let side = if m.is_class_side {
+            Side::Class
+        } else {
+            Side::Instance
+        };
         if img
-            .create_or_reopen_method(&pc.name, side, &m.selector, "as yet unclassified", &m.source)
+            .create_or_reopen_method(
+                &pc.name,
+                side,
+                &m.selector,
+                "as yet unclassified",
+                &m.source,
+            )
             .is_err()
         {
             failed += 1;
@@ -192,7 +211,8 @@ mod tests {
         let cls = img.class_named("Painter").unwrap().expect("stored");
         assert_eq!(cls.instance_vars, "brush");
         assert_eq!(
-            img.method_source("Painter", Side::Instance, "stroke").unwrap(),
+            img.method_source("Painter", Side::Instance, "stroke")
+                .unwrap(),
             Some("stroke [ ^1 ]".to_string())
         );
         assert!(new_class_from_source(&img, "Object subclass: Painter [\n]", None).is_err());
@@ -259,7 +279,8 @@ mod tests {
         // A brand-new method via save_method: gets the synthetic home.
         save_method(&img, "Painter", Side::Instance, "dab: x [ ^x ]", None).expect("save");
         assert_eq!(
-            img.method_source_file("Painter", Side::Instance, "dab:").unwrap(),
+            img.method_source_file("Painter", Side::Instance, "dab:")
+                .unwrap(),
             Some(INTERACTIVE_SOURCE_FILE.to_string())
         );
 
@@ -271,7 +292,8 @@ mod tests {
             .unwrap();
         save_method(&img, "Painter", Side::Instance, "dab: x [ ^x + 1 ]", None).expect("re-save");
         assert_eq!(
-            img.method_source_file("Painter", Side::Instance, "dab:").unwrap(),
+            img.method_source_file("Painter", Side::Instance, "dab:")
+                .unwrap(),
             Some("12_real.mst".to_string()),
             "editing an already-homed method must not clobber its real source_file"
         );

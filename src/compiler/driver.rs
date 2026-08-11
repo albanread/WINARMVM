@@ -894,7 +894,12 @@ fn compile_method_full(
                 }
             };
             for (i, e) in ir_method.pool.iter().enumerate() {
-                eprintln!("  pool[{i}] = {:#x} {:?} {}", e.value, e.kind, named(e.value));
+                eprintln!(
+                    "  pool[{i}] = {:#x} {:?} {}",
+                    e.value,
+                    e.kind,
+                    named(e.value)
+                );
             }
             eprintln!("==== END IR {sel} ====");
         }
@@ -946,8 +951,7 @@ fn compile_method_full(
     {
         static LOG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         if *LOG.get_or_init(|| std::env::var_os("MACVM_F3C_COUNT").is_some()) {
-            let (freed, crossing, freed_ext) =
-                regalloc::f3c_census(&ir_method, &regalloc_result);
+            let (freed, crossing, freed_ext) = regalloc::f3c_census(&ir_method, &regalloc_result);
             if crossing > 0 {
                 let sel = crate::oops::wrappers::SymbolOop::try_from(method.selector())
                     .map(|s| s.as_string())
@@ -1213,29 +1217,36 @@ fn compile_method_full(
         reload_pos: req.reload_pos,
     });
     let frame_slots_for_osr = regalloc_result.frame_slots;
-    let (blob, block_pcs, verified_entry_off, emitted_ic_sites, safepoint_pcs, osr_off, emitted_literal_ids) =
-        emit::emit(
-            &mut asm,
-            &ir_method,
-            &regalloc_result,
-            stub_poll_addr,
-            must_be_boolean_addr,
-            alloc_slow_addr,
-            box_double_addr,
-            box_float64x2_addr,
-            box_float32x4_addr,
-            box_int32x4_addr,
-            call_primitive_addr,
-            nlr_originate_addr,
-            prim_shim,
-            // S24 A1: a block nmethod has NO receiver-klass customization
-            // (design §2.1 — every closure is a closure_klass instance;
-            // instvar soundness comes from prefix-stable layouts, not an
-            // entry guard), so verified_entry == entry.
-            if method.is_block() { None } else { Some(guard) },
-            osr_req.as_ref(),
-            emit_frameless,
-        );
+    let (
+        blob,
+        block_pcs,
+        verified_entry_off,
+        emitted_ic_sites,
+        safepoint_pcs,
+        osr_off,
+        emitted_literal_ids,
+    ) = emit::emit(
+        &mut asm,
+        &ir_method,
+        &regalloc_result,
+        stub_poll_addr,
+        must_be_boolean_addr,
+        alloc_slow_addr,
+        box_double_addr,
+        box_float64x2_addr,
+        box_float32x4_addr,
+        box_int32x4_addr,
+        call_primitive_addr,
+        nlr_originate_addr,
+        prim_shim,
+        // S24 A1: a block nmethod has NO receiver-klass customization
+        // (design §2.1 — every closure is a closure_klass instance;
+        // instvar soundness comes from prefix-stable layouts, not an
+        // entry guard), so verified_entry == entry.
+        if method.is_block() { None } else { Some(guard) },
+        osr_req.as_ref(),
+        emit_frameless,
+    );
 
     // Debugger (MACVM_DBG_IR's second half): the same selector match also
     // dumps the EMITTED LISTING — the assembler's own per-instruction lines,
@@ -1327,12 +1338,11 @@ fn compile_method_full(
     let mut oopmaps: Vec<OopMap> = vec![OopMap::empty()];
     let mut safepoint_pcdescs: Vec<PcDesc> = Vec::with_capacity(safepoint_pcs.len());
     // F3: const-uniform vregs' slots are never written — exclude from GC maps.
-    let f3_skip: std::collections::HashSet<u32> =
-        crate::compiler::ir::const_smi_vregs(&ir_method)
-            .keys()
-            .chain(crate::compiler::ir::const_pool_vregs(&ir_method).keys())
-            .copied()
-            .collect();
+    let f3_skip: std::collections::HashSet<u32> = crate::compiler::ir::const_smi_vregs(&ir_method)
+        .keys()
+        .chain(crate::compiler::ir::const_pool_vregs(&ir_method).keys())
+        .copied()
+        .collect();
     for sp in &safepoint_pcs {
         let map = oopmap::build_for_position(
             &regalloc_result.intervals,
@@ -1419,10 +1429,7 @@ fn compile_method_full(
             selector: s.selector,
             argc: s.argc,
             state: match resolved.or(*f1) {
-                Some((klass, target)) => CompiledIcState::Mono {
-                    klass,
-                    target,
-                },
+                Some((klass, target)) => CompiledIcState::Mono { klass, target },
                 None => CompiledIcState::Unresolved,
             },
             // S13 step 10d: `super_resolutions` is `Some` iff this is a
@@ -1438,8 +1445,12 @@ fn compile_method_full(
     // value read after a resume bci is spilled (S12 spill-all), so
     // `scopes::resolve_frame_loc` alone resolves receiver/slots/stack; a
     // value not live at the safepoint is dead -> Nil.
-    let (deopt_scopes, deopt_pcdescs) =
-        build_deopt_metadata(&ir_method, &regalloc_result, &safepoint_pcs, &emitted_literal_ids);
+    let (deopt_scopes, deopt_pcdescs) = build_deopt_metadata(
+        &ir_method,
+        &regalloc_result,
+        &safepoint_pcs,
+        &emitted_literal_ids,
+    );
 
     // The dynamic-dispatch key `(rcvr_klass, key_selector)` belongs to this
     // nmethod ONLY if dynamic lookup actually resolves that pair to the
@@ -1533,9 +1544,7 @@ fn compile_method_full(
         .iter()
         .zip(super_resolutions.iter().zip(&f1_resolutions))
     {
-        let patch_target = resolved
-            .or(*f1)
-            .map_or(resolve_addr, |(_, target)| target);
+        let patch_target = resolved.or(*f1).map_or(resolve_addr, |(_, target)| target);
         vm.code_cache.patch_branch26_at(h, site.off, patch_target);
     }
     // F1 deps: every direct-patched proven-self site pins (klass, selector)
@@ -1543,13 +1552,9 @@ fn compile_method_full(
     // its `bl` bypasses dynamic dispatch entirely.
     for (site, f1) in emitted_ic_sites.iter().zip(&f1_resolutions) {
         if let Some((k, _)) = f1 {
-            let dup = nm
-                .inline_deps
-                .iter()
-                .any(|(dk, ds)| {
-                    dk.oop().raw() == k.oop().raw()
-                        && ds.oop().raw() == site.selector.oop().raw()
-                });
+            let dup = nm.inline_deps.iter().any(|(dk, ds)| {
+                dk.oop().raw() == k.oop().raw() && ds.oop().raw() == site.selector.oop().raw()
+            });
             if !dup {
                 nm.inline_deps.push((*k, site.selector));
             }
@@ -1649,10 +1654,11 @@ fn build_deopt_metadata(
     // R2: pool-literal-uniform vregs rematerialize on deopt via
     // ValueLoc::ConstPool(pool word index) — translate PoolLit through the
     // assembler literal table (dense id order == pool word order).
-    let f3_pool: std::collections::HashMap<u32, u32> = crate::compiler::ir::const_pool_vregs(ir_method)
-        .into_iter()
-        .map(|(v, pl)| (v, literal_ids[pl as usize].0))
-        .collect();
+    let f3_pool: std::collections::HashMap<u32, u32> =
+        crate::compiler::ir::const_pool_vregs(ir_method)
+            .into_iter()
+            .map(|(v, pl)| (v, literal_ids[pl as usize].0))
+            .collect();
     let extra_oop_live = &regalloc_result.extra_oop_live;
     let n_slots = ir_method.argc as usize + ir_method.ntemps as usize;
     let mut rec = ScopeDescRecorder::new();
@@ -1740,7 +1746,14 @@ fn build_deopt_metadata(
                     // itself); everywhere else the pin (regalloc) keeps it
                     // live, so `resolve_frame_loc` distinguishes the two
                     // cases exactly.
-                    match resolve_frame_loc(ctx_vreg, position, intervals, extra_oop_live, &f3_const, &f3_pool) {
+                    match resolve_frame_loc(
+                        ctx_vreg,
+                        position,
+                        intervals,
+                        extra_oop_live,
+                        &f3_const,
+                        &f3_pool,
+                    ) {
                         // Pre-def window (the prologue alloc's own safepoint):
                         // hand the interpreter a FRESH nil-filled Context via
                         // the Elided path — NOT `CtxLoc::None`. The deopt
@@ -1765,7 +1778,16 @@ fn build_deopt_metadata(
                         temps: ir_method
                             .ctx_vregs
                             .iter()
-                            .map(|&v| resolve_frame_loc(v, position, intervals, extra_oop_live, &f3_const, &f3_pool))
+                            .map(|&v| {
+                                resolve_frame_loc(
+                                    v,
+                                    position,
+                                    intervals,
+                                    extra_oop_live,
+                                    &f3_const,
+                                    &f3_pool,
+                                )
+                            })
                             .collect(),
                     }
                 };
@@ -1817,20 +1839,38 @@ fn build_deopt_metadata(
                             let pending_stack = level
                                 .caller_pending_stack
                                 .iter()
-                                .map(|&v| resolve_frame_loc(v, position, intervals, extra_oop_live, &f3_const, &f3_pool))
+                                .map(|&v| {
+                                    resolve_frame_loc(
+                                        v,
+                                        position,
+                                        intervals,
+                                        extra_oop_live,
+                                        &f3_const,
+                                        &f3_pool,
+                                    )
+                                })
                                 .collect();
                             let inl_receiver = resolve_frame_loc(
                                 level.receiver,
                                 position,
                                 intervals,
                                 extra_oop_live,
-                    &f3_const,
-                    &f3_pool,
+                                &f3_const,
+                                &f3_pool,
                             );
                             let mut inl_slots: Vec<_> = level
                                 .slots
                                 .iter()
-                                .map(|&v| resolve_frame_loc(v, position, intervals, extra_oop_live, &f3_const, &f3_pool))
+                                .map(|&v| {
+                                    resolve_frame_loc(
+                                        v,
+                                        position,
+                                        intervals,
+                                        extra_oop_live,
+                                        &f3_const,
+                                        &f3_pool,
+                                    )
+                                })
                                 .collect();
                             // S14 step 7-IV-c: a slot holding an ELIDED-CLOSURE
                             // phantom overrides its (filler) vreg location — the
@@ -1861,7 +1901,16 @@ fn build_deopt_metadata(
                 let mut stack: Vec<_> = raw
                     .stack
                     .iter()
-                    .map(|&v| resolve_frame_loc(v, position, intervals, extra_oop_live, &f3_const, &f3_pool))
+                    .map(|&v| {
+                        resolve_frame_loc(
+                            v,
+                            position,
+                            intervals,
+                            extra_oop_live,
+                            &f3_const,
+                            &f3_pool,
+                        )
+                    })
                     .collect();
                 // S14 step 7-IV-c: phantom stack entries override their filler
                 // vregs (a block-arg send's guard-cold reexecute stack; in-callee
@@ -2613,8 +2662,9 @@ mod tests {
         let ra = regalloc::regalloc(&ir_method);
 
         let mut asm = JasmAssembler::new();
-        let (_blob, _pcs, _ve, _ic, safepoint_pcs, _osr_off, lids) =
-            emit::emit(&mut asm, &ir_method, &ra, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, None, None, false);
+        let (_blob, _pcs, _ve, _ic, safepoint_pcs, _osr_off, lids) = emit::emit(
+            &mut asm, &ir_method, &ra, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, None, None, false,
+        );
         assert_eq!(
             safepoint_pcs.len(),
             2,
@@ -2767,8 +2817,9 @@ mod tests {
         let ra = regalloc::regalloc(&ir_method);
 
         let mut asm = JasmAssembler::new();
-        let (_blob, _pcs, _ve, _ic, safepoint_pcs, _osr_off, lids) =
-            emit::emit(&mut asm, &ir_method, &ra, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, None, None, false);
+        let (_blob, _pcs, _ve, _ic, safepoint_pcs, _osr_off, lids) = emit::emit(
+            &mut asm, &ir_method, &ra, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, None, None, false,
+        );
 
         let (blob, pcdescs) = build_deopt_metadata(&ir_method, &ra, &safepoint_pcs, &lids);
 
@@ -2845,7 +2896,11 @@ mod tests {
 /// falls back to framed.
 fn frameless_eligible(m: &ir::IrMethod, ra: &regalloc::RegallocResult) -> bool {
     use crate::compiler::ir::Ir as I;
-    let ops_ok = m.blocks.iter().flat_map(|b| b.code.iter()).all(|op| match op {
+    let ops_ok = m
+        .blocks
+        .iter()
+        .flat_map(|b| b.code.iter())
+        .all(|op| match op {
         I::ConstSmi { .. }
         | I::ConstPool { .. }
         | I::Move { .. }

@@ -4,7 +4,7 @@
 //! published into the same [`CodeCache`] real compiled methods live in.
 
 use crate::compiler::assembler::{
-    d,    imm, mem, mem_post, mem_pre, sp, x, xr, Assembler, CodeBlob, Cond, RelocKind,
+    d, imm, mem, mem_post, mem_pre, sp, x, xr, Assembler, CodeBlob, Cond, RelocKind,
 };
 use crate::compiler::jasm_assembler::JasmAssembler;
 use crate::oops::layout::{
@@ -1464,7 +1464,10 @@ pub unsafe extern "C" fn rt_interpret_call(
             HIST.with(|h| *h.borrow_mut().entry(key).or_insert(0) += 1);
             if t % 500_000 == 0 {
                 let c = COMPILED_AVAIL.load(Ordering::Relaxed);
-                eprintln!("c2i-census: total={t} compiled_avail={c} ({}%)", c * 100 / t);
+                eprintln!(
+                    "c2i-census: total={t} compiled_avail={c} ({}%)",
+                    c * 100 / t
+                );
                 HIST.with(|h| {
                     let mut v: Vec<(String, u64)> =
                         h.borrow().iter().map(|(s, n)| (s.clone(), *n)).collect();

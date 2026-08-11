@@ -208,7 +208,8 @@ impl<'a> Parser<'a> {
         let Some(name) = self.read_ident() else {
             return Err(ParseError(format!(
                 "expected a type name or '[', found {:?}",
-                self.peek().map_or(String::from("end of input"), String::from)
+                self.peek()
+                    .map_or(String::from("end of input"), String::from)
             )));
         };
         let name = name.to_string();
@@ -279,7 +280,8 @@ impl<'a> Parser<'a> {
         } else {
             Err(ParseError(format!(
                 "expected '{want}', found {:?}",
-                self.peek().map_or(String::from("end of input"), String::from)
+                self.peek()
+                    .map_or(String::from("end of input"), String::from)
             )))
         }
     }

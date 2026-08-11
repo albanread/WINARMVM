@@ -10,7 +10,9 @@ use std::collections::HashMap;
 use crate::bytecode::BytecodeBuilder;
 use crate::memory::alloc;
 use crate::memory::handles::{Handle, HandleScope};
-use crate::oops::layout::{MAX_PRIMITIVE_ARGS, METHOD_ARGC_MAX, METHOD_NCTX_MAX, METHOD_NTEMPS_MAX};
+use crate::oops::layout::{
+    MAX_PRIMITIVE_ARGS, METHOD_ARGC_MAX, METHOD_NCTX_MAX, METHOD_NTEMPS_MAX,
+};
 use crate::oops::smi::SmallInt;
 use crate::oops::wrappers::{ArrayOop, KlassOop, MemOop, MethodOop};
 use crate::oops::Oop;
@@ -1289,7 +1291,8 @@ fn compile_method_inner(
     if !line_map.is_empty() {
         let holder_klass = cx.holder.get(cx.vm);
         let holder_name = crate::runtime::error::name_of(holder_klass.name());
-        let key = crate::runtime::debug::method_key(&holder_name, class_side, &method.pattern_selector);
+        let key =
+            crate::runtime::debug::method_key(&holder_name, class_side, &method.pattern_selector);
         crate::runtime::debug::record_line_map(cx.vm, key, line_map);
     }
     m.set_flags(

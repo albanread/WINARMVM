@@ -418,7 +418,6 @@ pub enum GameCommand {
     // engine call the GUI game host already links (`macgamepane-graphics`),
     // exactly like the commands above; a GUI that has not yet grown the arm
     // ignores it harmlessly. ──
-
     /// Resize the pane to `w`x`h`, recreating the indexed framebuffer, text
     /// overlay and shader layer at the new resolution. A demo sends this FIRST
     /// (before any draw) if it wants a non-default size; a demo that never
@@ -558,10 +557,8 @@ impl VmMonitorSlot {
     pub fn publish(&self, m: VmMetrics) {
         use std::sync::atomic::Ordering::Relaxed;
         *self.metrics.lock().unwrap_or_else(|e| e.into_inner()) = m;
-        *self
-            .last_publish
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
+        *self.last_publish.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(std::time::Instant::now());
         self.alive.store(true, Relaxed);
     }
 
@@ -1378,13 +1375,21 @@ impl VmHandle {
     /// (`class` may end in " class" for the metaclass side). Pins the method
     /// to tier-0 so the dispatch hook fires. Runs on the primary's own thread
     /// (the supervisor pump services the GUI's request). `Ok(msg)`/`Err(why)`.
-    pub fn set_breakpoint_by_name(&mut self, class: &str, selector: &str) -> Result<String, String> {
+    pub fn set_breakpoint_by_name(
+        &mut self,
+        class: &str,
+        selector: &str,
+    ) -> Result<String, String> {
         self.vm.debug.active = true;
         crate::runtime::debug::set_breakpoint_by_name(&mut self.vm, class, selector, 0)
     }
 
     /// The clearing twin of [`set_breakpoint_by_name`].
-    pub fn clear_breakpoint_by_name(&mut self, class: &str, selector: &str) -> Result<String, String> {
+    pub fn clear_breakpoint_by_name(
+        &mut self,
+        class: &str,
+        selector: &str,
+    ) -> Result<String, String> {
         crate::runtime::debug::clear_breakpoint_by_name(&mut self.vm, class, selector, 0)
     }
 
@@ -2670,7 +2675,6 @@ mod tests {
         );
     }
 
-
     /// Every `GamePane new` installs the default 16-colour palette
     /// (world/43_gamepane.mst — a fresh pane arrives with usable colours, so
     /// a beginner's first `cls:`/`disc:` is visible instead of silently
@@ -3257,7 +3261,8 @@ mod tests {
         )
         .expect("define UdpProbe");
         vm.exec("WkTest reset.").expect("reset");
-        vm.exec("WkTest w1: IoWorker spawn.").expect("spawn IoWorker");
+        vm.exec("WkTest w1: IoWorker spawn.")
+            .expect("spawn IoWorker");
         vm.exec("UdpProbe setUp: WkTest w1.")
             .expect("bind server, watch both sockets, send");
         vm.exec("Worker runLoopWhile: [ (WkTest tickCapped: 300) and: [ UdpProbe got isNil ] ].")
@@ -3314,7 +3319,8 @@ mod tests {
         )
         .expect("define PingProbe");
         vm.exec("WkTest reset.").expect("reset");
-        vm.exec("WkTest w1: IoWorker spawn.").expect("spawn IoWorker");
+        vm.exec("WkTest w1: IoWorker spawn.")
+            .expect("spawn IoWorker");
         vm.exec("PingProbe setUp: WkTest w1.")
             .expect("open ICMP, watch reply, send echo");
         // Where the OS refuses even the unprivileged ICMP socket, skip
@@ -3366,7 +3372,8 @@ mod tests {
             .to_string();
         if icmp_ok == "true" {
             vm.exec("WkTest reset.").expect("reset");
-            vm.exec("WkTest w1: IoWorker spawn.").expect("spawn IoWorker");
+            vm.exec("WkTest w1: IoWorker spawn.")
+                .expect("spawn IoWorker");
             vm.exec("Ping via: WkTest w1 host: '127.0.0.1' count: 3.")
                 .expect("run a non-blocking loopback ping");
             let out = captured.lock().unwrap().concat();
@@ -3824,8 +3831,10 @@ mod tests {
                  start).",
         )
         .expect("the storm tree starts (its first death arrives async)");
-        vm.exec("Worker runLoopWhile: [ (WkTest tickCapped: 200) and: [ SupTest state ~~ #givenUp ] ].")
-            .expect("run until give-up");
+        vm.exec(
+            "Worker runLoopWhile: [ (WkTest tickCapped: 200) and: [ SupTest state ~~ #givenUp ] ].",
+        )
+        .expect("run until give-up");
         assert_eq!(vm.eval("SupTest state").expect("state").trim(), "#givenUp");
         assert_eq!(
             vm.eval("SupTest restarts").expect("restarts").trim(),
@@ -4513,8 +4522,10 @@ mod tests {
             crate::runtime::workers::register_hosted_worker(&mut primary.vm, Arc::new(|| {}))
                 .expect("register the hosted UI worker");
         let mut ui = boot_ui_worker(id, to_primary);
-        ui.exec("Worker uiRequest: #refresh args: (Array with: #browser) onReply: [:r | UiT r: r].")
-            .expect("ship the #refresh request");
+        ui.exec(
+            "Worker uiRequest: #refresh args: (Array with: #browser) onReply: [:r | UiT r: r].",
+        )
+        .expect("ship the #refresh request");
         primary
             .exec("Worker dispatchInbox.")
             .expect("the primary serves the #refresh");
@@ -4573,7 +4584,9 @@ mod tests {
         // first subclass. (The multi-pane browser: classes in the outline,
         // selectors in the table.)
         assert_eq!(
-            ui.eval("(CocoaBrowser resolvePath: '') at: 1").expect("root name").trim(),
+            ui.eval("(CocoaBrowser resolvePath: '') at: 1")
+                .expect("root name")
+                .trim(),
             "'Object'"
         );
         assert_eq!(
@@ -4706,8 +4719,8 @@ mod tests {
             // pointer) — exactly `rebuild_ui`'s order.
             publish_ui_vm(std::ptr::null_mut());
             drop(ui); // Drop = Reservation munmap + deopt deregister + slot release
-            // The load-bearing assertion: THIS thread's slot count never grows
-            // across cycles — a stranded slot would climb toward the 64 cap.
+                      // The load-bearing assertion: THIS thread's slot count never grows
+                      // across cycles — a stranded slot would climb toward the 64 cap.
             assert!(
                 current_thread_jmp_slots() <= baseline,
                 "cycle {cycle}: this thread's jmp slots {} exceeded baseline {baseline} — a restart stranded a recovery slot",
@@ -6050,7 +6063,9 @@ mod tests {
                FfiBadArg class >> go: x [ <primitive: FFI function: #abs ret: #g args: #(s)> ] ]",
         )
         .expect("compiles");
-        let err = vm.eval("FfiBadArg go: 3.").expect_err("arg token s must Err");
+        let err = vm
+            .eval("FfiBadArg go: 3.")
+            .expect_err("arg token s must Err");
         assert!(
             format!("{err}").contains("unsupported argument-shape token \"s\""),
             "must name the token, got: {err}"
@@ -6148,21 +6163,40 @@ mod tests {
 
         // GetTickCount64: plausible (an up-machine has been alive >1s and
         // <10 years) and monotonic across two calls.
-        let t1: i64 = vm.eval("WinPin tick.").expect("tick 1").trim().parse().unwrap();
-        let t2: i64 = vm.eval("WinPin tick.").expect("tick 2").trim().parse().unwrap();
+        let t1: i64 = vm
+            .eval("WinPin tick.")
+            .expect("tick 1")
+            .trim()
+            .parse()
+            .unwrap();
+        let t2: i64 = vm
+            .eval("WinPin tick.")
+            .expect("tick 2")
+            .trim()
+            .parse()
+            .unwrap();
         assert!(t1 > 1_000, "GetTickCount64 must be plausible, got {t1}");
         assert!(t1 < 10 * 365 * 24 * 3600 * 1000, "implausibly large: {t1}");
         assert!(t2 >= t1, "GetTickCount64 went backwards: {t1} -> {t2}");
 
         // MulDiv rounds (6*7)/4 = 10.5 to 11 — the rounding proves the REAL
         // function ran, not a truncating reimplementation anywhere between.
-        assert_eq!(vm.eval("WinPin mulDiv: 6 by: 7 div: 4.").unwrap().trim(), "11");
-        assert_eq!(vm.eval("WinPin mulDiv: 6 by: 7 div: 3.").unwrap().trim(), "14");
+        assert_eq!(
+            vm.eval("WinPin mulDiv: 6 by: 7 div: 4.").unwrap().trim(),
+            "11"
+        );
+        assert_eq!(
+            vm.eval("WinPin mulDiv: 6 by: 7 div: 3.").unwrap().trim(),
+            "14"
+        );
 
         // One guest-owned page for the out-params.
         vm.exec("WinPin allocBuf.").expect("VirtualAlloc a page");
         let buf: i64 = vm.eval("WinPin buf.").expect("buf").trim().parse().unwrap();
-        assert!(buf > 0x1_0000, "VirtualAlloc must answer a real address, got {buf}");
+        assert!(
+            buf > 0x1_0000,
+            "VirtualAlloc must answer a real address, got {buf}"
+        );
 
         // QueryPerformanceCounter fills the buffer and answers nonzero BOOL.
         let ok = vm
@@ -6180,7 +6214,8 @@ mod tests {
         // GetSystemTimeAsFileTime: void return, pointer out-param; the
         // FILETIME (100ns ticks since 1601) must land between 2020-01-01
         // and 2100-01-01 — a garbage or unwritten buffer cannot.
-        vm.exec("WinPin fileTimeInto: WinPin buf.").expect("GetSystemTimeAsFileTime");
+        vm.exec("WinPin fileTimeInto: WinPin buf.")
+            .expect("GetSystemTimeAsFileTime");
         let ft: i64 = vm
             .eval("(Alien forAddress: WinPin buf size: 8) signedLongAt: 1.")
             .expect("read filetime")
@@ -6195,10 +6230,17 @@ mod tests {
         // user32 (WG0's first calls — win_gui_design.md): SM_CXSCREEN is
         // positive on any interactive session; MessageBeep(0xFFFFFFFF)
         // answers nonzero BOOL.
-        let cx: i64 = vm.eval("WinPin metric: 0.").expect("GetSystemMetrics").trim().parse().unwrap();
+        let cx: i64 = vm
+            .eval("WinPin metric: 0.")
+            .expect("GetSystemMetrics")
+            .trim()
+            .parse()
+            .unwrap();
         assert!(cx > 0, "SM_CXSCREEN must be positive, got {cx}");
         assert_ne!(
-            vm.eval("WinPin beep: 4294967295.").expect("MessageBeep").trim(),
+            vm.eval("WinPin beep: 4294967295.")
+                .expect("MessageBeep")
+                .trim(),
             "0",
             "MessageBeep must succeed"
         );
@@ -6232,7 +6274,9 @@ mod tests {
         // RESOLUTION ITSELF performs Win32 calls that reset last-error.
         vm.eval("WinErr lastError.").expect("warm GetLastError");
         assert_eq!(
-            vm.eval("WinErr closeHandle: 0.").expect("CloseHandle(0)").trim(),
+            vm.eval("WinErr closeHandle: 0.")
+                .expect("CloseHandle(0)")
+                .trim(),
             "0",
             "CloseHandle(NULL) must fail with BOOL 0"
         );
@@ -6293,7 +6337,9 @@ mod tests {
         .expect("alloc binding");
         vm.exec("WinFaultAlloc allocBuf.").expect("page");
         assert_ne!(
-            vm.eval("WinFault qpc: WinFaultAlloc buf.").expect("good call").trim(),
+            vm.eval("WinFault qpc: WinFaultAlloc buf.")
+                .expect("good call")
+                .trim(),
             "0",
             "the identical binding must succeed once handed a valid pointer"
         );
@@ -6323,7 +6369,10 @@ mod tests {
                 .eval("WinJitPin spin.")
                 .expect("a compiled caller's FFI call must not corrupt the stack");
             assert!(
-                out.trim().parse::<i64>().map(|n| n > 1_000).unwrap_or(false),
+                out.trim()
+                    .parse::<i64>()
+                    .map(|n| n > 1_000)
+                    .unwrap_or(false),
                 "expected a plausible tick count, got {out:?}"
             );
         }

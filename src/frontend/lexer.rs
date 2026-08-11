@@ -336,7 +336,9 @@ impl<'a> Lexer<'a> {
             // A scale suffix claims the number as an EXACT scaled decimal
             // (`3.14s2`, `2.5s` — default scale = fraction-digit count);
             // scale and exponent are mutually exclusive, as in Squeak.
-            if let Some(scale) = self.try_consume_scale(frac.len().min(u16::MAX as usize) as u16, start)? {
+            if let Some(scale) =
+                self.try_consume_scale(frac.len().min(u16::MAX as usize) as u16, start)?
+            {
                 return Ok(Tok::ScaledLit {
                     negative,
                     int_digits: lead,
@@ -378,10 +380,7 @@ impl<'a> Lexer<'a> {
                     .parse()
                     .map_err(|_| self.err(start, "integer exponent too large"))?;
                 if exp > 10_000 {
-                    return Err(self.err(
-                        start,
-                        "integer exponent too large (limit 10000 digits)",
-                    ));
+                    return Err(self.err(start, "integer exponent too large (limit 10000 digits)"));
                 }
                 let mut digits = lead;
                 digits.extend(std::iter::repeat('0').take(exp as usize));
