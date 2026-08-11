@@ -373,7 +373,8 @@ Object subclass: WinShell [
     ]
 
     WinShell class >> isBarControl: aName <Symbol> ^ <Boolean> [
-        ^(self isViewButton: aName) or: [ aName == #doit or: [ aName == #printit ] ]
+        ^(self isViewButton: aName)
+            or: [ aName == #doit or: [ aName == #printit or: [ aName == #accept ] ] ]
     ]
 
     WinShell class >> activeViewButtonName ^ <Object> [

@@ -141,6 +141,123 @@ So:
   wrote the image differently would be a corruption bug with a UI in front of
   it.
 
+#### WG5b-2's real obstacle: there is no channel yet
+
+Researched before writing any of it, and it is not what the row implies. The
+question is not *how do we call `flows`* — it is **how does Smalltalk reach
+Rust code that lives downstream of the VM at all**, on this platform.
+
+Every existing route is closed:
+
+* **A core primitive is impossible.** `image_store` DEPENDS ON `macvm`
+  (its own Cargo.toml says so and explains why), so the core cannot depend on
+  `image_store` without a cycle. A `PRIMITIVES` row that called `flows` cannot
+  exist.
+* **A downstream primitive is impossible.** WG2's Δ 1 already established
+  that a downstream crate cannot add a `PRIMITIVES` row — it is why the
+  WndProc door lives in the core rather than in `win_gui`.
+* **The Mac's own answer does not port.** `cocoa_gui`'s `host_service.rs` is
+  reachable because the ObjC runtime is a general late-bound channel and the
+  guest already speaks it (`Cocoa classNamed:`). Windows has no equivalent
+  bridge, and §2.4's COM path would mean authoring a COM object and its
+  vtable to move four strings.
+* **The FFI cannot name a foreign DLL.** `FfiPragma::Function` carries
+  `{name, ret, args}` and no library. Resolution is winkb (which knows only
+  Windows API functions) then `DEFAULT_PROBE` — a fixed list of five system
+  DLLs. A custom host DLL is invisible to both.
+* **There is no call-by-address.** WG2's primitive 272 publishes the door's
+  address for WINDOWS to call; nothing lets the guest call an arbitrary
+  address itself.
+
+**The chosen answer: give the FFI pragma an optional `library:`.** One small,
+general core change — parser, AST, and the resolution call that already takes
+`Option<&str>` and already does `GetModuleHandleA` then `LoadLibraryA`. It
+unlocks not just this host service but any third-party DLL a user wants to
+call, which is a thing a Smalltalk on Windows should be able to do anyway.
+The host service then becomes an ordinary DLL in the workspace, depending on
+`image_store` exactly as `cocoa_gui` does, exporting `extern "C"` functions
+the guest calls by name — the adapter downstream where it belongs, with no
+new mechanism in the VM beyond naming the library.
+
+Recorded at this length because the obstacle is invisible from the row, and
+because the next person to reach for `flows` from the guest will otherwise
+re-derive all five dead ends.
+
+#### As built
+
+**The core change is one optional pragma part.** `<primitive: FFI function:
+#X library: #'foo.dll' ret: #g args: #(g)>`. It threads through the four
+layers that already carried `function:` — AST, parser, the compiled
+descriptor (one more slot, nil for every pragma that does not name a
+library, which is every pragma written before this existed), and the Windows
+resolver. An explicit library goes STRAIGHT to `resolve_export(Some(lib))`
+and deliberately does NOT fall back to the probe: a same-named export from
+user32 answering a call meant for the host service is the one outcome worse
+than not resolving at all. `library:` on a Tier 2 `selector:` pragma is
+REFUSED rather than ignored — an ObjC send has no library to name, and
+accepting it silently would let someone write a pragma that reads as if it
+targets a DLL and does not.
+
+**The host service is an ordinary DLL.** `winui_host` — a `cdylib` over
+`image_store::flows`, downstream of the VM exactly as `cocoa_gui`'s
+`host_service.rs` is. Five exports (save a method, new class, add a
+variable, read a method's source, ping) plus a message slot, because the FFI
+marshals only integers/doubles/void: every call answers a STATUS and parks
+its text where the guest reads it afterwards by COUNT. Strings cross as
+UTF-16 both ways, which is what `WinArena` already speaks. `image_path` is
+`cocoa_gui`'s rule verbatim — that is not incidental, it is what makes the
+CG8 comparison a comparison.
+
+**The gate is three layers, because each proves what the others cannot.**
+`just gate-wg5b`:
+
+1. **The differential** (`cargo test -p winui_host`) — the same save through
+   the Windows entry point and through `flows::save_method`, against two
+   identically-seeded images, compared on source, selector, side, home file
+   and version count. This is the CG8 gate proper. "Byte-identical" cannot
+   mean the two SQLite FILES compare equal — page layout and rowids differ
+   between any two independently built databases — so what is checked is
+   every stored consequence of the write, plus that the stored source really
+   is the text that went in (two identically WRONG writes would otherwise
+   pass). It also pins the edit case, where saving over an existing method
+   must not clobber its recorded home file, and pins that a refusal is
+   `flows`' own wording word for word.
+2. **The channel** (`WinUiHostWg5bTests`, in the ordinary world suite) — that
+   `library:` really resolves a DLL in neither winkb nor the probe list. This
+   file is NOT host-free, deliberately: the channel is the novel machinery
+   and a test that mocked it would prove nothing about it.
+3. **End to end** (`world/bench/wg5b_accept.mst`) — a Smalltalk String through
+   `nativeUtf16:`, LoadLibraryA, the A64 trampoline, `image_store`, and back
+   out. It drives `acceptSourceText:`, the SAME method the Accept cell
+   reaches with only the control read lifted out, rather than a private copy
+   written for the gate.
+
+**Three things the work turned up that the design did not predict:**
+
+* **`world/image.sqlite3` does not exist in a checkout.** It is a generated
+  artifact (`import_world`: 170 classes, 2508 methods). Both the test suite
+  and the gate had to be written to survive its absence — a suite that
+  asserted a successful read would really have been asserting that someone
+  remembered to run the importer, and a gate that created the image as a side
+  effect would be worse.
+* **The live compile must be best-effort.** `Worker uiDoit:` has no primary
+  in a CLI run, and the first gate run took the whole process down with
+  `unknown or dead worker` AFTER the image had been written correctly. The
+  image is the record; a completed write must not be unwound by the
+  best-effort half that follows it. Guarded, and the transcript says which
+  half happened.
+* **A class name in a method body is resolved at COMPILE time.** The source
+  pane's image read had to move from 98 to 99, because 98 loads first and 99
+  is where `WinHost` is defined — while `updateSourcePane` calling
+  `self sourceTextFor:` is fine, since a message send is not. The same
+  bidirectional-reference problem `winui.list`'s header records for 90/91,
+  arriving from a new direction.
+
+**Still open in WG5b:** the browser's remaining write verbs (New Class, Add
+Variable) have host exports and Smalltalk wrappers but no UI yet — they want
+a dialog, and there is no dialog machinery in the shell. Filed for WG6, which
+adds the menu that would own them.
+
 Slicing it this way keeps a read-only browser from waiting on a write path,
 and keeps the write path from being rushed to make a demo look complete.
 

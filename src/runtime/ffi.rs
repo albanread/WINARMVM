@@ -78,6 +78,14 @@ const DESC_ARGS: usize = 5;
 /// Added 2026-07 (docs/accelerate_design.md U1) — dlsym-per-call measured
 /// ~14 µs, the dominant cost of every small-N Accelerate call.
 const DESC_ADDR_CACHE: usize = 6;
+/// WINARM (WG5b-2): the OPTIONAL exporting library named by the pragma's
+/// `library:` part, or nil. When present it goes STRAIGHT to
+/// `winkb::resolve_export(Some(..))`, which `GetModuleHandleA`s then
+/// `LoadLibraryA`s it -- deliberately skipping the knowledge base, because
+/// a library the user named by hand is by definition not one of the
+/// Windows API functions the DB knows, and a same-named export in some
+/// system DLL must never win over the one they asked for.
+const DESC_LIBRARY: usize = 7;
 
 /// S20 step 4's entry point, called directly from `interpreter::send::
 /// try_primitive` once it has recognized `m.primitive() == PRIM_ID_FFI`.
@@ -274,7 +282,22 @@ pub(crate) fn dispatch_ffi_primitive(vm: &mut VmState, m: MethodOop, argc: u8) -
         let result = vm.ffi_stubs.invoke(ret_class, target, &argv_g, &argv_f);
         return unmarshal_ret(vm, ret_class, result, &name);
     }
-    let Some(target) = resolve_ffi_symbol(vm, &name, argc_usize, float_mask, ret_class) else {
+    // Older descriptors (7 slots) predate `library:`; read defensively so a
+    // stale one answers `None` rather than indexing off the end.
+    let library: Option<String> = if desc.len() > DESC_LIBRARY {
+        let l = desc.at(DESC_LIBRARY);
+        (l != vm.universe.nil_obj).then(|| sym_text(l))
+    } else {
+        None
+    };
+    let Some(target) = resolve_ffi_symbol(
+        vm,
+        &name,
+        library.as_deref(),
+        argc_usize,
+        float_mask,
+        ret_class,
+    ) else {
         // A `ffi_gen`-generated binding names only functions verified to
         // exist in the real ABI database (docs/FFI.md) — but bindings are
         // also HAND-authored every day (all of world/61's Posix surface, a
@@ -326,11 +349,12 @@ pub(crate) fn dispatch_ffi_primitive(vm: &mut VmState, m: MethodOop, argc: u8) -
 fn resolve_ffi_symbol(
     _vm: &mut VmState,
     name: &str,
+    library: Option<&str>,
     _argc: usize,
     _float_mask: u32,
     _ret_class: crate::codecache::ffi_stubs::FfiRetClass,
 ) -> Option<u64> {
-    crate::vendor::wfasm::native_macos::dlsym_resolve(None, name)
+    crate::vendor::wfasm::native_macos::dlsym_resolve(library, name)
 }
 
 /// WINARM (P5, MIGRATION.md §3.5): the Windows resolver — `winkb`-first, then
@@ -339,6 +363,11 @@ fn resolve_ffi_symbol(
 ///
 /// The lookup path, in order:
 ///
+/// 0. **An explicit `library:`** (WINARM WG5b-2), when the pragma names one:
+///    straight to `resolve_export(Some(lib))`, no knowledge base, no probe
+///    fallback. This is the arm that makes a DLL of the user's own reachable
+///    from Smalltalk at all -- the other two between them can only find
+///    Windows API functions and CRT names.
 /// 1. **Knowledge base** (when `windows_api.db` is present): the exact
 ///    export's DLL comes from the DB — which matters because the fallback
 ///    probe only searches a handful of well-known modules and would never
@@ -369,11 +398,21 @@ fn resolve_ffi_symbol(
 fn resolve_ffi_symbol(
     vm: &mut VmState,
     name: &str,
+    library: Option<&str>,
     argc: usize,
     float_mask: u32,
     ret_class: crate::codecache::ffi_stubs::FfiRetClass,
 ) -> Option<u64> {
     use crate::runtime::winkb;
+
+    // 0. WINARM (WG5b-2): an EXPLICIT `library:` wins outright. It skips the
+    //    knowledge base by design -- see `DESC_LIBRARY`. A miss is a miss:
+    //    falling back to the probe here would silently call a same-named
+    //    export from a system DLL, which is the one outcome worse than not
+    //    resolving at all.
+    if let Some(lib) = library {
+        return winkb::resolve_export(Some(lib), name);
+    }
 
     if winkb::available() {
         match winkb::lookup_function(name) {

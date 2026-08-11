@@ -120,4 +120,11 @@ tier1.mst
 ../96_winui_splitter.mst
 ../97_winui_workspace.mst
 64_winui_shell_tests.mst
+# WINARM (WG5b): the Browser and the host service. 98 is loaded here for the
+# same compile-time reason the rest are - 65 names WinShell methods it
+# defines - and 99 must follow it, since its `acceptSource` reaches the
+# browser's own selection accessors.
+../98_winui_browser.mst
+../99_winui_host.mst
+65_winui_host_tests.mst
 99_run_all.mst

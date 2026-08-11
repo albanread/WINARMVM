@@ -158,8 +158,7 @@ Object subclass: WinShell [
                     self addControl: n class: 'EDIT' text: ''
                         style: (((WinApi constant: 'WS_CHILD')
                             bitOr: ((WinApi constant: 'WS_BORDER') bitOr: (WinApi constant: 'WS_VSCROLL')))
-                            bitOr: (((WinApi constant: 'ES_MULTILINE')
-                                bitOr: (WinApi constant: 'ES_READONLY'))
+                            bitOr: ((WinApi constant: 'ES_MULTILINE')
                                 bitOr: (WinApi constant: 'ES_AUTOVSCROLL')))
                         exStyle: 0 ]
                 ifFalse: [
@@ -266,29 +265,33 @@ Object subclass: WinShell [
     ]
 
     WinShell class >> updateSourcePane [
-        "Source is IMAGE data and this slice is read-only over LIVE reflection,
-         so it says what it knows and names what it does not — rather than
-         reconstructing something plausible from the selector, which would be
-         the browser inventing the image."
+        "WG5b-2 makes good on the promise this method used to print: source is
+         IMAGE data, and it now comes from the image.
+
+         The read/write split is the Mac's, deliberately (66_cocoabrowser's own
+         note): the hierarchy and selector ROWS come from the primary's live
+         reflection, but TEXT comes from `image_store` — so what the user edits
+         is what the next boot will read, rather than a rendering of what this
+         session happens to hold.
+
+         A selector with no stored source is not an error. It happens for
+         anything compiled live this session and never Accepted, and the pane
+         says so plainly instead of showing an empty box that looks like a
+         failed read."
         | c text |
         c := self controlNamed: #browserSource.
         c isNil ifTrue: [ ^self ].
-        text := BrowserClass isNil
-            ifTrue: [ 'Select a class.' ]
-            ifFalse: [
-                BrowserSelector isNil
-                    ifTrue: [
-                        BrowserClass , (String with: Character cr with: Character nl) ,
-                        (String with: Character cr with: Character nl) ,
-                        'variables: ' , (self browserVariables inject: '' into: [ :a :b | a , b , ' ' ]) ]
-                    ifFalse: [
-                        BrowserClass , ' >> ' , BrowserSelector ,
-                        (String with: Character cr with: Character nl) ,
-                        (String with: Character cr with: Character nl) ,
-                        'Source comes from the image (image_store), which WG5b-2 wires up.' ] ].
+        text := self sourceTextFor: BrowserClass selector: BrowserSelector.
         c setText: text.
         ^self
     ]
+
+    "`sourceTextFor:selector:` is NOT here, and the reason is a compile-time
+     one worth stating: it names WinHost, which 99 defines — and 99 must load
+     AFTER this file, because its own Accept reaches the selection accessors
+     above. A class name is resolved when the method is compiled (unlike a
+     message send, which is not), so the two cannot both be satisfied and the
+     method moves to 99 rather than the load order bending around it."
 
     WinShell class >> isBrowserPane: aName <Symbol> ^ <Boolean> [
         ^(self browserPaneNames indexOf: aName) > 0

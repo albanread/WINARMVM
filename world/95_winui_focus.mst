@@ -93,7 +93,7 @@ Object subclass: WinShell [
             ifNil: [ false ]
             ifNotNil: [ :c | c isSourceSurface ].
         CommandsEnabled := on.
-        #(#doit #printit) do: [ :n |
+        #(#doit #printit #accept) do: [ :n |
             (self controlNamed: n) ifNotNil: [ :c | c enable: on ] ].
         ^self
     ]
@@ -113,7 +113,7 @@ Object subclass: WinShell [
         self syncCommandEnablement.
         "The verbs' own cells are owner-drawn and their greying is part of the
          picture, so a focus change makes exactly those two stale."
-        #(#doit #printit) do: [ :n |
+        #(#doit #printit #accept) do: [ :n |
             (self controlNamed: n) ifNotNil: [ :c |
                 WinApi invalidateRect: c handle rect: 0 erase: 0 ] ].
         ^true

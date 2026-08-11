@@ -1350,19 +1350,26 @@ fn compile_method_inner(
 /// exactly BUG A's class of hazard, guarded against here the same way
 /// this function's own caller already protects `holder`/`inst_var_names`.
 fn build_ffi_descriptor(vm: &mut VmState, scope: &HandleScope, ffi: &FfiPragma) -> ArrayOop {
-    let (kind, name, class, class_side, ret, args): (
+    let (kind, name, class, class_side, library, ret, args): (
         &str,
         &str,
         Option<&str>,
         bool,
+        Option<&str>,
         &str,
         &[String],
     ) = match ffi {
-        FfiPragma::Function { name, ret, args } => (
+        FfiPragma::Function {
+            name,
+            library,
+            ret,
+            args,
+        } => (
             "function",
             name.as_str(),
             None,
             false,
+            library.as_deref(),
             ret.as_str(),
             args.as_slice(),
         ),
@@ -1377,6 +1384,9 @@ fn build_ffi_descriptor(vm: &mut VmState, scope: &HandleScope, ffi: &FfiPragma) 
             selector.as_str(),
             Some(class.as_str()),
             *class_side,
+            // Tier 2 resolves through the ObjC runtime and has no library to
+            // name; the parser already refuses `library:` on this form.
+            None,
             ret.as_str(),
             args.as_slice(),
         ),
@@ -1394,6 +1404,10 @@ fn build_ffi_descriptor(vm: &mut VmState, scope: &HandleScope, ffi: &FfiPragma) 
     let name_h = scope.handle(vm, name_sym);
     let class_h = class.map(|c| {
         let sym = vm.universe.intern(c.as_bytes()).oop();
+        scope.handle(vm, sym)
+    });
+    let library_h = library.map(|l| {
+        let sym = vm.universe.intern(l.as_bytes()).oop();
         scope.handle(vm, sym)
     });
     let ret_sym = vm.universe.intern(ret.as_bytes()).oop();
@@ -1424,7 +1438,11 @@ fn build_ffi_descriptor(vm: &mut VmState, scope: &HandleScope, ffi: &FfiPragma) 
     // scope cut (measured ~14 µs/call, the whole reason Accelerate calls
     // lost to in-VM NEON below ~8 K lanes — docs/accelerate_design.md U1).
     // `alloc_indexable_oops` nil-fills, so no explicit initialization.
-    let desc = alloc::alloc_indexable_oops(vm, vm.universe.array_klass, 7);
+    // Slot 7 (`runtime::ffi::DESC_LIBRARY`): WINARM (WG5b-2) the optional
+    // exporting library, nil for every pragma that does not name one --
+    // which is every pragma written before it existed, so widening the
+    // descriptor by one nil slot is the whole compatibility story.
+    let desc = alloc::alloc_indexable_oops(vm, vm.universe.array_klass, 8);
     desc.at_put(0, kind_h.get(vm));
     desc.at_put(1, name_h.get(vm));
     desc.at_put(2, class_h.map(|h| h.get(vm)).unwrap_or(vm.universe.nil_obj));
@@ -1438,6 +1456,10 @@ fn build_ffi_descriptor(vm: &mut VmState, scope: &HandleScope, ffi: &FfiPragma) 
     );
     desc.at_put(4, ret_h.get(vm));
     desc.at_put(5, args_arr_h.get(vm));
+    desc.at_put(
+        7,
+        library_h.map(|h| h.get(vm)).unwrap_or(vm.universe.nil_obj),
+    );
     desc
 }
 

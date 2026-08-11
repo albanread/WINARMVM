@@ -495,7 +495,7 @@ Object subclass: WinShell [
                     bitOr: ((WinApi constant: 'WS_TABSTOP')
                         bitOr: (WinApi constant: 'BS_OWNERDRAW')))
                 exStyle: 0 ].
-        #(#doit 'Do It' #printit 'Print It') pairsDo: [ :sym :label |
+        #(#doit 'Do It' #printit 'Print It' #accept 'Accept') pairsDo: [ :sym :label |
             self
                 addControl: sym
                 class: 'BUTTON'
@@ -580,12 +580,13 @@ Object subclass: WinShell [
          inverting."
         dipW := self clientWidth * 96 // (Dpi isNil ifTrue: [ 96 ] ifFalse: [ Dpi ]).
         verbW := 72.
-        avail := dipW - 20 - 320 - (verbW * 2) - (6 * (self views size + 2)).
+        avail := dipW - 20 - 320 - (verbW * 3) - (6 * (self views size + 3)).
         btnW := (avail // (self views size max: 1)) min: 96.
         btnW := btnW max: 44.
         row := self layout
             packRow: (rects at: #viewbar)
-            left: ((self views collect: [ :v | btnW ]) asArray , (Array with: verbW with: verbW))
+            left: ((self views collect: [ :v | btnW ]) asArray
+                , (Array with: verbW with: verbW with: verbW))
             right: (Array with: 320)
             gap: 6
             dpi: (Dpi isNil ifTrue: [ 96 ] ifFalse: [ Dpi ]).
@@ -598,6 +599,8 @@ Object subclass: WinShell [
             (c moveTo: (lefts at: self views size + 1)) ifTrue: [ moved := moved + 1 ] ].
         (self controlNamed: #printit) ifNotNil: [ :c |
             (c moveTo: (lefts at: self views size + 2)) ifTrue: [ moved := moved + 1 ] ].
+        (self controlNamed: #accept) ifNotNil: [ :c |
+            (c moveTo: (lefts at: self views size + 3)) ifTrue: [ moved := moved + 1 ] ].
         (self controlNamed: #metrics) ifNotNil: [ :c |
             (c moveTo: (rights at: 1)) ifTrue: [ moved := moved + 1 ] ].
 
@@ -645,6 +648,8 @@ Object subclass: WinShell [
          RESPONDS, so nothing looks broken until you read what it says."
         name == #doit ifTrue: [ self doIt. ^self ].
         name == #printit ifTrue: [ self printIt. ^self ].
+        "WG5b-2: Accept writes the IMAGE first and only then live-compiles."
+        name == #accept ifTrue: [ self acceptSource. ^self ].
         name == #splitter ifTrue: [ self onSplitterClick. ^self ].
         "WG5b-1: a LISTBOX reports selection changes as WM_COMMAND with
          LBN_SELCHANGE (1) in the high word — the same door, the same drain,

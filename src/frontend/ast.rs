@@ -151,6 +151,20 @@ pub enum FfiPragma {
     /// Tier 1 — `<primitive: FFI function: #mmap ret: #g args: #(g g g g g g)>`.
     Function {
         name: String,
+        /// WINARM (WG5b-2): the OPTIONAL exporting library, e.g.
+        /// `library: #'winui_host.dll'`. `None` — every pragma written
+        /// before this existed — keeps the original resolution exactly:
+        /// winkb's knowledge base, then the fixed system-DLL probe.
+        ///
+        /// It exists because those two paths between them can only find
+        /// Windows API functions and CRT names, so a DLL of the user's own
+        /// was unreachable from Smalltalk at all. That blocked WG5b-2 (the
+        /// browser's Accept must reach `image_store::flows`, which lives
+        /// DOWNSTREAM of the VM and can never be a primitive — it depends
+        /// on this crate), but the gap was general: a Smalltalk on Windows
+        /// that cannot call a third-party DLL is missing something a user
+        /// will want on their first afternoon.
+        library: Option<String>,
         ret: String,
         args: Vec<String>,
     },

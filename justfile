@@ -1310,3 +1310,109 @@ gate-wg4: gate-wg3
     for i in $(seq 1 60); do [ -f /tmp/wg4_exit ] && break || sleep 0.5; done
     test "$(cat /tmp/wg4_exit)" = "0"
     echo "gate-wg4: PASS"
+
+# WG5b-2 (docs/sprints/sprint_wg5_detail.md): Accept, over
+# `image_store::flows`. The CG8 gate re-run for Windows — *a `#saveMethod`
+# round-trips through `image_store` byte-identically to the web edit path*.
+#
+# THREE LAYERS, because each proves something the others cannot:
+#
+#   1. `cargo test -p winui_host` — the DIFFERENTIAL. The same save through
+#      the Windows entry point and through `flows::save_method` (the web
+#      GUI's own call), against two identically-seeded images, compared on
+#      every stored consequence: source, selector, side, home file, version
+#      count. This is the CG8 gate proper.
+#   2. The world suite's `WinUiHostWg5bTests` — the CHANNEL. That an FFI
+#      pragma naming `library:` resolves a DLL in neither winkb nor the
+#      five-DLL probe list, which is WG5b-2's one core change.
+#   3. `world/bench/wg5b_accept.mst` — END TO END. A Smalltalk String through
+#      `nativeUtf16:`, LoadLibraryA, the A64 trampoline, `image_store`, and
+#      back out as UTF-16 read by count. It drives `acceptSourceText:`, the
+#      SAME method the Accept cell reaches.
+#
+# The scratch image is built fresh and thrown away. Nothing here writes
+# `world/image.sqlite3` — which does not exist in a checkout anyway (it is a
+# generated artifact) and must never be created as a side effect of a gate.
+gate-wg5b:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    IMG=/tmp/wg5b_gate.sqlite3
+    # A LEFTOVER WINDOW BLOCKS THE BUILD, and this is new with WG5b-2: the GUI
+    # now LOADS winui_host.dll, so a still-running macvm-winui.exe holds it
+    # open and `cargo build -p winui_host` fails with "Access is denied" --
+    # a message that says nothing about the real cause. Close it first.
+    taskkill //F //IM macvm-winui.exe > /dev/null 2>&1 || true
+    # Fingerprint the developer's own image up front, so the last assertion
+    # can prove no part of this gate wrote it.
+    OWN_IMAGE_SUM=""
+    if [ -f world/image.sqlite3 ]; then OWN_IMAGE_SUM="$(md5sum < world/image.sqlite3)"; fi
+    cargo build -p winui_host
+    # 1: the CG8 differential.
+    cargo test -p winui_host
+    # 2: the channel, inside the ordinary world suite.
+    just run-world-tests | tee /tmp/wg5b_world.txt
+    grep -q '0 failed' /tmp/wg5b_world.txt
+    # 3: end to end, against a scratch image.
+    rm -f "$IMG"
+    cargo run -q -p image_store --bin import_world -- world "$IMG"
+    grep -v '^#' world/winui.list | grep -v '^$' | sed 's|^|world/|' \
+        | xargs cat > /tmp/wg5b_layer.mst
+    cat /tmp/wg5b_layer.mst world/bench/wg5b_accept.mst > /tmp/wg5b_run.mst
+    MACVM_IMAGE_PATH="$IMG" cargo run -q -- run /tmp/wg5b_run.mst --world world \
+        | tee /tmp/wg5b_e2e.txt
+    grep -q 'ALL CHECKS PASSED' /tmp/wg5b_e2e.txt
+    rm -f "$IMG"
+
+    # 4: THE WINDOW. The three layers above are all headless; none of them can
+    #    tell you the Accept cell was actually built, drawn by the bar's own
+    #    owner-draw path, and greyed by the same focus rule as the other two
+    #    verbs -- or that `library:` resolves in the process that really owns
+    #    the window rather than in a test harness. Same shape as gate-wg4.
+    rm -f /tmp/wg5b_exit /tmp/wg5b_app.txt target/winui-wg5b.png
+    ( MACVM_WINUI_CTL=7671 ./target/debug/macvm-winui.exe > /tmp/wg5b_app.txt 2>&1;       echo $? > /tmp/wg5b_exit ) &
+    for i in $(seq 1 60); do
+        (exec 3<>/dev/tcp/127.0.0.1/7671) 2>/dev/null && break || sleep 0.5
+    done
+    ./target/debug/macvm rusttcl scripts/winui-wg5b.tcl | tee /tmp/wg5b_gate.txt
+    # The browser fills from a REPLY across the seam, and on a fresh start the
+    # primary is still loading the world. The wait has to happen with NOTHING
+    # attached: `gui sleep` blocks the app itself, so waiting inside the
+    # script starves the drain pass it is waiting for.
+    sleep 15
+    ./target/debug/macvm rusttcl scripts/winui-wg5b-2.tcl | tee -a /tmp/wg5b_gate.txt
+    cat /tmp/wg5b_app.txt
+
+    grep -q 'WG5B open true' /tmp/wg5b_gate.txt
+    # The verb is there and is a BAR cell -- owner-drawn like Do It and Print
+    # It, not a stock Win32 button dropped into a Fluent strip.
+    grep -q 'WG5B accept-exists true' /tmp/wg5b_gate.txt
+    grep -q 'WG5B accept-is-bar-cell true' /tmp/wg5b_gate.txt
+    # And it JOINED WG4 D4's focus rule rather than getting one of its own: a
+    # read-only surface cannot supply source, so Accept is off.
+    grep -q 'WG5B accept-on-readonly false' /tmp/wg5b_gate.txt
+    # The Browser filled from the PRIMARY, across the seam.
+    grep -q 'WG5B active-view #browser' /tmp/wg5b_gate.txt
+    # `grep -oE '[0-9]+'` on the whole line would also match the 5 in WG5B --
+    # which yielded two lines (5, then 0) and a `test: integer expected`.
+    # Take the last field instead.
+    CLASSES=$(grep -E '^WG5B browser-classes ' /tmp/wg5b_gate.txt | awk '{print $NF}')
+    echo "browser: $CLASSES classes from the primary's live hierarchy"
+    test "$CLASSES" -ge 100
+    # The source pane keeps WG5b-1's promise instead of restating it.
+    grep -q 'WG5B source-still-a-promise false' /tmp/wg5b_gate.txt
+    # And the channel resolves HERE, in the process that owns the window.
+    grep -q 'WG5B host-available true' /tmp/wg5b_gate.txt
+    grep -q 'WG5B host-ping 22343' /tmp/wg5b_gate.txt
+    test -s target/winui-wg5b.png
+    for i in $(seq 1 60); do [ -f /tmp/wg5b_exit ] && break || sleep 0.5; done
+    test "$(cat /tmp/wg5b_exit)" = "0"
+
+    # And the developer's OWN image is untouched. Not "does not exist" -- it
+    # legitimately does once `import_world` has been run, and the GUI needs it
+    # to show source at all. What must hold is that a GATE never writes it:
+    # the write path is exercised against $IMG and nowhere else.
+    if [ -f world/image.sqlite3 ]; then
+        test "$(md5sum < world/image.sqlite3)" = "$OWN_IMAGE_SUM"
+        echo "own image: unchanged"
+    fi
+    echo "gate-wg5b: PASS"
