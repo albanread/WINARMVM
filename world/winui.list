@@ -81,3 +81,8 @@
 # browseSnapshot, which already carries the whole Strongtalk outline. No host
 # service and no new seam traffic: it renders a tree 98 already caches.
 104_winui_outliner.mst
+# WINARM (WG6b): Find — Implementors and Senders over the image's own
+# queries, and the payoff: a chosen hit JUMPS to the Browser through WG5b-1's
+# selection helpers. Loads after 99 (WinHost) and after 98 (the Browser's
+# selection helpers it drives).
+105_winui_find.mst

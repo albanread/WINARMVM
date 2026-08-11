@@ -1444,6 +1444,20 @@ gate-wg5b:
     AFTER=$(grep -E '^WG5C passes-after-idle ' /tmp/wg5b_gate.txt | awk '{print $NF}')
     echo "colour: $BEFORE passes before idle, $AFTER after"
     test "$AFTER" -gt "$BEFORE"
+    # WG6b: Find really searched, really filled its list, and the jump
+    # landed. The counts are RELATIONSHIPS (WG2 Δ 14) — the world grows.
+    IMPL=$(grep -E '^WG6B implementors ' /tmp/wg5b_gate.txt | awk '{print $NF}')
+    LB=$(grep -E '^WG6B listbox-rows ' /tmp/wg5b_gate.txt | awk '{print $NF}')
+    echo "find: $IMPL implementors of printString, $LB rows shown"
+    test "$IMPL" -gt 0
+    # THE LIST MUST MATCH THE SEARCH. It once did not: `listSet:items:` takes
+    # a NAME and was handed a control, so it returned in silence and the view
+    # showed an empty list while the transcript reported five hits.
+    test "$LB" = "$IMPL"
+    # The jump is the payoff, so it is gated as hard as the search.
+    grep -q 'WG6B jumped true' /tmp/wg5b_gate.txt
+    grep -q 'WG6B landed-view #browser' /tmp/wg5b_gate.txt
+    grep -q "WG6B landed-selector 'printString'" /tmp/wg5b_gate.txt
     # WG6a: the Outliner rendered the primary's own tree, in a real window.
     grep -q 'WG6A active-view #outliner' /tmp/wg5b_gate.txt
     ROWS=$(grep -E '^WG6A rows ' /tmp/wg5b_gate.txt | awk '{print $NF}')

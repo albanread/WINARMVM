@@ -272,6 +272,77 @@ pub unsafe extern "C" fn MacvmHostMethodSource(
     )
 }
 
+/// The unit separator, 0x1F -- the field delimiter inside one result line.
+///
+/// Chosen because it is the Mac's (`67_cocoafind.mst` documents the same wire
+/// format, so both GUIs parse the same shape) and because it cannot occur in
+/// a Smalltalk selector or class name -- a result never needs escaping and a
+/// parser never needs to guess.
+const US: char = '\u{1f}';
+
+fn side_name(side: Side) -> &'static str {
+    match side {
+        Side::Instance => "instance",
+        Side::Class => "class",
+    }
+}
+
+/// `Image::implementors_of` -- every class implementing a selector.
+///
+/// One line per hit, `Class US side`, newline-separated. Opens the image
+/// READ-ONLY: a find must not be able to write, and saying so in the open
+/// call is better than intending it.
+///
+/// # Safety
+///
+/// `selector` must satisfy [`utf16_in`]'s contract.
+#[no_mangle]
+pub unsafe extern "C" fn MacvmHostImplementorsOf(selector: *const u16) -> i64 {
+    let sel = utf16_in(selector);
+    finish(
+        Image::open_read_only(&image_path())
+            .map_err(|e| e.to_string())
+            .and_then(|img| img.implementors_of(&sel).map_err(|e| e.to_string()))
+            .map(|hits| {
+                hits.into_iter()
+                    .map(|(class, side)| format!("{class}{US}{}", side_name(side)))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }),
+    )
+}
+
+/// `Image::senders_of` -- every method that SENDS a selector.
+///
+/// One line per hit, `Class US sendingSelector US side`.
+///
+/// These come from the persisted `method_sends` index rather than from a text
+/// search, and that is the whole reason the feature is worth having: a
+/// textual grep for `at:put:` also finds it in comments, in string literals,
+/// and inside `at:put:with:`, and misses nothing only by finding far too
+/// much. The index records what the COMPILER actually saw.
+///
+/// # Safety
+///
+/// `selector` must satisfy [`utf16_in`]'s contract.
+#[no_mangle]
+pub unsafe extern "C" fn MacvmHostSendersOf(selector: *const u16) -> i64 {
+    let sel = utf16_in(selector);
+    finish(
+        Image::open_read_only(&image_path())
+            .map_err(|e| e.to_string())
+            .and_then(|img| img.senders_of(&sel).map_err(|e| e.to_string()))
+            .map(|hits| {
+                hits.into_iter()
+                    .map(|(class, sending, side)| {
+                        format!("{class}{US}{sending}{US}{}", side_name(side))
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }),
+    )
+}
+
 /// A liveness probe: answers 0x5747 (`"WG"`) if the DLL loaded and the FFI
 /// found it.
 ///
@@ -601,6 +672,66 @@ mod tests {
             got, web,
             "the Windows refusal must be the web refusal, word for word"
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The wire format, which is a CONTRACT with the Smalltalk side and with
+    /// the Mac's own find view — both parse `Class US side` and neither can
+    /// see the other's parser. Checked on a real image rather than on a
+    /// formatted string, so a change to `implementors_of`'s tuple shape shows
+    /// up here rather than at a user.
+    #[test]
+    fn find_answers_us_separated_lines() {
+        let _guard = ENV.lock().unwrap_or_else(|e| e.into_inner());
+
+        let path = scratch("find");
+        let img = Image::open(&path).expect("scratch image");
+        img.create_or_reopen_class("Alpha", Some("Object"), "", "", "")
+            .expect("seed class");
+        img.create_or_reopen_class("Beta", Some("Object"), "", "", "")
+            .expect("seed class");
+        img.create_or_reopen_method("Alpha", Side::Instance, "tag", "as yet unclassified", "tag ^1")
+            .expect("seed");
+        img.create_or_reopen_method("Beta", Side::Class, "tag", "as yet unclassified", "tag ^2")
+            .expect("seed");
+
+        std::env::set_var("MACVM_IMAGE_PATH", &path);
+        let rc = unsafe { MacvmHostImplementorsOf(wide("tag").as_ptr()) };
+        std::env::remove_var("MACVM_IMAGE_PATH");
+        assert_eq!(rc, OK);
+
+        let n = MacvmHostLastMessageLen() as usize;
+        let got = unsafe {
+            String::from_utf16_lossy(std::slice::from_raw_parts(MacvmHostLastMessage(), n))
+        };
+        let lines: Vec<&str> = got.lines().collect();
+        assert_eq!(lines.len(), 2, "two implementors, got: {got:?}");
+        assert_eq!(
+            lines[0],
+            format!("Alpha{US}instance"),
+            "Class US side, and the side spelled the way the image spells it"
+        );
+        assert_eq!(lines[1], format!("Beta{US}class"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A selector nobody implements answers OK with NOTHING — not an error.
+    /// "No hits" is an ordinary result of a search and the view has to be
+    /// able to say so; making it a failure would put `flows`-style error text
+    /// where a user expects an empty list.
+    #[test]
+    fn a_find_with_no_hits_succeeds_and_is_empty() {
+        let _guard = ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let path = scratch("findempty");
+        let img = Image::open(&path).expect("scratch image");
+        img.create_or_reopen_class("Gamma", Some("Object"), "", "", "")
+            .expect("seed class");
+
+        std::env::set_var("MACVM_IMAGE_PATH", &path);
+        let rc = unsafe { MacvmHostImplementorsOf(wide("nobodyImplementsThis").as_ptr()) };
+        std::env::remove_var("MACVM_IMAGE_PATH");
+        assert_eq!(rc, OK, "no hits is a result, not a failure");
+        assert_eq!(MacvmHostLastMessageLen(), 0, "and it is empty");
         let _ = std::fs::remove_file(&path);
     }
 

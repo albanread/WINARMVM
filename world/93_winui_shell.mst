@@ -229,6 +229,7 @@ Object subclass: WinShell [
         self registerViewNamed: #workspace title: 'Workspace'.
         self registerViewNamed: #browser title: 'Browser'.
         self registerViewNamed: #outliner title: 'Outliner'.
+        self registerViewNamed: #find title: 'Find'.
         self registerViewNamed: #welcome title: 'Welcome'.
         self registerViewNamed: #transcript title: 'Transcript'.
         self registerViewNamed: #metrics title: 'Metrics'.
@@ -258,6 +259,7 @@ Object subclass: WinShell [
         self showBrowserPanes: aSymbol == #browser.
         (self controlNamed: self outlinerName)
             ifNotNil: [ :c | c show: aSymbol == #outliner ].
+        self showFindPanes: aSymbol == #find.
         self views do: [ :v |
             | c |
             (v at: 1) == aSymbol ifFalse: [
@@ -331,6 +333,15 @@ Object subclass: WinShell [
         "WG6a: the Outliner's content child is a HOST for its tree, the same
          way the Browser's is for its four panes — the tree is a sibling
          positioned over the content rect rather than a child of it."
+        aSymbol == #find ifTrue: [
+            self buildFindPanes.
+            self isOpen ifTrue: [
+                | rects |
+                rects := self layout
+                    rectsIn: self clientWidth
+                    by: self clientHeight
+                    dpi: (Dpi isNil ifTrue: [ WinApi constant: 'USER_DEFAULT_SCREEN_DPI' ] ifFalse: [ Dpi ]).
+                self layoutFindPanes: (rects at: #content) ] ].
         aSymbol == #outliner ifTrue: [
             self buildOutlinerTree.
             self isOpen ifTrue: [
@@ -648,6 +659,8 @@ Object subclass: WinShell [
         "WG6a: the Outliner's tree fills the content rect."
         (self viewIsBuilt: #outliner) ifTrue: [
             self layoutOutliner: (rects at: #content) ].
+        (self viewIsBuilt: #find) ifTrue: [
+            self layoutFindPanes: (rects at: #content) ].
 
         (self controlNamed: #splitter) ifNotNil: [ :c |
             (c moveTo: (rects at: #splitter)) ifTrue: [ moved := moved + 1 ] ].
@@ -729,6 +742,13 @@ Object subclass: WinShell [
             ifTrue: [ self noteEdit: name. ^self ].
         "WG5c D5: a click on the ghost belongs to the pane underneath it."
         name == self ghostName ifTrue: [ self onGhostClicked. ^self ].
+        "WG6b: the two Find buttons, and a chosen result jumping to the
+         Browser. LBN_SELCHANGE is 1, the same code the Browser's own panes
+         report with."
+        name == #findImpl ifTrue: [ self find: #implementors. ^self ].
+        name == #findSend ifTrue: [ self find: #senders. ^self ].
+        (aCode = 1 and: [ name == #findResults ])
+            ifTrue: [ self onFindResultChosen. ^self ].
         ^self wg3ServiceCommand: anId code: aCode from: aHandle
     ]
 ]

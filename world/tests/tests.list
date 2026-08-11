@@ -131,6 +131,10 @@ tier1.mst
 # browser's own selection accessors.
 ../98_winui_browser.mst
 ../99_winui_host.mst
+# WINARM (WG6b): Find. 65 reaches its two PURE parts - the US-separated wire
+# format parser and the row label - which are a contract shared with the
+# Mac's own find view and so want checking without a window.
+../105_winui_find.mst
 65_winui_host_tests.mst
 # WINARM (WG5c D1/D2): the syntax tokenizer and colour table, both PURE - so
 # unlike every other winui test file this one needs nothing from the machine

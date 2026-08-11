@@ -88,6 +88,46 @@ routing), and the two dialogs WG5b-2's host service has been waiting for:
 **New Class** and **Add Variable** already have exports and Smalltalk wrappers
 and no UI at all.
 
+## As built — WG6a, WG6b
+
+**WG6a landed with no Rust at all**, as predicted, and one thing the design
+did not predict: inserting the outline eagerly is 3507 rows and ~600ms of
+synchronous UI work on first open — it timed out three control-port calls and
+would have been a visible freeze on a view switch. The hierarchy alone is 175
+rows and 11ms; a class's own rows are added when it is SELECTED. Selection
+rather than expansion is FORCED, not preferred: `TVN_ITEMEXPANDING` names its
+item only through `NMTREEVIEW`, and the door reads NMHDR's three fields and
+lets the pointer go, so an expansion cannot be attributed to a node while a
+selection can simply be asked for afterwards.
+
+Two further traps, both invisible to state:
+
+* `TVM_GETITEMW` fills a fixed buffer and does not say how much it used, so
+  reading 255 units answers a 255-character String padded with NULs. It
+  PRINTS as `Object` and compares equal to nothing — the lookup missed every
+  time and the tree never populated. The NULs leaking into the control port's
+  output (grep calling it a binary file) is what gave it away.
+* Lazily-added group rows land BEHIND every subclass, putting `Object`'s
+  methods below a hundred descendants. The four groups now thread their
+  handles so they lead.
+
+**WG6b needed two exports and one wire format.** `MacvmHostImplementorsOf` /
+`MacvmHostSendersOf`, both opening the image READ-ONLY, answering one line
+per hit with 0x1F between fields — the Mac's own format, so the two GUIs'
+parsers agree without either being able to see the other. Both the Rust and
+the Smalltalk halves of that contract are tested where no window is involved.
+
+The jump works and is gated as hard as the search: choosing a hit switches to
+the Browser, selects the class, flips the side and selects the selector, and
+the source pane shows the method.
+
+One bug worth recording because it was silent in the worst way: the results
+list stayed EMPTY while the transcript reported five hits. `listSet:items:`
+takes a control NAME and was handed a control, so `controlNamed:` answered
+nil and the method returned without a word. The gate now asserts that the
+listbox row count EQUALS the hit count, which is the assertion that would
+have caught it.
+
 ## Pitfalls, recorded before they bite
 
 * **`TVN_SELCHANGEDW` arrives as `4294966845`.** It is `-451` as an unsigned

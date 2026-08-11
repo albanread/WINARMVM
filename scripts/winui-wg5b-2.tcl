@@ -23,6 +23,25 @@ puts "WG5B browser-refreshes [gui eval {WinShell browserRefreshes}]"
 # recipe's whole wait to fire. The debounce is 200ms; the wait is 15s.
 puts "WG5C passes-after-idle [gui eval {WinShell colourPasses}]"
 
+# ── WG6b: Find, and the jump that makes it a tool ───────────────────────
+# A result you can only read is a report. The assertions are therefore about
+# the JUMP as much as the search: after choosing a hit the Browser must be on
+# that exact method, in the state clicking your way there would have produced.
+gui send "0 0x111 [gui eval {(WinShell controlNamed: #view_find) id}] 0"
+gui drain now
+gui doit {(WinShell controlNamed: #findField) setText: 'printString'.}
+puts "WG6B implementors [gui eval {WinShell find: #implementors}]"
+puts "WG6B listbox-rows [gui eval {(WinShell controlNamed: #findResults) send: (WinApi constant: 'LB_GETCOUNT') wParam: 0 lParam: 0}]"
+# Senders come from the persisted send index, not from a text search — the
+# whole reason the feature is worth having.
+puts "WG6B senders [gui eval {WinShell find: #senders}]"
+# And the jump.
+gui doit {(WinShell controlNamed: #findField) setText: 'printString'.}
+gui eval {WinShell find: #implementors}
+puts "WG6B jumped [gui eval {WinShell jumpToHit: (WinShell findCount)}]"
+puts "WG6B landed-view [gui eval {WinShell activeView}]"
+puts "WG6B landed-selector [gui eval {WinShell browserSelectedSelector}]"
+
 # ── WG6a: the Outliner ──────────────────────────────────────────────────
 # It renders the SAME tree the Browser fetched, so by the time part 2 runs
 # the snapshot has landed and the tree can be built without a second wait.

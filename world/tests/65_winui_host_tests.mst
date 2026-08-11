@@ -45,7 +45,17 @@ TestCase subclass: WinUiHostWg5bTests [
              do: [ self testAClassWithNoSelectorShowsItsVariables ].
         self runTest: #testTheSideDefaultsToInstance do: [ self testTheSideDefaultsToInstance ].
         self runTest: #testAcceptWithNothingSelectedRefusesQuietly
-             do: [ self testAcceptWithNothingSelectedRefusesQuietly ]
+             do: [ self testAcceptWithNothingSelectedRefusesQuietly ].
+
+        "WG6b: Find's two pure parts. The wire format is a CONTRACT with the
+         Mac's own find view — neither parser can see the other — so it is
+         worth pinning where no window is involved."
+        self runTest: #testFindReplyParsesUsSeparatedLines
+             do: [ self testFindReplyParsesUsSeparatedLines ].
+        self runTest: #testNoHitsIsAnEmptyListNotABlankRow
+             do: [ self testNoHitsIsAnEmptyListNotABlankRow ].
+        self runTest: #testASenderRowNamesTheSendingMethod
+             do: [ self testASenderRowNamesTheSendingMethod ]
     ]
 
     "── The channel ──────────────────────────────────────────────────────"
@@ -119,6 +129,46 @@ TestCase subclass: WinUiHostWg5bTests [
         r := WinHost methodSourceFor: 'NoSuchClassExistsHere' side: #instance selector: 'nope'.
         self assert: (r at: 2) isString
             description: 'a miss must still answer a String, so the pane always has something to show'
+    ]
+
+    "── WG6b: Find's wire format and row labels, both pure ───────────────"
+
+    us ^ <String> [ ^String with: (Character value: 16r1F) ]
+
+    testFindReplyParsesUsSeparatedLines [
+        "One line per hit, fields separated by the unit separator. 0x1F cannot
+         occur in a selector or a class name, which is why nothing needs
+         escaping and this parser never has to guess."
+        | rows |
+        rows := WinShell splitFindReply:
+            'Alpha' , self us , 'instance' , (String with: Character nl) ,
+            'Beta' , self us , 'class'.
+        self assert: rows size = 2 description: 'two lines, two rows'.
+        self assert: (rows first at: 1) = 'Alpha' description: 'class name first'.
+        self assert: (rows first at: 2) = 'instance' description: 'side second'.
+        self assert: (rows last at: 1) = 'Beta' description: 'and the second row parses too'
+    ]
+
+    testNoHitsIsAnEmptyListNotABlankRow [
+        "`no hits` is an ordinary result of a search. A view showing one blank
+         line would be reporting a hit it did not find."
+        self assert: (WinShell splitFindReply: '') isEmpty
+            description: 'an empty reply is no rows'.
+        self assert: (WinShell splitFindReply: nil) isEmpty
+            description: 'and nil must not raise — a failed call answers no text'
+    ]
+
+    testASenderRowNamesTheSendingMethod [
+        "The interesting thing about a sender is which of ITS methods does the
+         sending — not the selector you searched for, which is identical on
+         every row and so tells you nothing."
+        | row |
+        row := Array with: 'Dictionary' with: 'add:' with: 'instance'.
+        self assert: (WinShell findRowLabel: row kind: #senders) = 'Dictionary >> add:'
+            description: 'a sender row names the SENDING method'.
+        row := Array with: 'Point' with: 'origin' with: 'class'.
+        self assert: (WinShell findRowLabel: row kind: #senders) = 'Point class >> origin'
+            description: 'and shows the class side when that is where it sends from'
     ]
 
     "── The source pane's decisions, which are pure ──────────────────────"

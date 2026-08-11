@@ -1601,6 +1601,9 @@ Object subclass: WinShell [
     WinShell class >> outlinerName [ ^#outlinerTree ]
     WinShell class >> rebuildOutlinerIfBuilt [ ^self ]
     WinShell class >> populateSelectedClass [ ^false ]
+    "WG6b's Find view; 105 overrides."
+    WinShell class >> showFindPanes: aBool [ ^self ]
+    WinShell class >> layoutFindPanes: content [ ^self ]
     WinShell class >> ownsControlId: anId <Integer> ^ <Boolean> [ ^false ]
     WinShell class >> serviceCommand: anId <Integer> code: aCode <Integer> from: aHandle <Integer> [ ^self ]
     WinShell class >> serviceNotifyFrom: aHandle <Integer> id: anId <Integer> code: aCode <Integer> [ ^self ]

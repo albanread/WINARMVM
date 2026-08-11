@@ -190,6 +190,7 @@ Object subclass: WinShell [
         aSymbol == #workspace  ifTrue: [ ^16rE70F ].  "Edit"
         aSymbol == #browser    ifTrue: [ ^16rE8A4 ].  "List"
         aSymbol == #outliner   ifTrue: [ ^16rE9D2 ].  "Org / hierarchy"
+        aSymbol == #find       ifTrue: [ ^16rE721 ].  "Search"
         ^16rE897                                       "Help"
     ]
 
