@@ -32,25 +32,22 @@ puts "WG6C2 picker-rows [gui eval {(WinShell controlNamed: #editorClasses) send:
 puts "WG6C2 still-editor [gui eval {WinShell activeView}]"
 puts "WG6C2 paint-error [gui eval {WinShell paintError}]"
 
-# ── A PARTIAL PAINT, which is the shape that was broken ─────────────────
-# `refreshEditorPane` invalidates with NULL — the whole client — so rcPaint
-# always arrived with its origin at (0,0) and the document, drawn at
-# `rcPaint.left + column * charW`, always landed correctly. Windows does NOT
-# do that: drag another window across the pane and rcPaint is a SUB-rectangle,
-# at which point the whole document was redrawn displaced by its origin, on
-# top of the copy already there. Reported from the screen by someone using it,
-# after every gate and every screenshot here had said it was fine.
+# ── A PARTIAL PAINT is no longer a shape that can break ────────────────
+# It used to be THE defect: `refreshEditorPane` invalidates with NULL, so
+# rcPaint always arrived at the client origin and the document — drawn at
+# `rcPaint.left + column * charW` — always landed correctly, while Windows
+# invalidating a SUB-rectangle redrew the whole document displaced.
 #
-# So the gate now provokes the shape deliberately. The assertion is that a
-# paint really did arrive with a NON-ZERO origin — proving this exercised the
-# path rather than the easy one — while the document still renders from the
-# client origin, which the snapshot below carries for the human half.
+# WG6d made that unrepresentable rather than fixed. The renderer redraws the
+# ENTIRE grid on every present and ignores rcPaint completely, so there is no
+# partial composition left to get wrong. The invalidation is still provoked —
+# it is a real WM_PAINT and must still reach a present without error — but the
+# origin assertion is gone because the origin no longer exists.
 gui doit {WinShell invalidateEditorRectX: 40 y: 30 w: 120 h: 60.}
 gui drain now
 gui drain now
-puts "WG6C2 partial-paint-rect [gui eval {WinShell lastPaintRect}]"
-puts "WG6C2 partial-origin-nonzero [gui eval {((WinShell lastPaintRect at: 1) + (WinShell lastPaintRect at: 2)) > 0}]"
 puts "WG6C2 partial-paint-error [gui eval {WinShell paintError}]"
+puts "WG6C2 frames-after-partial [gui eval {WinRender frames}]"
 
 # ── a picture, for the human half of the gate ───────────────────────────
 # TAKEN WITHOUT REPAIRING THE PANE FIRST, deliberately. A full repaint after

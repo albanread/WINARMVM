@@ -1704,19 +1704,17 @@ gate-wg6c:
     grep -q 'WG6C2 still-editor #editor' /tmp/wg6c_gate.txt
     grep -q "WG6C2 paint-error ''" /tmp/wg6c_gate.txt
 
-    # A PARTIAL PAINT really happened. `refreshEditorPane` invalidates with
-    # NULL, so rcPaint always arrived at the client origin and the document —
-    # drawn at `rcPaint.left + column * charW` — always landed correctly. Drag
-    # another window across the pane and rcPaint is a SUB-rectangle, at which
-    # point the whole document was redrawn displaced by its origin, over the
-    # copy already there. Every gate here passed and every screenshot looked
-    # right; it was found by looking at the running app.
-    #
-    # The assertion is that the awkward shape was EXERCISED — a paint arrived
-    # with a non-zero origin — because a gate that only ever provokes the easy
-    # one is what let this ship in the first place.
-    grep -q 'WG6C2 partial-origin-nonzero true' /tmp/wg6c_gate.txt
+    # A PARTIAL PAINT still gets provoked, but the origin assertion is GONE —
+    # WG6d made that defect unrepresentable rather than fixing it. The renderer
+    # redraws the entire grid every present and ignores rcPaint, so there is no
+    # partial composition left to be wrong about. What is still worth asserting
+    # is that the real WM_PAINT reached a present without error, and that
+    # FRAMES CLIMBED — the renderer's replacement for `paintCalls`, and the
+    # only thing that distinguishes "presented" from "quietly did nothing".
     grep -q "WG6C2 partial-paint-error ''" /tmp/wg6c_gate.txt
+    FRAMES=$(grep -E '^WG6C2 frames-after-partial ' /tmp/wg6c_gate.txt | awk '{print $NF}')
+    echo "editor: $FRAMES frames presented"
+    test "$FRAMES" -gt 0
 
     test -s target/winui-wg6c.png
     for i in $(seq 1 60); do [ -f /tmp/wg6c_exit ] && break || sleep 0.5; done

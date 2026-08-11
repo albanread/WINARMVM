@@ -323,6 +323,41 @@ pub extern "C" fn MacvmRenderGrid(cols: i64, rows: i64) -> i64 {
     })
 }
 
+/// Blank every cell to `fg` on `bg`, in Rust.
+///
+/// The guest could poke all of them, but an 80x40 pane is 3,200 cells and
+/// 9,600 marshalled writes per repaint — for a document that is mostly
+/// whitespace. Blanking here and letting the guest write only the cells that
+/// carry ink keeps the seam's cost proportional to the TEXT rather than to the
+/// viewport, which is the whole reason a cell grid is cheap.
+#[no_mangle]
+pub extern "C" fn MacvmRenderClear(fg: i64, bg: i64) -> i64 {
+    R.with(|c| {
+        if let Some(r) = &mut *c.borrow_mut() {
+            let cell = Cell {
+                cp: ' ' as u32,
+                fg: fg as u32,
+                bg: bg as u32,
+            };
+            for x in r.cells.iter_mut() {
+                *x = cell;
+            }
+        }
+    });
+    OK
+}
+
+/// The grid's dimensions as `(cols << 16) | rows`, 0 when not attached — so
+/// the guest can ask what it got rather than assuming its own arithmetic
+/// agreed with the renderer's.
+#[no_mangle]
+pub extern "C" fn MacvmRenderGridSize() -> i64 {
+    R.with(|c| match &*c.borrow() {
+        Some(r) => ((r.cols as i64) << 16) | (r.rows as i64),
+        None => 0,
+    })
+}
+
 /// The caret, as a CELL. `on` zero hides it.
 ///
 /// Note the argument order: (col, row). The guest's `editorLineColOf:` answers

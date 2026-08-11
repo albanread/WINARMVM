@@ -103,3 +103,8 @@
 # `flows::persist_editor_class`. Loads after 106/107/108 (it positions and
 # shows their pane) and after 99, whose host verbs it calls.
 109_winui_editorview.mst
+# WINARM (WG6d-2): the pane pokes CELLS. `WinRender` over winui_render.dll —
+# DirectWrite metrics, a Direct2D/DXGI swapchain — and the WinShell half that
+# fills the grid from the tokenizer. Loads LAST because it overrides 106's
+# metrics and paint: the renderer is the one authority on a cell's size.
+110_winui_render.mst
