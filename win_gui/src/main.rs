@@ -309,7 +309,15 @@ mod app {
                     "idle"
                 };
                 format!(
-                    "{}{US}{}{US}{}{US}{}{US}{}{US}{}·{}{US}{}{US}{}",
+                    // ASCII ONLY in this table. The guest writes cells from a
+                    // String that is UTF-8 BYTES, and the renderer takes
+                    // CODEPOINTS — so a multi-byte character arrives as two
+                    // cells of raw bytes and shows as mojibake. A middot in
+                    // the GC column rendered as `0Â·0`, measured on screen.
+                    // The general fix is the UTF-8→codepoint conversion that
+                    // 106 already names as a known gap; not emitting non-ASCII
+                    // from here is the honest fix for THIS table.
+                    "{}{US}{}{US}{}{US}{}{US}{}{US}{}/{}{US}{}{US}{}",
                     r.label,
                     r.kind,
                     state,

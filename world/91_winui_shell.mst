@@ -1645,6 +1645,12 @@ Object subclass: WinShell [
      on its own rather than merely complete in practice."
     WinShell class >> editorSelectionRectsAtX: x y: y [ ^OrderedCollection new ]
     WinShell class >> resetEditorCaret [ ^self ]
+    "WG7-2's Monitor pane, a cell grid like the editor's; 112 overrides."
+    WinShell class >> buildMonitorPane [ ^self ]
+    WinShell class >> showMonitorPane: aBool [ ^self ]
+    WinShell class >> layoutMonitorPane: content [ ^self ]
+    WinShell class >> monitorPaneHwnd [ ^0 ]
+    WinShell class >> renderMonitor [ ^self ]
     "WG6c-2b's clipboard; 108 overrides. Declared here because 107 DISPATCHES
      them (Ctrl-C/X/V) and loads before 108 does — a layer that stopped at 107
      would otherwise answer doesNotUnderstand to a keystroke."

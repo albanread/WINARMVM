@@ -155,11 +155,106 @@ Object subclass: WinShell [
         ^w max: 24
     ]
 
-    WinShell class >> renderMonitor [
+    "── the pane: a CELL GRID, not a stock EDIT ─────────────────────────
+     The first version set the table as the text of the view's read-only EDIT.
+     It held all 246 correct characters and displayed NOTHING, and a short
+     literal in the same control displayed fine — so the control worked and the
+     table did not, which is the least useful pair of facts a defect can leave.
+
+     The author's call, and it is the right one for a second reason that has
+     nothing to do with the bug: an EDIT draws in the SHELL font, which is
+     proportional, so the columns would not have lined up even when it worked.
+     A cell grid is monospaced by construction — the alignment is not a font
+     choice, it is the data structure.
+
+     This is also what WG6d-3's per-window renderers were FOR. The Monitor is
+     the second consumer, and it needed no new renderer concept: a table is
+     cells with a colour, exactly as a selection is."
+
+    WinShell class >> monitorPaneName ^ <Symbol> [ ^#monitorPane ]
+
+    WinShell class >> monitorPaneHwnd ^ <Integer> [
         | c |
-        c := self controlNamed: (self contentNameFor: self monitorViewName).
-        c isNil ifTrue: [ ^self ].
-        c setText: (self monitorTextFor: self monitorWidthInChars).
+        c := self controlNamed: self monitorPaneName.
+        ^c isNil ifTrue: [ 0 ] ifFalse: [ c handle ]
+    ]
+
+    WinShell class >> buildMonitorPane [
+        "A child of OUR window class, so the door is its WndProc and its paint
+         reaches Smalltalk — the same reason WG6c-1 gave for the editor pane."
+        | c |
+        (self controlNamed: self monitorPaneName) ifNotNil: [ :x | ^self ].
+        c := self
+            addControl: self monitorPaneName
+            class: self className
+            text: ''
+            style: (((WinApi constant: 'WS_CHILD')
+                bitOr: (WinApi constant: 'WS_BORDER'))
+                bitOr: (WinApi constant: 'WS_CLIPSIBLINGS'))
+            exStyle: 0.
+        ^self
+    ]
+
+    WinShell class >> showMonitorPane: aBool <Boolean> [
+        (self controlNamed: self monitorPaneName)
+            ifNotNil: [ :c | c show: aBool ].
+        ^self
+    ]
+
+    WinShell class >> layoutMonitorPane: content <Array> [
+        (self controlNamed: self monitorPaneName)
+            ifNotNil: [ :c | c moveTo: content ].
+        ^self
+    ]
+
+    WinShell class >> monitorGridSize ^ <Array> [
+        | c r cw ch |
+        cw := WinRender cellWidthFor: self monitorPaneHwnd.
+        ch := WinRender cellHeightFor: self monitorPaneHwnd.
+        (cw = 0 or: [ ch = 0 ]) ifTrue: [ ^Array with: 1 with: 1 ].
+        c := self controlNamed: self monitorPaneName.
+        c isNil ifTrue: [ ^Array with: 1 with: 1 ].
+        r := [ c screenRect ] on: Error do: [ :e | nil ].
+        r isNil ifTrue: [ ^Array with: 1 with: 1 ].
+        ^Array
+            with: ((((r at: 3) - (r at: 1)) // cw) max: 1)
+            with: ((((r at: 4) - (r at: 2)) // ch) max: 1)
+    ]
+
+    WinShell class >> renderMonitor [
+        "Fill the grid from the table and present. The text is PLAIN — one
+         colour, no tokenizer — because a VM roster is not source code and
+         colouring it would be decoration pretending to be information."
+        | hwnd size cols rows base text line col row |
+        hwnd := self monitorPaneHwnd.
+        hwnd = 0 ifTrue: [ ^self ].
+        (WinRender cellWidthFor: hwnd) = 0 ifTrue: [
+            (WinRender attach: hwnd points: 9 dpi: self editorMetricsDpi)
+                ifFalse: [ ^self ] ].
+        size := self monitorGridSize.
+        cols := size at: 1.
+        rows := size at: 2.
+        base := WinRender gridFor: hwnd cols: cols rows: rows.
+        base = 0 ifTrue: [ ^self ].
+        WinRender clear: hwnd to: 16r000000 on: 16rFFFFFF.
+        text := self monitorTextFor: cols.
+        row := 0.
+        col := 0.
+        1 to: text size do: [ :i |
+            | ch |
+            ch := text at: i.
+            ch = Character nl
+                ifTrue: [ row := row + 1. col := 0 ]
+                ifFalse: [
+                    ch = (Character value: 13) ifFalse: [
+                        (row < rows and: [ col < cols ]) ifTrue: [
+                            WinRender at: base col: col row: row cols: cols
+                                put: ch asInteger
+                                fg: (row = 0 ifTrue: [ 16r8000 ] ifFalse: [ 16r000000 ])
+                                bg: 16rFFFFFF ].
+                        col := col + 1 ] ] ].
+        WinRender caretFor: hwnd col: 0 row: 0 visible: false.
+        WinRender present: hwnd.
         ^self
     ]
 ]

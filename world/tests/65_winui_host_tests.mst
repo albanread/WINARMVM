@@ -39,6 +39,10 @@ TestCase subclass: WinUiHostWg5bTests [
         self runTest: #testAMissingClassIsRefusedNotCrashed
              do: [ self testAMissingClassIsRefusedNotCrashed ].
 
+        "WG7: writing a file, which File In and Add to World both need."
+        self runTest: #testWinFileWritesAndRefusesAudibly
+             do: [ self testWinFileWritesAndRefusesAudibly ].
+
         "Then the pure decisions the source pane makes, which need no host."
         self runTest: #testNoClassSelectedAsksForOne do: [ self testNoClassSelectedAsksForOne ].
         self runTest: #testAClassWithNoSelectorShowsItsVariables
@@ -172,6 +176,34 @@ TestCase subclass: WinUiHostWg5bTests [
     ]
 
     "── The source pane's decisions, which are pure ──────────────────────"
+
+    testWinFileWritesAndRefusesAudibly [
+        "The facility File In and Add to World waited on, and the one thing
+         `WinIo` never was: `WinIo` lives in the TEST file — it was written to
+         prove the P5 resolver's underscore alias, not to ship — so nothing in
+         the shell could write a file at all.
+
+         BOTH DIRECTIONS. A writer that only ever succeeds in a test is a
+         writer whose failure path is unexercised, and this one's failure path
+         is the interesting half: File In writes before it restarts the
+         primary, so a silent write failure would restart into a world without
+         the user's code and look like the file-in simply did nothing."
+        | path ok |
+        path := (WinShell tempDirectory), 'winfile_test.mst'.
+        ok := WinFile spit: path contents: 'Object subclass: WrittenByWinFile [ ping [ ^7 ] ]'.
+        self assert: ok
+            description: 'a write to the temp directory lands, but said: '
+                , WinFile lastError.
+        self assert: WinFile lastError isEmpty
+            description: 'and says nothing when it worked'.
+
+        "A path whose directory cannot exist. It must answer FALSE and say why
+         — not raise, because a raise here unwinds a File In half way through."
+        ok := WinFile spit: 'Q:\no\such\directory\nope.mst' contents: 'x'.
+        self assert: ok not description: 'an impossible path is refused'.
+        self assert: WinFile lastError isEmpty not
+            description: 'and the refusal SAYS SO, or a File In fails silently'
+    ]
 
     testNoClassSelectedAsksForOne [
         self assert: (WinShell sourceTextFor: nil selector: nil) = 'Select a class.'

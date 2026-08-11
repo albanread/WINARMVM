@@ -135,6 +135,11 @@ tier1.mst
 # format parser and the row label - which are a contract shared with the
 # Mac's own find view and so want checking without a window.
 ../105_winui_find.mst
+# WG7: WinFile — writing a file from the shell, which File In and Add to World
+# both need. Loaded BEFORE 65, which tests it: it compiles against 91's classes
+# only, so it can sit this early, and an unresolved capitalised name in a method
+# body is a COMPILE error in this dialect.
+../113_winui_file.mst
 65_winui_host_tests.mst
 # WINARM (WG5c D1/D2): the syntax tokenizer and colour table, both PURE - so
 # unlike every other winui test file this one needs nothing from the machine

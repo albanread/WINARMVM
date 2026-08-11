@@ -118,3 +118,8 @@
 # by win_gui on the between-dispatches beat (the exe, because the roster is a
 # process-wide static and a DLL would get its own copy), and this renders it.
 112_winui_monitor.mst
+# WINARM (WG7): writing a file from the shell — the Win32 twin of the Mac's
+# `CocoaFile spit:contents:`, and the piece File In / Add to World waited on.
+# `WinIo` never shipped: it lives in the TEST file, written to prove the P5
+# resolver rather than to be a facility.
+113_winui_file.mst
