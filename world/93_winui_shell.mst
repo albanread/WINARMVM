@@ -184,7 +184,7 @@ Object subclass: WinApi [
 Object subclass: WinShell [
     <classVars: Wg4Enabled Views ActiveView ViewSwitchCount ViewBuildCount
                 TranscriptCollapsed TranscriptLines MetricsText MetricsUpdates
-                CommandsEnabled AccentColor LabelFont GlyphFont DrawRect DrawCalls DrawMisses DrawError DrawLast DrawIds DrawResult DrawResultClass DrawStep GlyphBuf LastFocusHwnd FocusChanges TranscriptHeight DragActive DragStartY DragStartHeight MonoFont SelScratch DoItCount PrintItCount>
+                CommandsEnabled AccentColor LabelFont GlyphFont DrawRect DrawCalls DrawMisses DrawError DrawLast DrawIds DrawResult DrawResultClass DrawStep GlyphBuf LastFocusHwnd FocusChanges TranscriptHeight DragActive DragStartY DragStartHeight MonoFont SelScratch DoItCount PrintItCount CursorScratch>
 
     WinShell class >> wg4Enabled ^ <Boolean> [
         "`MACVM_WINUI_WG4=off` restores WG3's window exactly — the same shape
@@ -629,8 +629,14 @@ Object subclass: WinShell [
                 self switchToView: (v at: 1).
                 self appendTranscript: 'switched to ' , (v at: 2).
                 ^self ] ].
-        name == #doit ifTrue: [ ^self appendTranscript: 'Do It — needs WG5''s Workspace.' ].
-        name == #printit ifTrue: [ ^self appendTranscript: 'Print It — needs WG5''s Workspace.' ].
+        "WG5a landed the Workspace, so these do the thing rather than explain
+         that they cannot. Reported by the author as unresponsive to a click —
+         the buttons were live and drawing, and this handler was still WG4's
+         placeholder, which is the least visible kind of stale code: it
+         RESPONDS, so nothing looks broken until you read what it says."
+        name == #doit ifTrue: [ self doIt. ^self ].
+        name == #printit ifTrue: [ self printIt. ^self ].
+        name == #splitter ifTrue: [ self onSplitterClick. ^self ].
         ^self wg3ServiceCommand: anId code: aCode from: aHandle
     ]
 ]

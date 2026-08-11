@@ -29,6 +29,16 @@
  to the one gesture that generates even more messages."
 
 Object subclass: WinApi [
+    WinApi class >> getCursorPos: pointPtr <Integer> ^ <Integer> [
+        <primitive: FFI function: #GetCursorPos ret: #g args: #(g)>
+        ^self primitiveFailed: 'GetCursorPos'
+    ]
+
+    WinApi class >> screenToClient: hwnd <Integer> point: pointPtr <Integer> ^ <Integer> [
+        <primitive: FFI function: #ScreenToClient ret: #g args: #(g g)>
+        ^self primitiveFailed: 'ScreenToClient'
+    ]
+
     WinApi class >> setCapture: hwnd <Integer> ^ <Integer> [
         <primitive: FFI function: #SetCapture ret: #g args: #(g)>
         ^self primitiveFailed: 'SetCapture'
@@ -125,6 +135,36 @@ Object subclass: WinShell [
     WinShell class >> hiWordSigned: v <Integer> ^ <Integer> [
         | w | w := (v bitShift: 0 - 16) bitAnd: 16rFFFF.
         ^w > 32767 ifTrue: [ w - 65536 ] ifFalse: [ w ]
+    ]
+
+    WinShell class >> onSplitterClick [
+        "The splitter is a CHILD BUTTON, so it swallows the mouse and reports a
+         WM_COMMAND — the parent never sees WM_LBUTTONDOWN inside it, which is
+         why the first version of this file waited for a message that could not
+         arrive and Clear did nothing. Reported by the author, and the fix is
+         to ask WHERE the pointer is rather than to be told.
+
+         `GetCursorPos` + `ScreenToClient` gives the same client coordinates
+         WM_LBUTTONDOWN would have carried, so the geometry below is unchanged
+         — only its source is."
+        | pt x sr rects |
+        self isOpen ifFalse: [ ^self ].
+        pt := self cursorScratch.
+        WinApi getCursorPos: pt.
+        WinApi screenToClient: Hwnd point: pt.
+        x := WinArena i32At: pt.
+        rects := self layout rectsIn: self clientWidth by: self clientHeight
+            dpi: (Dpi isNil ifTrue: [ 96 ] ifFalse: [ Dpi ]).
+        sr := rects at: #splitter ifAbsent: [ nil ].
+        sr isNil ifTrue: [ ^self ].
+        x >= ((sr at: 1) + (sr at: 3) - (60 * (Dpi isNil ifTrue: [ 96 ] ifFalse: [ Dpi ]) // 96))
+            ifTrue: [ ^self clearTranscript ].
+        ^self toggleTranscript
+    ]
+
+    WinShell class >> cursorScratch ^ <Integer> [
+        CursorScratch isNil ifTrue: [ CursorScratch := WinArena alloc: (WinApi sizeOf: 'POINT') ].
+        ^CursorScratch
     ]
 
     WinShell class >> onMouseDown: lp <Integer> ^ <Object> [
