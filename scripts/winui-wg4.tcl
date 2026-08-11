@@ -36,8 +36,16 @@ puts "WG4 active-at-open [gui eval {WinShell activeView}]"
 # outside every VM entry. The door FLAGS it; the drain switches the view one
 # pass later. Both halves are asserted: the queue depth in the door, the
 # effect after the pass.
+# `gui track on` suppresses the drain the way a modal move/size loop does, so
+# the queue can be OBSERVED between the door recording the command and the
+# drain servicing it. Without it the pump can drain between the send and the
+# read, and the count reads 0 — not because the door failed to queue, but
+# because the queue was already serviced. (Measured: it read 0 exactly that
+# way on the first run of this gate.)
+gui track on
 gui send "0 0x111 [gui eval {(WinShell controlNamed: #view_transcript) id}] 0"
 puts "WG4 queued-in-door [gui eval {WinShell pendingCommandCount}]"
+gui track off
 gui drain now
 puts "WG4 active-after-click [gui eval {WinShell activeView}]"
 puts "WG4 built-after-click [gui eval {WinShell viewBuildCount}]"

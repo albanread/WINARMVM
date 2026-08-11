@@ -1181,3 +1181,109 @@ gate-s12: gate-s11
     sed '$s/.*/Soak run: 400./' world/bench/soak.mst > /tmp/macvm_soak_s12.mst
     MACVM_JIT=threshold=1 cargo run --release --quiet -- run /tmp/macvm_soak_s12.mst --world world
     just soak-s12
+
+# WG4 (docs/ROADMAP.md's WG4 row): the shell — a view bar, views that build
+# LAZILY, a transcript dock that collapses as a height change, and a metrics
+# cluster that takes one sample at a time.
+#
+# Depends on gate-wg3, and the dependency is the point: WG4's window is WG3's
+# window with a grammar on top, so a WG4 gate that passed while WG3's had
+# broken would be measuring the wrong thing. gate-wg3 runs with
+# MACVM_WINUI_WG4=off (its assertions are about WG3's three controls in WG3's
+# three bands); this one runs with the shell on, which is the default.
+gate-wg4: gate-wg3
+    #!/usr/bin/env bash
+    set -euo pipefail
+    PORT=7671
+    SHOT=target/winui-wg4.png
+    cargo build --quiet
+    cargo build --quiet -p win_gui
+
+    # ── the in-language half ─────────────────────────────────────────────
+    # The layout grammar and the view registry are pure guest state, so they
+    # are checked with no window at all — the same split WG3 drew, and the
+    # reason WG4's arithmetic is testable on a machine with no Win32.
+    grep -v '^#' world/tests/tests.list | grep -v '^$' | sed 's|^|world/tests/|' \
+        | xargs cat > /tmp/macvm_wg4_tests.mst
+    ./target/debug/macvm run /tmp/macvm_wg4_tests.mst --world world | tee /tmp/wg4_present.txt
+    grep -q ', 0 failed' /tmp/wg4_present.txt
+    grep -q 'WinUiShellWg4Tests' /tmp/wg4_present.txt
+    # Counts are RELATIONSHIPS, never frozen integers (WG2 Δ 14): WG4's suite
+    # is strictly larger than WG3's was, and nothing is failing.
+    PRESENT=$(grep -oE '^[0-9]+ run, 0 failed' /tmp/wg4_present.txt | cut -d' ' -f1)
+    echo "world: $PRESENT with the shell layer loaded"
+    test "$PRESENT" -ge 7850
+
+    # ── the live half ────────────────────────────────────────────────────
+    rm -f "$SHOT" /tmp/wg4_exit /tmp/wg4_app.txt
+    ( MACVM_WINUI_CTL=$PORT ./target/debug/macvm-winui.exe > /tmp/wg4_app.txt 2>&1; \
+      echo $? > /tmp/wg4_exit ) &
+    for i in $(seq 1 60); do
+        (exec 3<>/dev/tcp/127.0.0.1/$PORT) 2>/dev/null && break || sleep 0.5
+    done
+    ./target/debug/macvm rusttcl scripts/winui-wg4.tcl | tee /tmp/wg4_gate.txt
+    cat /tmp/wg4_app.txt
+
+    # ── the shell came up ─────────────────────────────────────────────────
+    grep -q 'WG4 open true' /tmp/wg4_gate.txt
+    grep -q 'WG4 enabled true' /tmp/wg4_gate.txt
+
+    # ── LAZY BUILD, which is the WG4 row's own word ───────────────────────
+    # Three views registered and exactly ONE built at open. A shell that built
+    # every view up front would answer 3 here and would pay every future
+    # view's handles at startup — the difference this assertion exists for.
+    grep -q 'WG4 views 3' /tmp/wg4_gate.txt
+    grep -q 'WG4 built-at-open 1' /tmp/wg4_gate.txt
+    grep -q "WG4 active-at-open #welcome" /tmp/wg4_gate.txt
+
+    # A real WM_COMMAND crossed the door, was QUEUED there, and the view
+    # switched one drain pass later — the flag-and-drain contract, at the
+    # shell's own layer.
+    grep -q 'WG4 queued-in-door 1' /tmp/wg4_gate.txt
+    grep -q "WG4 active-after-click #transcript" /tmp/wg4_gate.txt
+    grep -q 'WG4 built-after-click 2' /tmp/wg4_gate.txt
+
+    # Switching to a view ALREADY built builds nothing: the build count holds
+    # at 2 while the switch count goes up. A shell that rebuilt per visit
+    # would leak a window handle per click, invisibly, until it wasn't.
+    grep -q 'WG4 built-after-reswitch 2' /tmp/wg4_gate.txt
+    grep -q 'WG4 switches-after-reswitch 3' /tmp/wg4_gate.txt
+    # ...and a third view still builds on ITS first visit.
+    grep -q 'WG4 built-third 3' /tmp/wg4_gate.txt
+
+    # ── the dock is a HEIGHT change, not a structural one ─────────────────
+    # Collapsed is height 0 with the band still present; reopening restores a
+    # number rather than reconstructing a band.
+    grep -q 'WG4 dock-collapsed-0 false' /tmp/wg4_gate.txt
+    grep -q 'WG4 dock-height-0 120' /tmp/wg4_gate.txt
+    grep -q 'WG4 dock-collapsed-1 true' /tmp/wg4_gate.txt
+    grep -q 'WG4 dock-height-1 0' /tmp/wg4_gate.txt
+    grep -q 'WG4 dock-collapsed-2 false' /tmp/wg4_gate.txt
+    grep -q 'WG4 dock-height-2 120' /tmp/wg4_gate.txt
+
+    # ── the metrics cluster, read back out of Win32 ───────────────────────
+    # Not out of the Smalltalk variable: the claim is that the CONTROL shows
+    # the sample, and only GetWindowTextW can settle that.
+    grep -q 'WG4 metrics-updates 1' /tmp/wg4_gate.txt
+    grep -q 'MEM 540K/68M' /tmp/wg4_gate.txt
+    grep -q 'GC 2/4' /tmp/wg4_gate.txt
+
+    # ── the transcript: newest first, and it BREAKS ───────────────────────
+    # A Win32 multiline EDIT breaks on CRLF and on nothing else. The first WG4
+    # snap ran every line together; this is the assertion that catches it.
+    grep -q "WG4 transcript-first 'gate line two'" /tmp/wg4_gate.txt
+    grep -q 'WG4 transcript-breaks true' /tmp/wg4_gate.txt
+
+    # ── the layout actually placed the shell's children ───────────────────
+    grep -q 'WG4 metrics-right-of-buttons true' /tmp/wg4_gate.txt
+    LAYOUTS=$(grep '^WG4 layouts ' /tmp/wg4_gate.txt | cut -d' ' -f3)
+    test "$LAYOUTS" -ge 1
+
+    # ── the window survived all of it ─────────────────────────────────────
+    test -s "$SHOT"
+    echo "snap: $SHOT ($(wc -c < "$SHOT") bytes)"
+    { echo "gui connect $PORT"; echo "gui quit"; } > /tmp/wg4_quit.tcl
+    ./target/debug/macvm rusttcl /tmp/wg4_quit.tcl >/dev/null 2>&1 || true
+    for i in $(seq 1 60); do [ -f /tmp/wg4_exit ] && break || sleep 0.5; done
+    test "$(cat /tmp/wg4_exit)" = "0"
+    echo "gate-wg4: PASS"
