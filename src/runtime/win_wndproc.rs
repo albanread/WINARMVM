@@ -38,6 +38,22 @@
 //! so the two halves can disagree safely — but only in the direction of doing
 //! *less*.
 //!
+//! **WG4 D5 admitted `WM_MOUSEMOVE`, deliberately, and it is the exception
+//! that proves the rule.** The transcript splitter is dragged, and a drag is
+//! made of exactly the message this list was written to keep out. Three things
+//! make the cost acceptable rather than merely tolerated:
+//!
+//! * the allowlist scan is the FIRST thing `macvm_wndproc` does, so an
+//!   off-drag storm is a handful of integer compares and a `DefWindowProcW`;
+//! * the door only ever RECORDS (§2.4a flag-and-drain), so a move that
+//!   arrives mid-drag costs a flag, not a VM entry;
+//! * `WinShell` answers `#defwindowproc` when no drag is active, which is the
+//!   two-sided property above doing its job — the expensive half is gated by
+//!   the side that knows whether it is needed.
+//!
+//! `WM_NCHITTEST` and `WM_SETCURSOR` stay off the list and always have. If a
+//! future sprint wants one of them, it owes the same three-part argument.
+//!
 //! ## D3 — the depth guard, and exactly what it covers
 //!
 //! `DispatchMessageW` re-enters: `DefWindowProcW` generates nested messages, a
@@ -1303,11 +1319,17 @@ mod tests {
         for m in ALLOWLIST {
             assert!(is_allowlisted(m), "{m:#06x} is on the list");
         }
-        // The storm messages, by name and by number, plus WM_PAINT which is
-        // deliberately NOT routed in WG2.
+        // The storm messages that STILL do not cross, by name and by number,
+        // plus WM_PAINT which is deliberately not routed.
+        //
+        // `WM_MOUSEMOVE` (0x0200) is no longer among them: WG4 D5 admitted it
+        // for the splitter drag, with the three-part argument in this module's
+        // own header (allowlist scan first, door records only, `WinShell`
+        // declines when no drag is active). It is asserted as PRESENT above,
+        // via the ALLOWLIST loop -- so this test still pins the set exactly,
+        // it just pins the set WG4 actually ships.
         for m in [
-            0x0200u32, // WM_MOUSEMOVE
-            0x0084,    // WM_NCHITTEST
+            0x0084u32, // WM_NCHITTEST
             0x0020,    // WM_SETCURSOR
             0x000F,    // WM_PAINT
             0x0014,    // WM_ERASEBKGND
@@ -1316,7 +1338,7 @@ mod tests {
             assert!(!is_allowlisted(m), "{m:#06x} must not cross");
         }
         let before = vm_entries();
-        for m in [0x0200u32, 0x0084, 0x0020, 0x000F] {
+        for m in [0x0084u32, 0x0020, 0x000F] {
             let _ = macvm_wndproc(0, m, 0, 0);
         }
         assert_eq!(

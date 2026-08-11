@@ -2695,6 +2695,18 @@ mod tests {
         set_mono_smi_plus_ic(&mut vm, method);
 
         let smi_klass = vm.universe.smi_klass;
+        // INSTALL IT, so the fixture matches what it claims to test. Since the
+        // WG3 sub-floor fix, an nmethod only claims the `by_key` slot when it
+        // is what dispatch REALLY resolves to for (klass, selector) — a
+        // super-send target aliasing the slot was the bug that fix exists for.
+        // This method was never in the dictionary, so it legitimately does not
+        // own the slot and the lookup below answered None. Making it the real
+        // dispatch winner keeps the test's intent (an eligible method installs
+        // and is findable by key) and stops it asserting a state the runtime
+        // deliberately no longer produces.
+        let m_sel = SymbolOop::try_from(method.selector()).unwrap();
+        crate::runtime::lookup::install_method(&mut vm, smi_klass, m_sel, method);
+
         let id = compile_method(&mut vm, smi_klass, method).expect("eligible method must compile");
 
         let nm = vm
