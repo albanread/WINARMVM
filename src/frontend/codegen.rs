@@ -1998,8 +1998,16 @@ mod tests {
         let desc = m.literals();
         assert_eq!(
             desc.len(),
-            7,
-            "kind/name/class/classSide/ret/args + the U1 address-cache slot"
+            8,
+            "kind/name/class/classSide/ret/args + the U1 address-cache slot \
+             + WINARM WG5b-2's `library:` slot (nil here — this pragma names \
+             no library, which is the shape every pre-WG5b-2 pragma has)"
+        );
+        assert_eq!(
+            desc.at(7),
+            vm.universe.nil_obj,
+            "a pragma that names no library must leave slot 7 nil: that is the \
+             whole compatibility story for widening the descriptor"
         );
         assert_eq!(
             desc.at(6),
