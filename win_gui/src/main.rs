@@ -443,7 +443,11 @@ mod app {
     /// worker and can only be *submitted* to), `eval` answers INLINE with the
     /// real `printString`. That is what makes the gate a script: `gui eval
     /// "WinShell clientWidth"` returns the number Win32 just gave Smalltalk.
-    pub fn drain_control_requests(vm: &mut VmHandle, rx: &Receiver<CtlReq>) {
+    pub fn drain_control_requests(
+        vm: &mut VmHandle,
+        rx: &Receiver<CtlReq>,
+        link: &mut Option<crate::boot::PrimaryLink>,
+    ) {
         while let Ok(req) = rx.try_recv() {
             let cmd = req.cmd.trim().to_string();
             let (verb, arg) = match cmd.split_once(' ') {
@@ -579,6 +583,33 @@ mod app {
                 }
                 "send" => {
                     let reply = send_verb(vm, arg);
+                    let _ = req.reply.send(reply);
+                }
+                // WG7-3. `restart` replaces the primary WITHOUT touching the
+                // window: same HWND, same UI VM, same views, a brand new world
+                // behind them. It is the machinery File In and Add to World
+                // need — WG6c-3 left both unbuilt for want of it — and it runs
+                // HERE, on the control drain between dispatches, because
+                // joining a thread from inside the door would be a VM entry
+                // waiting on another VM.
+                "restart" => {
+                    let reply = match link.as_mut() {
+                        None => "ERR no primary to restart (single-VM path)".to_string(),
+                        Some(l) => {
+                            let before = l.hosted_id;
+                            match crate::boot::restart_primary(
+                                vm,
+                                l,
+                                world_dir(),
+                                std::sync::Arc::new(wake_ui_thread),
+                            ) {
+                                Ok(()) => {
+                                    format!("OK restart hosted_id {} -> {}", before, l.hosted_id)
+                                }
+                                Err(e) => format!("ERR restart: {}", e.msg),
+                            }
+                        }
+                    };
                     let _ = req.reply.send(reply);
                 }
                 // The control channel's own exit path. `sprint_wg1_detail.md`
@@ -855,8 +886,7 @@ mod app {
         vmp: *mut VmHandle,
         rx: Option<&Receiver<CtlReq>>,
         window: HWND,
-        inbox: Option<&macvm::runtime::workers::HostedInbox>,
-        metrics: Option<&crate::boot::MetricsSnapshot>,
+        link: &mut Option<crate::boot::PrimaryLink>,
     ) -> i32 {
         let mut msg = MSG::default();
         // The previous allocation total, so ALLOC can report a RATE rather than
@@ -887,7 +917,7 @@ mod app {
                         // running here (we are between dispatches on the one
                         // thread that dispatches), so this `&mut` is unique.
                         let vm: &mut VmHandle = unsafe { &mut *vmp };
-                        drain_control_requests(vm, rx);
+                        drain_control_requests(vm, rx, link);
                     }
                     // WG4 D1: the primary -> UI inbox, pumped HERE and nowhere
                     // else. This is the Windows twin of the Mac's
@@ -900,11 +930,17 @@ mod app {
                     // WG4 D2: the metrics cluster, sampled off the primary.
                     // Runs on the same "between dispatches" beat as the inbox
                     // pump and throttles itself to ~4 Hz.
-                    if let Some(snap) = metrics {
+                    // WG7-3: read through the LINK every pass rather than
+                    // holding a borrow across the loop. A restart replaces the
+                    // inbox and the metrics slot, and a pump still draining the
+                    // old ones would be draining a channel nobody sends on —
+                    // silent, and indistinguishable from a primary that has
+                    // stopped answering.
+                    if let Some(snap) = link.as_ref().map(|l| l.metrics.clone()) {
                         let vm: &mut VmHandle = unsafe { &mut *vmp };
-                        refresh_metrics(vm, snap, &mut prev_alloc);
+                        refresh_metrics(vm, &snap, &mut prev_alloc);
                     }
-                    if let Some(inbox) = inbox {
+                    if let Some(inbox) = link.as_ref().map(|l| &l.inbox) {
                         // SAFETY: as above — between dispatches, on the one
                         // thread that dispatches, no door running.
                         let vm: &mut VmHandle = unsafe { &mut *vmp };
@@ -1056,13 +1092,14 @@ mod app {
                     let boxed = Box::new(w.ui_worker);
                     println!(
                         "macvm-winui: two VMs wired — primary on {:?}, UI worker id {} on main",
-                        w.primary_thread.thread().name().unwrap_or("?"),
-                        w.hosted_id,
+                        w.link
+                            .thread
+                            .as_ref()
+                            .and_then(|t| t.thread().name().map(|n| n.to_string()))
+                            .unwrap_or_else(|| "?".into()),
+                        w.link.hosted_id,
                     );
-                    (
-                        boxed,
-                        Some((w.hosted_id, w.hosted_inbox, w.primary_thread, w.metrics)),
-                    )
+                    (boxed, Some(w.link))
                 }
                 Err(e) => {
                     eprintln!("macvm-winui: {}", e.msg);
@@ -1159,13 +1196,8 @@ mod app {
             return 3;
         }
 
-        let code = pump(
-            vmp,
-            rx.as_ref(),
-            window,
-            _wired.as_ref().map(|(_, ib, _, _)| ib),
-            _wired.as_ref().map(|(_, _, _, mt)| mt),
-        );
+        let mut link = _wired;
+        let code = pump(vmp, rx.as_ref(), window, &mut link);
         println!("macvm-winui: {}", win_wndproc::stats_line());
         println!("macvm-winui: message loop ended, exit {code}");
         // The door outlives nothing: unpublish before the box drops, so a late

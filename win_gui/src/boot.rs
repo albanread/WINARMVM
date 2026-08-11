@@ -42,6 +42,7 @@
 
 use std::path::PathBuf;
 use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Instant;
@@ -87,16 +88,36 @@ pub type MetricsSnapshot = Arc<Mutex<Option<(VmMetrics, Instant)>>>;
 pub struct WiredVms {
     /// The UI VM: pinned to main, holds every handle, pumps every message.
     pub ui_worker: VmHandle,
+    /// Everything about the primary that a RESTART replaces.
+    pub link: PrimaryLink,
+}
+
+/// The primary, as something that can be replaced without touching the window.
+///
+/// WG7-3. Every field here is re-minted by a restart and nothing outside is:
+/// the id changes (a fresh registry), the inbox changes (a fresh channel), the
+/// thread changes, and the metrics slot changes. Keeping them in ONE struct is
+/// what makes "swap the primary" a single assignment rather than four, and
+/// what stops a caller keeping half of the old one — which is exactly the
+/// defect class `47_worker.mst` warns about for in-flight `#uiReq`s.
+pub struct PrimaryLink {
     /// The UI worker's id in the primary's registry.
     pub hosted_id: u32,
     /// The channel the UI worker drains for primary→UI traffic.
-    pub hosted_inbox: HostedInbox,
-    /// The (detached) background thread hosting the persistent primary VM. It
-    /// is never joined — it parks for the process lifetime — so this is a
-    /// liveness token, not a handle anyone waits on.
-    pub primary_thread: JoinHandle<()>,
+    pub inbox: HostedInbox,
+    /// The background thread hosting the primary VM.
+    ///
+    /// `Option` because a restart TAKES it to join it. Before WG7-3 this was
+    /// never joined at all — the primary parked for the process lifetime and
+    /// the handle was a liveness token. A restart is the first thing that ever
+    /// needs the old one to be finished before the new one starts, because two
+    /// primaries serving one UI worker would race over its registry entry.
+    pub thread: Option<JoinHandle<()>>,
     /// WG4 D2: the primary's own metrics, republished every beat.
     pub metrics: MetricsSnapshot,
+    /// Set by the UI thread, read by the primary's beat. The ONLY way the
+    /// dispatch loop ever ends — it is otherwise `loop {}` by design.
+    pub stop: Arc<AtomicBool>,
 }
 
 /// Wire the two VMs and hand back a live [`WiredVms`]. Runs on the thread that
@@ -105,24 +126,32 @@ pub struct WiredVms {
 /// `wake` is called from the PRIMARY's thread whenever it sends to the UI
 /// worker, so it must be cheap and thread-safe — `request_drain(hwnd)` is both
 /// (one `PostMessageW` behind the posted-latch).
-pub fn handshake_wire_vms(
+/// Spawn a primary and park until it is serving. The half of the handshake a
+/// RESTART repeats — extracted rather than duplicated, so a restart cannot
+/// drift from a boot and quietly produce a differently-wired VM.
+#[allow(clippy::type_complexity)]
+fn spawn_primary(
     world_dir: PathBuf,
-    winui_list: PathBuf,
-    ui_fatal_mode: FatalMode,
     wake: InboxWakeFn,
-) -> Result<WiredVms, VmError> {
-    // The primary's "ready" payload: the UI worker id + the channel to drain +
-    // the reply link back to the primary. All `Send` — the primary mints them
-    // on its thread, main receives them on the pump thread.
-    #[allow(clippy::type_complexity)]
+) -> Result<(u32, HostedInbox, InboxSender, JoinHandle<()>, MetricsSnapshot, Arc<AtomicBool>), VmError>
+{
     let (ready_tx, ready_rx) = mpsc::channel::<Result<(u32, HostedInbox, InboxSender), VmError>>();
-
     let metrics: MetricsSnapshot = Arc::new(Mutex::new(None));
+    let stop = Arc::new(AtomicBool::new(false));
     let world_for_primary = world_dir.clone();
     let metrics_for_primary = metrics.clone();
-    let primary_thread = std::thread::Builder::new()
+    let stop_for_primary = stop.clone();
+    let thread = std::thread::Builder::new()
         .name("macvm-winui-primary".into())
-        .spawn(move || primary_thread_main(world_for_primary, wake, ready_tx, metrics_for_primary))
+        .spawn(move || {
+            primary_thread_main(
+                world_for_primary,
+                wake,
+                ready_tx,
+                metrics_for_primary,
+                stop_for_primary,
+            )
+        })
         .map_err(|e| VmError {
             msg: format!("could not spawn the primary VM thread: {e}"),
         })?;
@@ -138,6 +167,67 @@ pub fn handshake_wire_vms(
             })
         }
     };
+    Ok((hosted_id, hosted_inbox, to_primary, thread, metrics, stop))
+}
+
+/// Replace the primary WITHOUT touching the window, the UI VM's heap, or any
+/// view.
+///
+/// WG7-3, and the slice `docs/sprints/sprint_wg7_detail.md` orders first. Its
+/// contract is two-sided and both halves matter: the new primary must be
+/// indistinguishable from a fresh boot TO THE WORLD (a class defined at
+/// runtime is gone; `world/user_*.mst` is back), and the restart must be
+/// invisible TO THE WINDOW (no rebuild, no view state lost, `viewBuildCount`
+/// unchanged).
+///
+/// Order is load-bearing. The old primary is stopped and JOINED before the new
+/// one is spawned, because two primaries serving one UI worker would both hold
+/// registry entries for it and race over its inbox. Joining is also what makes
+/// the old VM's heap actually go away rather than linger behind a detached
+/// thread.
+///
+/// The UI worker is then RE-ROLED onto the new link. `install_worker_role`
+/// overwrites the worker state, which is a caller bug on a primary and exactly
+/// right here — a worker's role is precisely "which primary do I answer to".
+pub fn restart_primary(
+    ui_worker: &mut VmHandle,
+    link: &mut PrimaryLink,
+    world_dir: PathBuf,
+    wake: InboxWakeFn,
+) -> Result<(), VmError> {
+    // 1. Ask the old beat to finish, and WAIT for it. `pumpInbox:` returns
+    //    every beat by design (that is the seam D1 kept for exactly this), so
+    //    the flag is seen within one beat rather than never.
+    link.stop.store(true, Ordering::Relaxed);
+    if let Some(t) = link.thread.take() {
+        let _ = t.join();
+    }
+
+    // 2. A fresh primary, wired the same way a boot wires one.
+    let (hosted_id, inbox, to_primary, thread, metrics, stop) =
+        spawn_primary(world_dir, wake)?;
+
+    // 3. Point the UI worker at it. Anything still holding the OLD id or the
+    //    OLD sender is now stale by construction, which is the point: a
+    //    half-swapped link is the failure mode this struct exists to prevent.
+    ui_worker.install_worker_role(hosted_id, to_primary);
+
+    link.hosted_id = hosted_id;
+    link.inbox = inbox;
+    link.thread = Some(thread);
+    link.metrics = metrics;
+    link.stop = stop;
+    Ok(())
+}
+
+pub fn handshake_wire_vms(
+    world_dir: PathBuf,
+    winui_list: PathBuf,
+    ui_fatal_mode: FatalMode,
+    wake: InboxWakeFn,
+) -> Result<WiredVms, VmError> {
+    let (hosted_id, hosted_inbox, to_primary, primary_thread, metrics, stop) =
+        spawn_primary(world_dir.clone(), wake)?;
 
     // Boot the UI worker VM IN PLACE on THIS thread — boot must run on the
     // driving thread, because its foreign-fault handler (P2's VEH) and its
@@ -163,20 +253,22 @@ pub fn handshake_wire_vms(
 
     Ok(WiredVms {
         ui_worker,
-        hosted_id,
-        hosted_inbox,
-        primary_thread,
-        metrics,
+        link: PrimaryLink {
+            hosted_id,
+            inbox: hosted_inbox,
+            thread: Some(primary_thread),
+            metrics,
+            stop,
+        },
     })
 }
 
-/// The primary VM's thread: boot the world, become a primary, register the UI
-/// worker, signal ready, then hold the VM alive for the process lifetime.
 fn primary_thread_main(
     world_dir: PathBuf,
     wake: InboxWakeFn,
     ready_tx: mpsc::Sender<Result<(u32, HostedInbox, InboxSender), VmError>>,
     metrics: MetricsSnapshot,
+    stop: Arc<AtomicBool>,
 ) {
     // The persistent primary — the environment's state, the VM a user would
     // call "their image". `ExitThread` (boot's default) is right here: a
@@ -235,6 +327,16 @@ fn primary_thread_main(
     // happens. That is §2.2's whole point, and D1's second gate claim.
     let mut beats: u64 = 0;
     loop {
+        // WG7-3: the ONE way this loop ends. It is `loop {}` by design — the
+        // primary parks for the process lifetime — so a restart needs a seam,
+        // and the beat is it: `pumpInbox:` returns every BEAT_MS whether or not
+        // mail arrived, which D1 kept deliberately so a supervisor could
+        // observe liveness. That same property is what bounds how long a
+        // restart waits.
+        if stop.load(Ordering::Relaxed) {
+            eprintln!("macvm-winui: primary stopping after {beats} beats (restart)");
+            return;
+        }
         beats += 1;
         // WG4 D2: republish this VM's own metrics for the UI to read. Taken
         // HERE, on the primary's thread, between beats — the only place the

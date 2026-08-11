@@ -582,8 +582,13 @@ fn verb_gui(_vm: &mut Vm<'_>, args: &[Value]) -> TclResult<Value> {
             })?;
             gui_request(ctx, &format!("send {spec}")).map(Value::new)
         }
+        // WINARM (WG7-3): replace the PRIMARY without touching the window.
+        // Answers the hosted id either side of the swap, which is the cheapest
+        // proof that a restart really happened — a fresh registry mints a fresh
+        // id, so an unchanged one means nothing was replaced.
+        "restart" => gui_request(ctx, "restart").map(Value::new),
         other => Err(TclError::runtime(format!(
-            "gui: unknown subcommand '{other}' (connect/ping/rebuild/game/stopgame/gameclose/eval/doit/view/snap/door/resize/drain/track/burst/send/sleep/quit)"
+            "gui: unknown subcommand '{other}' (connect/ping/rebuild/game/stopgame/gameclose/eval/doit/view/snap/door/resize/drain/track/burst/send/restart/sleep/quit)"
         ))),
     }
 }

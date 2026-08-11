@@ -1732,3 +1732,74 @@ gate-wg6c:
         echo "own image: unchanged"
     fi
     echo "gate-wg6c: PASS"
+
+# --- WG7-3: the primary, restarted in place -------------------------------
+#
+# docs/sprints/sprint_wg7_detail.md WG7-3, ordered FIRST despite being listed
+# third: it is the piece with real risk (thread lifetime, in-flight requests),
+# and the Debugger's own gate wants to halt and resume repeatedly against a
+# known world — so finding restart bugs while debugging the Debugger would be
+# the worst possible order.
+#
+# It is also what WG6c-3 was missing. File In's contract is "a fresh world,
+# then your file", and `win_gui` booted its primary once and held it for the
+# process lifetime; there was no teardown to build on. That is why File In and
+# Add to World were left unbuilt, and this is the machinery they need.
+#
+# THE CONTRACT PULLS BOTH WAYS, which is the whole reason it is gated rather
+# than eyeballed: the new primary must be indistinguishable from a fresh boot
+# TO THE WORLD, and the restart must be completely invisible TO THE WINDOW. A
+# restart that rebuilt the views would satisfy the first and break the second.
+gate-wg7:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    taskkill //F //IM macvm-winui.exe > /dev/null 2>&1 || true
+    cargo build --quiet -p win_gui -p winui_host -p winui_render
+    rm -f /tmp/wg7_exit /tmp/wg7_app.txt /tmp/wg7_gate.txt target/winui-wg7.png
+    ( MACVM_WINUI_CTL=7715 ./target/debug/macvm-winui.exe > /tmp/wg7_app.txt 2>&1; \
+        echo $? > /tmp/wg7_exit ) &
+    for i in $(seq 1 90); do
+        (exec 3<>/dev/tcp/127.0.0.1/7715) 2>/dev/null && break || sleep 0.5
+    done
+    # Four parts with bash sleeps between: the browser fills from a REPLY, and
+    # `gui sleep` blocks the APP rather than only the driver — it would starve
+    # the drain pass it is waiting for. winui-wg5b.tcl records the same finding.
+    ./target/debug/macvm rusttcl scripts/winui-wg7-a.tcl | tee    /tmp/wg7_gate.txt
+    sleep 8
+    ./target/debug/macvm rusttcl scripts/winui-wg7-b.tcl | tee -a /tmp/wg7_gate.txt
+    sleep 8
+    ./target/debug/macvm rusttcl scripts/winui-wg7-c.tcl | tee -a /tmp/wg7_gate.txt
+    sleep 8
+    ./target/debug/macvm rusttcl scripts/winui-wg7-d.tcl | tee -a /tmp/wg7_gate.txt
+    cat /tmp/wg7_app.txt
+
+    grep -q 'WG7 open true' /tmp/wg7_gate.txt
+
+    # THE WORLD IS REALLY REPLACED. A class defined at RUNTIME in the primary —
+    # no file, no image, nothing a fresh boot could find — is present before the
+    # restart and gone after it. Asserted as a RELATIONSHIP (WG2 Δ 14): the
+    # world grows, so what matters is +1 then back, never today's total.
+    BASE=$(grep -E '^WG7 classes-baseline '     /tmp/wg7_gate.txt | awk '{print $NF}')
+    GHOST=$(grep -E '^WG7 classes-with-ghost '  /tmp/wg7_gate.txt | awk '{print $NF}')
+    AFTER=$(grep -E '^WG7 classes-after-restart ' /tmp/wg7_gate.txt | awk '{print $NF}')
+    echo "primary: $BASE classes, $GHOST with the ghost, $AFTER after the restart"
+    test "$BASE" -ge 100
+    test "$GHOST" -eq "$((BASE + 1))"
+    test "$AFTER" -eq "$BASE"
+
+    # AND THE WINDOW NEVER NOTICED. Same window, same views, same active view —
+    # a restart is not a rebuild, and `viewBuildCount` is the one number that
+    # cannot be fooled by the window merely still being there.
+    grep -q 'WG7 window-alive true' /tmp/wg7_gate.txt
+    BUILT_BEFORE=$(grep -E '^WG7 views-built-at-start ' /tmp/wg7_gate.txt | awk '{print $NF}')
+    BUILT_AFTER=$(grep -E '^WG7 views-built-after '     /tmp/wg7_gate.txt | awk '{print $NF}')
+    test "$BUILT_AFTER" -eq "$BUILT_BEFORE"
+    # The old primary really STOPPED — it says so on its way out, and a restart
+    # that left it running would be two primaries racing over one UI worker's
+    # registry entry.
+    grep -q 'primary stopping' /tmp/wg7_app.txt
+
+    test -s target/winui-wg7.png
+    for i in $(seq 1 60); do [ -f /tmp/wg7_exit ] && break || sleep 0.5; done
+    test "$(cat /tmp/wg7_exit)" = "0"
+    echo "gate-wg7: PASS"
