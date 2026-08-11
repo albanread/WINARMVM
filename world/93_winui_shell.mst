@@ -581,14 +581,30 @@ Object subclass: WinShell [
                 bitOr: (WinApi constant: 'SS_RIGHT'))
             exStyle: 0.
 
-        "The splitter: an owner-drawn strip the user can see and drag."
+        "The splitter: a strip the user can see AND DRAG — and the second half
+         is why this is a child of OUR window class rather than an owner-drawn
+         BUTTON.
+
+         A drag is three messages (WM_LBUTTONDOWN / WM_MOUSEMOVE /
+         WM_LBUTTONUP) and a BUTTON's WndProc is comctl32's: it swallows all
+         three and reports only a WM_COMMAND on RELEASE, which is far too late
+         to begin anything. 96's own header describes the intended protocol and
+         it could never have run; `onSplitterClick` already worked around it
+         for CLICKS by asking GetCursorPos, and a drag has no such workaround.
+         Reported twice from the screen — `the ... bar does not resize`, then
+         `the ... splitter indicators do nothing still`.
+
+         A child of `WinShell className` has the DOOR as its WndProc, exactly
+         as WG6c-1's editor pane does and for exactly this reason. It costs the
+         WM_DRAWITEM path — the strip now paints through WM_PAINT like any
+         other window we own — which nothing asserts against."
         self
             addControl: #splitter
-            class: 'BUTTON'
+            class: self className
             text: ''
             style: (((WinApi constant: 'WS_CHILD')
                 bitOr: (WinApi constant: 'WS_VISIBLE'))
-                bitOr: (WinApi constant: 'BS_OWNERDRAW'))
+                bitOr: (WinApi constant: 'WS_CLIPSIBLINGS'))
             exStyle: 0.
 
         "The transcript dock."

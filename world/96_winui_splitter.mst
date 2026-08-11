@@ -70,6 +70,7 @@ Object subclass: WinApi [
 ]
 
 Object subclass: WinShell [
+    <classVars: SplitterDraws SplitterLast>
 
     "── the dock's height, now a user preference ─────────────────────────"
 
@@ -147,6 +148,72 @@ Object subclass: WinShell [
     ]
 
     WinShell class >> dragActive ^ <Boolean> [ ^DragActive == true ]
+
+    "── WG6f: the splitter is one of OUR windows, so the drag can happen ──
+     Its three mouse messages now reach the door (91 routes by HWND) instead
+     of being swallowed by comctl32. The coordinates arrive relative to the
+     SPLITTER, not the shell, which actually simplifies every test below —
+     and the drag delta is unaffected, because both ends of the subtraction
+     are in the same space."
+
+    WinShell class >> splitterHwnd ^ <Integer> [
+        | c |
+        c := self controlNamed: #splitter.
+        ^c isNil ifTrue: [ 0 ] ifFalse: [ c handle ]
+    ]
+
+    WinShell class >> splitterWidth ^ <Integer> [
+        | c r |
+        c := self controlNamed: #splitter.
+        c isNil ifTrue: [ ^0 ].
+        r := [ c screenRect ] on: Error do: [ :e | nil ].
+        ^r isNil ifTrue: [ 0 ] ifFalse: [ (r at: 3) - (r at: 1) ]
+    ]
+
+    WinShell class >> splitterMessage: msg <Integer> wParam: wp <Integer> lParam: lp <Integer> ^ <Object> [
+        "Captured rather than propagated, for the door's own reason: a raise in
+         here would unwind through it, and any non-Integer means
+         `#defwindowproc` anyway. Better to answer that deliberately."
+        ^[ self splitterMessageBody: msg wParam: wp lParam: lp ]
+            on: Error do: [ :e | DrawError := e messageText. #defwindowproc ]
+    ]
+
+    WinShell class >> splitterMessageBody: msg <Integer> wParam: wp <Integer> lParam: lp <Integer> ^ <Object> [
+        msg = (WinApi constant: 'WM_LBUTTONDOWN') ifTrue: [ ^self splitterDown: lp ].
+        msg = (WinApi constant: 'WM_MOUSEMOVE') ifTrue: [ ^self splitterMove: lp ].
+        msg = (WinApi constant: 'WM_LBUTTONUP') ifTrue: [ ^self splitterUp ].
+        ^#defwindowproc
+    ]
+
+    WinShell class >> splitterDown: lp <Integer> ^ <Object> [
+        "The three zones, left to right: chevron, grab, Clear. In SPLITTER
+         coordinates now, so `x` runs 0..width and the arithmetic says what it
+         means — and it shares `splitterScaled:` with the drawing, so what you
+         can click is what you can see."
+        | x w |
+        x := self loWordSigned: lp.
+        w := self splitterWidth.
+        (w > 0 and: [ x >= (w - (self splitterScaled: 60)) ])
+            ifTrue: [ self clearTranscript. ^0 ].
+        x <= (self splitterScaled: 28) ifTrue: [ self toggleTranscript. ^0 ].
+        self splitterDragBegin: (self hiWordSigned: lp).
+        ^0
+    ]
+
+    WinShell class >> splitterMove: lp <Integer> ^ <Object> [
+        self dragActive ifFalse: [ ^#defwindowproc ].
+        self splitterDragTo: (self hiWordSigned: lp).
+        ^0
+    ]
+
+    WinShell class >> splitterUp ^ <Object> [
+        "RELEASED ON EVERY PATH, including one where no drag was in progress —
+         a captured mouse that never sees its button-up leaves the pointer
+         captured for the life of the window."
+        self dragActive ifFalse: [ WinApi releaseCapture. ^#defwindowproc ].
+        self splitterDragEnd.
+        ^0
+    ]
 
     "── the door's three drag messages, routed ──────────────────────────
      These arrive at the SHELL window, not at the splitter — a captured mouse
@@ -271,6 +338,13 @@ Object subclass: WinShell [
          #3 — this is the fix, and it is deliberately drawn rather than themed,
          because there is no system part that means 'horizontal splitter'."
         | rect brush old |
+        "WG6f: counted, because the splitter left the WM_DRAWITEM path when it
+         became one of our own windows and `drawCalls` stopped seeing it. A
+         band that is drawn and a band that is skipped look identical when the
+         fill colour is the window background — which is exactly the confusion
+         this counter was added to end."
+        SplitterDraws := (SplitterDraws isNil ifTrue: [ 0 ] ifFalse: [ SplitterDraws ]) + 1.
+        SplitterLast := Array with: x with: y with: w with: h.
         rect := self drawRectScratch.
         self setRect: rect x: x y: y w: w h: h.
         brush := WinApi createSolidBrush: self backgroundColorRef.
@@ -302,6 +376,10 @@ Object subclass: WinShell [
         WinApi selectObject: hdc object: old.
         ^1
     ]
+
+    WinShell class >> splitterDraws ^ <Integer> [
+        ^SplitterDraws isNil ifTrue: [ 0 ] ifFalse: [ SplitterDraws ] ]
+    WinShell class >> splitterLast ^ <Object> [ ^SplitterLast ]
 
     WinShell class >> glyphBuffer ^ <Integer> [
         GlyphBuf isNil ifTrue: [ GlyphBuf := WinArena alloc: 8 ].

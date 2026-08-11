@@ -1190,19 +1190,40 @@ fn perform_drawitem(vm: &mut VmState, lparam: isize) -> u64 {
 /// repaint.
 #[cfg(windows)]
 fn perform_paint(vm: &mut VmState, hwnd: isize) -> u64 {
-    // PAINTSTRUCT is 72 bytes on 64-bit: hdc, fErase, rcPaint(4 x i32),
-    // fRestore, fIncUpdate, rgbReserved[32]. Zeroed and handed to Windows to
-    // fill; nothing here transcribes a member position that matters -- only
-    // `hdc` at 0 and `rcPaint` at 8, which are the two the API contract fixes.
+    // PAINTSTRUCT on 64-bit, 72 bytes: `hdc` at 0 (8 bytes), `fErase` at 8
+    // (4 bytes), `rcPaint` at 12 (4 x i32), then fRestore, fIncUpdate,
+    // rgbReserved[32].
+    //
+    // `rcPaint` IS AT 12, NOT 8, and this read it at 8 from WG6c-1 until
+    // WG6f — so every paint decoded `[fErase, left, top, right]` as
+    // `[left, top, right, bottom]` and handed the guest x=fErase, y=left,
+    // w=top-fErase, h=right-left. Measured on the splitter, which is 880x22
+    // and arrived as `#(0 0 0 880)`.
+    //
+    // IT IS ALSO THE ROOT OF THE REPORTED SMEARING. A full-client
+    // invalidation has left=top=0 and fErase=0, so the garbage decoded to
+    // (0,0) and everything looked right — which is every invalidation WE
+    // issue. A PARTIAL one, which is what Windows sends when another window
+    // is dragged across the pane, decoded to a nonsense origin and the whole
+    // document was drawn displaced over the copy already there. Two rounds of
+    // fixes went past this because both were looking at the guest.
+    //
+    // This crate cannot ask winkb (it is the VM, and the database is the
+    // guest layer's), so the numbers are transcribed — which is precisely the
+    // practice §2's own rule forbids for struct members and this defect is
+    // the argument for it. They are asserted against winkb from the guest by
+    // `paintstruct_offsets_match_winkb` in 62_winui_door_tests.mst, so a typo
+    // is caught by data rather than trusted to care.
+    const PS_RCPAINT: usize = 12;
     let mut ps = [0u8; 128];
     let hdc = unsafe { BeginPaint(hwnd, ps.as_mut_ptr() as *mut _) };
     let rect = unsafe {
         let base = ps.as_ptr();
         [
-            std::ptr::read_unaligned(base.add(8) as *const i32),
-            std::ptr::read_unaligned(base.add(12) as *const i32),
-            std::ptr::read_unaligned(base.add(16) as *const i32),
-            std::ptr::read_unaligned(base.add(20) as *const i32),
+            std::ptr::read_unaligned(base.add(PS_RCPAINT) as *const i32),
+            std::ptr::read_unaligned(base.add(PS_RCPAINT + 4) as *const i32),
+            std::ptr::read_unaligned(base.add(PS_RCPAINT + 8) as *const i32),
+            std::ptr::read_unaligned(base.add(PS_RCPAINT + 12) as *const i32),
         ]
     };
     let answer = paint_body(vm, hwnd, hdc, rect);

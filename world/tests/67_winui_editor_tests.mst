@@ -381,12 +381,24 @@ TestCase subclass: WinUiEditorWg6cTests [
             description: 'ten lines, but counted ' , WinShell editorLineCount printString.
         WinShell editorTopLine: 0 - 5.
         self assert: WinShell editorTopLine = 0 description: 'clamped at the top'.
-        WinShell editorTopLine: 99999.
-        self assert: WinShell editorTopLine = 9
-            description: 'the last line can reach row 0, but got '
-                , WinShell editorTopLine printString.
         WinShell editorTopLine: 3.
-        self assert: WinShell editorTopLine = 3 description: 'and an ordinary value stands'
+        self assert: WinShell editorTopLine = 3 description: 'an ordinary value stands'.
+
+        "SCROLLING STOPS AT THE END OF THE TEXT — the last line at the BOTTOM
+         of the viewport, not at the top above a screenful of nothing. Checked
+         through `maxTopForLines:rows:` rather than the live method, because
+         `editorGridSize` needs a real control and headless answers a 1-row
+         viewport, where this rule and the wrong one it replaced agree."
+        self assert: (WinShell maxTopForLines: 100 rows: 24) = 76
+            description: '100 lines in a 24-row viewport stops at 76, so the last '
+                , 'line is the last row, but got '
+                , (WinShell maxTopForLines: 100 rows: 24) printString.
+        self assert: (WinShell maxTopForLines: 10 rows: 24) = 0
+            description: 'a document SHORTER than the viewport does not scroll at all'.
+        self assert: (WinShell maxTopForLines: 24 rows: 24) = 0
+            description: 'and one that exactly fills it does not either'.
+        self assert: (WinShell maxTopForLines: 25 rows: 24) = 1
+            description: 'one line too many scrolls by exactly one'
     ]
 
     testHitTestingFollowsTheScroll [

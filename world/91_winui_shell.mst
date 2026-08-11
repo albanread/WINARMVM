@@ -1338,6 +1338,15 @@ Object subclass: WinShell [
         (hwnd ~= 0 and: [ hwnd = self editorPaneHwnd ]) ifTrue: [
             ^self editorMessage: msg wParam: wp lParam: lp ].
 
+        "WG6f: the SPLITTER is one of ours too, for the same reason and by the
+         same route. It was an owner-drawn BUTTON, whose WndProc is comctl32's
+         — so it swallowed the three messages a drag is made of and reported
+         only a WM_COMMAND on release. Routed by HWND here, its
+         LBUTTONDOWN/MOUSEMOVE/LBUTTONUP arrive where the drag can use them.
+         A no-op hook until 96 defines it."
+        (hwnd ~= 0 and: [ hwnd = self splitterHwnd ]) ifTrue: [
+            ^self splitterMessage: msg wParam: wp lParam: lp ].
+
         msg = (WinApi constant: 'WM_SIZE') ifTrue: [ ^self onSize: wp lParam: lp ].
         msg = (WinApi constant: 'WM_CLOSE') ifTrue: [ ^self onClose ].
         msg = (WinApi constant: 'WM_DESTROY') ifTrue: [ ^self onDestroy ].
@@ -1625,6 +1634,9 @@ Object subclass: WinShell [
     WinShell class >> layoutEditorPane: content [ ^self ]
     WinShell class >> syncEditorCaret [ ^self ]
     WinShell class >> editorPaneHwnd [ ^0 ]
+    "WG6f's splitter, now one of our own windows; 96 overrides."
+    WinShell class >> splitterHwnd [ ^0 ]
+    WinShell class >> splitterMessage: msg wParam: wp lParam: lp [ ^#defwindowproc ]
     "WG6c-2's editor input; 107 overrides."
     WinShell class >> editorMessage: msg wParam: wp lParam: lp [ ^#defwindowproc ]
     WinShell class >> editorCaret [ ^1 ]

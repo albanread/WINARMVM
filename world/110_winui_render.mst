@@ -278,10 +278,30 @@ Object subclass: WinShell [
         ^((self editorGridSize at: 2) - 1) max: 1
     ]
 
+    WinShell class >> maxTopForLines: lines <Integer> rows: rows <Integer> ^ <Integer> [
+        "SCROLLING STOPS AT THE END OF THE TEXT. The furthest down you can go
+         is the one that puts the LAST line at the BOTTOM of the viewport, not
+         at the top — which is what every editor does and what a reader means
+         by `the end`.
+
+         This first answered `lines - 1`, letting the document scroll until a
+         single line sat at row 0 above a screenful of nothing. The comment
+         defending it argued that stopping earlier `feels stuck`; that was
+         wrong, and the author said so on sight. Stopping at the end is not
+         being stuck, it IS the end.
+
+         A document SHORTER than the viewport answers 0 — it does not scroll
+         at all, because there is nothing off screen to reveal.
+
+         Taking `rows` as an argument rather than asking is what makes the rule
+         checkable with no window: `editorGridSize` needs a real control, so a
+         test of the live method would be measuring a 1-row viewport and could
+         not tell this rule from the one it replaced."
+        ^(lines - rows) max: 0
+    ]
+
     WinShell class >> editorMaxTop ^ <Integer> [
-        "The last line may be scrolled to the TOP, not merely into view: a
-         document you cannot scroll past its penultimate screen feels stuck."
-        ^(self editorLineCount - 1) max: 0
+        ^self maxTopForLines: self editorLineCount rows: (self editorGridSize at: 2)
     ]
 
     WinShell class >> editorTopLine: n <Integer> [
@@ -433,6 +453,15 @@ Object subclass: WinShell [
          Captured rather than propagated, as WG6c-1's own handler was: a raise
          in a paint is invisible by nature."
         PaintCalls := (PaintCalls isNil ifTrue: [ 0 ] ifFalse: [ PaintCalls ]) + 1.
+        "WG6f: the SPLITTER paints here now. It was an owner-drawn BUTTON and
+         arrived through WM_DRAWITEM; becoming a child of our own class — so
+         that a DRAG could reach us at all — moved it onto this path. Same
+         drawing code, same GDI: it is a filled strip with three glyphs on it,
+         which is what GDI is still perfectly good at, and nothing about it
+         wants a cell grid."
+        hwnd = self splitterHwnd ifTrue: [
+            ^[ self drawSplitter: hdc x: x y: y w: w h: h ]
+                on: Error do: [ :e | DrawError := e messageText. 0 ] ].
         hwnd = self editorPaneHwnd ifFalse: [ ^0 ].
         self ensureEditorRenderer ifFalse: [ ^0 ].
         ^[ self refreshEditorGrid. 1 ]
