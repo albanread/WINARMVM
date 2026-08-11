@@ -854,7 +854,7 @@ impl<'a> Emitter<'a> {
             .resident_reloads
             .iter()
             .filter(|&&(_, s, e, _, _, _)| s <= pos && e > pos)
-            .filter(|&&(v, _, _, _, _, _)| skip.map_or(true, |sk| sk.0 != v))
+            .filter(|&&(v, _, _, _, _, _)| skip.is_none_or(|sk| sk.0 != v))
             .map(|&(v, _, _, rr, slot, fp)| (v, rr, slot, fp))
             .collect();
         for (v, rr, slot, fp) in live {

@@ -1307,7 +1307,7 @@ mod tests {
         // Publish FIRST (this bumps the generation), THEN read the now-current
         // generation and register under it — so the entry is NOT stale and the
         // only thing that can make `dispatch` return early is the callback guard.
-        let sentinel = 0x1_usize as *mut crate::embed::VmHandle; // page 0 — unmapped
+        let sentinel = std::ptr::dangling_mut::<crate::embed::VmHandle>(); // page 0 — unmapped
         crate::embed::publish_ui_vm(sentinel);
         let gen = crate::embed::current_ui_vm_generation();
         let inst = 0x2000_usize as *mut c_void;

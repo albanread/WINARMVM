@@ -132,4 +132,5 @@ Smalltalk platformName == #macos ifTrue: [ TestRunner run: CocoaStringTests ].
 TestRunner run: StringCompletionTests.
 TestRunner run: ObjectStreamTests.
 TestRunner run: ExceptionResumeTests.
+Smalltalk platformName == #windows ifTrue: [ TestRunner run: WinUiShellWg4Tests ].
 TestRunner report.

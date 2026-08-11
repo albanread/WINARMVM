@@ -110,4 +110,7 @@ tier1.mst
 62_winui_door_tests.mst
 # WINARM (WG3): the flag-and-drain pass and the layout object, in-language.
 63_winui_controls_tests.mst
+# WINARM (WG4): the shell's layout grammar and view registry, in-language.
+../93_winui_shell.mst
+64_winui_shell_tests.mst
 99_run_all.mst

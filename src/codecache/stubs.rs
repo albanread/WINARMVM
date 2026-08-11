@@ -1462,7 +1462,7 @@ pub unsafe extern "C" fn rt_interpret_call(
             let kname = crate::runtime::error::name_of(k.name());
             let key = format!("{kname}>>{}", sel.as_string());
             HIST.with(|h| *h.borrow_mut().entry(key).or_insert(0) += 1);
-            if t % 500_000 == 0 {
+            if t.is_multiple_of(500_000) {
                 let c = COMPILED_AVAIL.load(Ordering::Relaxed);
                 eprintln!(
                     "c2i-census: total={t} compiled_avail={c} ({}%)",

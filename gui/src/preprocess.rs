@@ -886,7 +886,7 @@ mod tests {
             mid \
             <span class=\"smappl\" data-widget-id=\"s1\" data-code=\"CodeView forString\">CodeView forString</span> \
             after";
-        let out = resolve_smappl_spans(&html, Theme::Classic, |code| {
+        let out = resolve_smappl_spans(html, Theme::Classic, |code| {
             if code.starts_with("Glue") {
                 Some("<span class=\"glue\"></span>".to_string())
             } else {

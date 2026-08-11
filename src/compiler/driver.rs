@@ -1935,6 +1935,124 @@ fn build_deopt_metadata(
     rec.pack()
 }
 
+// ── F0: frameless-leaf eligibility (docs/frameless_leaf_methods.md) ─────────
+
+/// Would this compiled unit qualify for frameless emission? Exhaustive over
+/// [`ir::Ir`] — a NEW op added to the enum fails to compile here until someone
+/// decides its column, so eligibility fails CLOSED by construction (§2).
+///
+/// Eligible = ops that neither call (a `bl` clobbers x30, the leaf's only
+/// return-address home), nor reach a safepoint (`Alloc`/`Poll` — a frameless
+/// body must never be observable by GC), nor carry a trap/deopt edge
+/// (a frameless unit is DEOPT-FREE: no metadata, no nil-fills). `StoreField`
+/// qualifies because its write barrier is the INLINE card-dirty sequence
+/// (`emit_store_field` — branches only, no call). Float ops are excluded in
+/// v1, TIGHTER than the design doc: the d8–d15 residency tier is
+/// callee-saved and not worth distinguishing until a float leaf matters.
+///
+/// The regalloc half (§2 "register discipline"): no spill slots, no
+/// x21–x27 residents — a leaf that needs stack or callee-saved registers
+/// falls back to framed.
+fn frameless_eligible(m: &ir::IrMethod, ra: &regalloc::RegallocResult) -> bool {
+    use crate::compiler::ir::Ir as I;
+    let ops_ok = m
+        .blocks
+        .iter()
+        .flat_map(|b| b.code.iter())
+        .all(|op| match op {
+        I::ConstSmi { .. }
+        | I::ConstPool { .. }
+        | I::Move { .. }
+        | I::Param { .. }
+        | I::LoadKlass { .. }
+        | I::LoadField { .. }
+        | I::StoreField { .. }
+        | I::SmiCmpBr { .. }
+        | I::SmiCmpVal { .. }
+        | I::RefCmpVal { .. }
+        | I::BoolNot { .. }
+        // R1/R2: proven-in-range ops have no trap, no call, no safepoint —
+        // pure ALU/memory ops (the PutNC barrier is the inline card
+        // sequence, same license as StoreField).
+        | I::SmiArithNoOv { .. }
+        | I::RefCmpBr { .. }
+        | I::SmiArithNoOvImm { .. }
+        | I::ArrayAtNC { .. }
+        | I::ArrayAtPutNC { .. }
+        | I::Jump { .. }
+        | I::BoolBr { .. }
+        | I::Ret { .. }
+        | I::RetSelf => true,
+        I::SmiArith { .. } // overflow edge (v2: trap-once, recompile framed)
+        | I::ArrayAt { .. } // bounds edge
+        | I::ArrayAtPut { .. }
+        | I::ByteAt { .. } // Z2: same bounds/klass trap edges as ArrayAt
+        | I::ByteAtPut { .. }
+        | I::SmiShift { .. } // Z3: overflow/range trap edge
+        | I::FUnbox { .. } // float family: v1 exclusion, see above
+        | I::FBox { .. }
+        | I::FArith { .. }
+        | I::FCmpBr { .. }
+        | I::FCmpVal { .. }
+        | I::FConst { .. }
+        | I::VecArith { .. }
+        | I::GuardKlass { .. }
+        | I::GuardKlassIn { .. } // deopt-adjacent fail edge + its CallSend slow block
+        | I::CallSend { .. }
+        | I::CallRuntime { .. }
+        | I::Alloc { .. }
+        | I::Poll
+        | I::UncommonTrap { .. }
+        | I::NlrReturn { .. }
+        | I::Bailout { .. } => false,
+    });
+    ops_ok
+        && ra.frame_slots == 0
+        && ra.intervals.iter().all(|iv| {
+            iv.resident_reg.is_none()
+                && !matches!(iv.assignment, Some(regalloc::Assignment::Spill(_)))
+        })
+}
+
+/// F0's whole deliverable: the running eligible/total census, so the design's
+/// coverage claim ("richards' accessor swarm") is measured before F1 emits a
+/// single different byte. Log per-unit + totals with `MACVM_FRAMELESS_COUNT=1`.
+fn note_frameless_stats(eligible: bool, holder: &str, sel: &str) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static ELIGIBLE: AtomicU64 = AtomicU64::new(0);
+    static TOTAL: AtomicU64 = AtomicU64::new(0);
+    let total = TOTAL.fetch_add(1, Ordering::Relaxed) + 1;
+    let elig = if eligible {
+        ELIGIBLE.fetch_add(1, Ordering::Relaxed) + 1
+    } else {
+        ELIGIBLE.load(Ordering::Relaxed)
+    };
+    // Env read cached once (the env::var-on-a-hot-path 2x lesson).
+    static LOG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *LOG.get_or_init(|| std::env::var_os("MACVM_FRAMELESS_COUNT").is_some()) {
+        if eligible {
+            eprintln!("frameless-eligible: {holder}>>{sel} ({elig}/{total})");
+        } else {
+            eprintln!("frameless-no:       {holder}>>{sel} ({elig}/{total})");
+        }
+    }
+}
+
+fn holder_name_for_log(vm: &VmState, k: KlassOop) -> String {
+    let _ = vm;
+    crate::runtime::error::name_of(k.name())
+}
+
+/// F3 (docs/frameless_leaf_methods.md §5): frameless emission is ON by
+/// default — F2 measured a consistent (if modest, ~2-4% richards) win with
+/// every gate green, and the F1 contract asserts keep an eligibility hole
+/// loud. `MACVM_FRAMELESS=0` is the kill switch (cached once — the
+/// env-var-on-a-hot-path lesson).
+fn frameless_emission_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("MACVM_FRAMELESS").is_none_or(|v| v != "0"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2874,122 +2992,4 @@ mod tests {
             );
         }
     }
-}
-
-// ── F0: frameless-leaf eligibility (docs/frameless_leaf_methods.md) ─────────
-
-/// Would this compiled unit qualify for frameless emission? Exhaustive over
-/// [`ir::Ir`] — a NEW op added to the enum fails to compile here until someone
-/// decides its column, so eligibility fails CLOSED by construction (§2).
-///
-/// Eligible = ops that neither call (a `bl` clobbers x30, the leaf's only
-/// return-address home), nor reach a safepoint (`Alloc`/`Poll` — a frameless
-/// body must never be observable by GC), nor carry a trap/deopt edge
-/// (a frameless unit is DEOPT-FREE: no metadata, no nil-fills). `StoreField`
-/// qualifies because its write barrier is the INLINE card-dirty sequence
-/// (`emit_store_field` — branches only, no call). Float ops are excluded in
-/// v1, TIGHTER than the design doc: the d8–d15 residency tier is
-/// callee-saved and not worth distinguishing until a float leaf matters.
-///
-/// The regalloc half (§2 "register discipline"): no spill slots, no
-/// x21–x27 residents — a leaf that needs stack or callee-saved registers
-/// falls back to framed.
-fn frameless_eligible(m: &ir::IrMethod, ra: &regalloc::RegallocResult) -> bool {
-    use crate::compiler::ir::Ir as I;
-    let ops_ok = m
-        .blocks
-        .iter()
-        .flat_map(|b| b.code.iter())
-        .all(|op| match op {
-        I::ConstSmi { .. }
-        | I::ConstPool { .. }
-        | I::Move { .. }
-        | I::Param { .. }
-        | I::LoadKlass { .. }
-        | I::LoadField { .. }
-        | I::StoreField { .. }
-        | I::SmiCmpBr { .. }
-        | I::SmiCmpVal { .. }
-        | I::RefCmpVal { .. }
-        | I::BoolNot { .. }
-        // R1/R2: proven-in-range ops have no trap, no call, no safepoint —
-        // pure ALU/memory ops (the PutNC barrier is the inline card
-        // sequence, same license as StoreField).
-        | I::SmiArithNoOv { .. }
-        | I::RefCmpBr { .. }
-        | I::SmiArithNoOvImm { .. }
-        | I::ArrayAtNC { .. }
-        | I::ArrayAtPutNC { .. }
-        | I::Jump { .. }
-        | I::BoolBr { .. }
-        | I::Ret { .. }
-        | I::RetSelf => true,
-        I::SmiArith { .. } // overflow edge (v2: trap-once, recompile framed)
-        | I::ArrayAt { .. } // bounds edge
-        | I::ArrayAtPut { .. }
-        | I::ByteAt { .. } // Z2: same bounds/klass trap edges as ArrayAt
-        | I::ByteAtPut { .. }
-        | I::SmiShift { .. } // Z3: overflow/range trap edge
-        | I::FUnbox { .. } // float family: v1 exclusion, see above
-        | I::FBox { .. }
-        | I::FArith { .. }
-        | I::FCmpBr { .. }
-        | I::FCmpVal { .. }
-        | I::FConst { .. }
-        | I::VecArith { .. }
-        | I::GuardKlass { .. }
-        | I::GuardKlassIn { .. } // deopt-adjacent fail edge + its CallSend slow block
-        | I::CallSend { .. }
-        | I::CallRuntime { .. }
-        | I::Alloc { .. }
-        | I::Poll
-        | I::UncommonTrap { .. }
-        | I::NlrReturn { .. }
-        | I::Bailout { .. } => false,
-    });
-    ops_ok
-        && ra.frame_slots == 0
-        && ra.intervals.iter().all(|iv| {
-            iv.resident_reg.is_none()
-                && !matches!(iv.assignment, Some(regalloc::Assignment::Spill(_)))
-        })
-}
-
-/// F0's whole deliverable: the running eligible/total census, so the design's
-/// coverage claim ("richards' accessor swarm") is measured before F1 emits a
-/// single different byte. Log per-unit + totals with `MACVM_FRAMELESS_COUNT=1`.
-fn note_frameless_stats(eligible: bool, holder: &str, sel: &str) {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static ELIGIBLE: AtomicU64 = AtomicU64::new(0);
-    static TOTAL: AtomicU64 = AtomicU64::new(0);
-    let total = TOTAL.fetch_add(1, Ordering::Relaxed) + 1;
-    let elig = if eligible {
-        ELIGIBLE.fetch_add(1, Ordering::Relaxed) + 1
-    } else {
-        ELIGIBLE.load(Ordering::Relaxed)
-    };
-    // Env read cached once (the env::var-on-a-hot-path 2x lesson).
-    static LOG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    if *LOG.get_or_init(|| std::env::var_os("MACVM_FRAMELESS_COUNT").is_some()) {
-        if eligible {
-            eprintln!("frameless-eligible: {holder}>>{sel} ({elig}/{total})");
-        } else {
-            eprintln!("frameless-no:       {holder}>>{sel} ({elig}/{total})");
-        }
-    }
-}
-
-fn holder_name_for_log(vm: &VmState, k: KlassOop) -> String {
-    let _ = vm;
-    crate::runtime::error::name_of(k.name())
-}
-
-/// F3 (docs/frameless_leaf_methods.md §5): frameless emission is ON by
-/// default — F2 measured a consistent (if modest, ~2-4% richards) win with
-/// every gate green, and the F1 contract asserts keep an eligibility hole
-/// loud. `MACVM_FRAMELESS=0` is the kill switch (cached once — the
-/// env-var-on-a-hot-path lesson).
-fn frameless_emission_on() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("MACVM_FRAMELESS").is_none_or(|v| v != "0"))
 }

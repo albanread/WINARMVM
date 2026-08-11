@@ -177,7 +177,7 @@ fn redeclares_own_inst_vars(klass: KlassOop, node: &ClassDefNode) -> bool {
         return false;
     }
     node.inst_vars.iter().enumerate().all(|(i, name)| {
-        SymbolOop::try_from(existing.at(i)).map_or(false, |s| s.as_string() == *name)
+        SymbolOop::try_from(existing.at(i)).is_some_and(|s| s.as_string() == *name)
     })
 }
 

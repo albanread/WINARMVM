@@ -1265,7 +1265,7 @@ mod tests {
         }
         assert!(!vm_busy(), "the RAII guard must release on scope exit");
         assert_eq!(vm_entries(), before, "the VM must not have been entered");
-        assert_eq!(busy_declined() > 0, true);
+        assert!(busy_declined() > 0);
     }
 
     // ── the test this sprint is actually nervous about ──────────────────────

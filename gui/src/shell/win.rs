@@ -280,7 +280,7 @@ extern "system" fn wndproc(window: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRES
                 LRESULT(0)
             }
             WM_COMMAND => {
-                dispatch_menu_command((w.0 & 0xffff) as usize);
+                dispatch_menu_command(w.0 & 0xffff);
                 LRESULT(0)
             }
             // Keep the web view filling the client area.

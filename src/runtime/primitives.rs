@@ -1956,7 +1956,7 @@ fn prim_game_set_frame_rate(vm: &mut VmState, args: &[Oop]) -> PrimResult {
     let Some(fps) = smi_i64(args[1]) else {
         return PrimResult::Fail;
     };
-    if fps < 1 || fps > 120 {
+    if !(1..=120).contains(&fps) {
         return PrimResult::Fail;
     }
     game_emit(vm, GameCommand::SetFrameRate { fps: fps as u32 });

@@ -1,0 +1,575 @@
+"── 93_winui_shell.mst — WG4: the shell ──────────────────────────────────
+ docs/ROADMAP.md's WG4 row: 'the one-window grammar stands'. The Mac's
+ 64_cocoaui.mst is the reference design and this is deliberately the SAME
+ grammar in Windows-11 materials (docs/win_gui_design.md §2.1):
+
+   a VIEW BAR across the top   — view-switcher buttons packed left, the live
+                                 metrics cluster anchored right, Do It /
+                                 Print It between them;
+   a CONTENT HOST filling the  — one child per registered view, built LAZILY
+   middle                        on first switch and shown/hidden thereafter
+                                 (AppKit swaps tab items; Win32 has no such
+                                 thing, so we own the show/hide ourselves);
+   a TRANSCRIPT docked at the  — collapsible, newest line first, a log to
+   bottom                        glance at rather than the output surface.
+
+ WHAT THIS FILE MAY NOT DO, and why it is short as a result. Every rule from
+ WG3 still binds and this file is the first one large enough to be tempted:
+
+   * The door FLAGS; the DRAIN works (§2.4a). No method here is called from
+     `window:message:wParam:lParam:`. `serviceCommand:code:from:` is a drain
+     callee — it may talk to Win32 all it likes.
+   * Controls are created at open time or in the drain, NEVER from a doit
+     (WG3 Δ2, and creation itself sends messages).
+   * `applyLayout` runs one `SetWindowPos` per control from the SETTLED
+     client rect, and provokes no further layout (the drain holds the guard,
+     so the WM_WINDOWPOSCHANGED it causes is declined at the door).
+
+ Load order: after 92, whose four hooks this file overrides in turn. 92's
+ own demo controls (a button, a status field, a two-column list) are what
+ WG3's gate measures, so this file does not delete them — it takes the shell
+ grammar over as a SUPERSET, and `MACVM_WINUI_WG4=off` puts WG3's window
+ back exactly (the same escape hatch `MACVM_WINUI_CONTROLS=off` gives WG3)."
+
+"── WinLayout, extended ──────────────────────────────────────────────────
+ WG3's WinLayout stacks full-width bands from the top and gives one of them
+ the remainder. WG4's grammar needs two things it does not have: a band
+ anchored to the BOTTOM (the transcript dock, whose height is a user
+ preference rather than a consequence of what is above it), and a way to
+ slice one band into a row of cells (the view bar). Both stay PURE — no
+ handle, no Win32, no window — which is what let WG3's layout tests run in a
+ world with no database at all, and what lets WG4's do the same."
+Object subclass: WinLayout [
+    "No new instance variables: a class's shape is fixed once it exists, and
+     that is a good rule — so a BOTTOM-anchored band is an ordinary entry in
+     the same `bands` collection carrying a third element, `#bottom`.
+     `add:height:`'s two-element entries stay exactly as WG3 wrote them and
+     mean `#top` by omission."
+
+    isBottomBand: b <Array> ^ <Boolean> [ ^b size > 2 and: [ (b at: 3) == #bottom ] ]
+
+    topBands ^ <OrderedCollection> [ ^bands reject: [ :b | self isBottomBand: b ] ]
+    bottomBands ^ <OrderedCollection> [ ^bands select: [ :b | self isBottomBand: b ] ]
+
+    addBottom: aName <Symbol> height: h <Integer> [
+        "A fixed band pinned to the BOTTOM edge. Bottom bands stack upward in
+         the order added, so the first one added sits lowest — the same
+         reading order as `add:height:`'s top-down stack."
+        bands add: (Array with: aName with: h with: #bottom).
+        ^self
+    ]
+
+    heightOfBottom: aName <Symbol> ^ <Integer> [
+        | b |
+        b := self bottomBands detect: [ :x | (x at: 1) == aName ] ifNone: [ nil ].
+        ^b isNil ifTrue: [ 0 ] ifFalse: [ b at: 2 ]
+    ]
+
+    setBottom: aName <Symbol> height: h <Integer> [
+        "The transcript dock's collapse is a HEIGHT CHANGE, not a band that
+         comes and goes: keeping the band in the list at height 0 means the
+         collapsed layout is the same arithmetic as the open one, and the
+         reopen restores a number rather than reconstructing a structure."
+        bands do: [ :b |
+            ((b at: 1) == aName and: [ self isBottomBand: b ])
+                ifTrue: [ b at: 2 put: h. ^self ] ].
+        ^self addBottom: aName height: h
+    ]
+
+    rectsIn: clientWidth <Integer> by: clientHeight <Integer> dpi: dpi <Integer> ^ <Dictionary> [
+        "name -> #(x y width height) in PIXELS. Top bands stack down from the
+         top, bottom bands stack up from the bottom, and the fill band takes
+         whatever lies between the two stacks.
+
+         Computed in DIP space and scaled ONCE — the property WG3's
+         `testLayoutScalesWithDpi` pins, and the reason this recomputes
+         rather than adjusting an inherited result."
+        | dipW dipH out y fillHeight bottomTotal bottomY tops bots |
+        dipW := clientWidth * 96 // dpi.
+        dipH := clientHeight * 96 // dpi.
+        out := Dictionary new.
+        tops := self topBands.
+        bots := self bottomBands.
+        bottomTotal := 0.
+        bots do: [ :b | bottomTotal := bottomTotal + (b at: 2) + margin ].
+        fillHeight := dipH - (margin * (tops size + 1)) - bottomTotal.
+        tops do: [ :b | (b at: 2) isNil ifFalse: [ fillHeight := fillHeight - (b at: 2) ] ].
+        fillHeight < 0 ifTrue: [ fillHeight := 0 ].
+        y := margin.
+        tops do: [ :b |
+            | h |
+            h := (b at: 2) isNil ifTrue: [ fillHeight ] ifFalse: [ b at: 2 ].
+            out at: (b at: 1) put: (Array
+                with: margin * dpi // 96
+                with: y * dpi // 96
+                with: (dipW - (margin * 2)) * dpi // 96
+                with: h * dpi // 96).
+            y := y + h + margin ].
+        bottomY := dipH - margin.
+        bots do: [ :b |
+            | h |
+            h := b at: 2.
+            bottomY := bottomY - h.
+            out at: (b at: 1) put: (Array
+                with: margin * dpi // 96
+                with: bottomY * dpi // 96
+                with: (dipW - (margin * 2)) * dpi // 96
+                with: h * dpi // 96).
+            bottomY := bottomY - margin ].
+        ^out
+    ]
+
+    packRow: aRect <Array> left: leftWidths <Object> right: rightWidths <Object>
+             gap: g <Integer> dpi: dpi <Integer> ^ <Array> [
+        "Slice one band's PIXEL rect into a row: `leftWidths` packed from the
+         left edge, `rightWidths` packed from the right edge (last element
+         hugging the edge), every width in DIPs. Answers #(leftRects
+         rightRects) — two OrderedCollections of pixel rects.
+
+         Right-anchored cells are how the Mac's metrics cluster tracks the
+         window on resize (its MinXMargin autoresizing mask); Win32 has no
+         autoresizing, so the arithmetic is ours and it happens here, once,
+         in the same pure object the band layout lives in."
+        | x0 y h lefts rights x gapPx |
+        x0 := aRect at: 1. y := aRect at: 2. h := aRect at: 4.
+        gapPx := g * dpi // 96.
+        lefts := OrderedCollection new.
+        x := x0.
+        leftWidths do: [ :w |
+            | wp |
+            wp := w * dpi // 96.
+            lefts add: (Array with: x with: y with: wp with: h).
+            x := x + wp + gapPx ].
+        rights := OrderedCollection new.
+        x := x0 + (aRect at: 3).
+        rightWidths reverseDo: [ :w |
+            | wp |
+            wp := w * dpi // 96.
+            x := x - wp.
+            rights addFirst: (Array with: x with: y with: wp with: h).
+            x := x - gapPx ].
+        ^Array with: lefts with: rights
+    ]
+]
+
+
+"── WinControl, extended ─────────────────────────────────────────────────
+ WG3's control speaks text, position and messages. WG4's shell needs two
+ more verbs, and both are one Win32 call each: a view's content child is
+ SHOWN or HIDDEN as views switch (Win32's answer to AppKit swapping a tab
+ item's view), and a command button is ENABLED or not by what the active
+ view can supply."
+Object subclass: WinControl [
+    show: aBoolean <Boolean> ^ <Boolean> [
+        ^WinApi asBool: (WinApi showWindow: handle
+            cmd: (aBoolean
+                ifTrue: [ WinApi constant: 'SW_SHOW' ]
+                ifFalse: [ WinApi constant: 'SW_HIDE' ]))
+    ]
+
+    enable: aBoolean <Boolean> ^ <Boolean> [
+        ^WinApi asBool: (WinApi enableWindow: handle enable: (aBoolean ifTrue: [ 1 ] ifFalse: [ 0 ]))
+    ]
+]
+
+"── WinApi, one more binding ─────────────────────────────────────────────"
+Object subclass: WinApi [
+    WinApi class >> enableWindow: hwnd <Integer> enable: bEnable <Integer> ^ <Integer> [
+        <primitive: FFI function: #EnableWindow ret: #g args: #(g g)>
+        ^self primitiveFailed: 'EnableWindow'
+    ]
+]
+
+"── the shell ────────────────────────────────────────────────────────────"
+Object subclass: WinShell [
+    <classVars: Wg4Enabled Views ActiveView ViewSwitchCount ViewBuildCount
+                TranscriptCollapsed TranscriptLines MetricsText MetricsUpdates
+                CommandsEnabled>
+
+    WinShell class >> wg4Enabled ^ <Boolean> [
+        "`MACVM_WINUI_WG4=off` restores WG3's window exactly — the same shape
+         of escape hatch `controlsEnabled` gives WG3, and for the same
+         reason: a gate that can only run the newest layer cannot bisect.
+         Read on the Rust side and pushed in (win_gui/src/main.rs), exactly
+         as `controlsEnabled:` is: the guest never reads the environment."
+        ^Wg4Enabled ~~ false
+    ]
+
+    WinShell class >> wg4Enabled: aBoolean <Boolean> [ Wg4Enabled := aBoolean. ^self ]
+
+    WinShell class >> requestLayout [
+        "Ask the drain for a layout pass. Setting the flag is all a caller may
+         do — the pass itself belongs to `drainPass`."
+        PendingLayout := true.
+        ^self
+    ]
+
+    "── the view registry ────────────────────────────────────────────────
+     A view is #(symbol title builtFlag). The Mac registers a container BLOCK
+     and AppKit builds it on first tab selection; we register the same
+     intent and `ensureViewBuilt:` is where laziness actually happens."
+
+    WinShell class >> views ^ <OrderedCollection> [
+        Views isNil ifTrue: [ Views := OrderedCollection new ].
+        ^Views
+    ]
+
+    WinShell class >> registerViewNamed: aSymbol <Symbol> title: aTitle <String> [
+        (self views anySatisfy: [ :v | (v at: 1) == aSymbol ])
+            ifTrue: [ ^self ].
+        self views add: (Array with: aSymbol with: aTitle with: false).
+        ^self
+    ]
+
+    WinShell class >> registerShellViews [
+        "WG4 ships three views. WG5's Workspace and Browser register
+         themselves from their own files, exactly as CocoaBrowser2 and the
+         rest do on the Mac — which is why this is a REGISTRY and not a
+         hard-coded switch statement."
+        self registerViewNamed: #welcome title: 'Welcome'.
+        self registerViewNamed: #transcript title: 'Transcript'.
+        self registerViewNamed: #metrics title: 'Metrics'.
+        ^self
+    ]
+
+    WinShell class >> activeView ^ <Object> [ ^ActiveView ]
+
+    WinShell class >> switchToView: aSymbol <Symbol> ^ <Boolean> [
+        "Show one view's content child and hide the rest. Called from the
+         DRAIN (a view-bar button's `serviceCommand:`) — never from the door.
+
+         Answers whether the view exists, so a caller driving this from the
+         control port can tell 'switched' from 'no such view' without
+         parsing a transcript line."
+        | entry |
+        entry := self views detect: [ :v | (v at: 1) == aSymbol ] ifNone: [ nil ].
+        entry isNil ifTrue: [ ^false ].
+        self ensureViewBuilt: aSymbol.
+        self views do: [ :v |
+            | c |
+            c := self controlNamed: (self contentNameFor: (v at: 1)).
+            c isNil ifFalse: [ c show: (v at: 1) == aSymbol ] ].
+        ActiveView := aSymbol.
+        ViewSwitchCount := (ViewSwitchCount isNil ifTrue: [ 0 ] ifFalse: [ ViewSwitchCount ]) + 1.
+        self syncCommandEnablement.
+        self requestLayout.
+        ^true
+    ]
+
+    WinShell class >> viewSwitchCount ^ <Integer> [
+        ^ViewSwitchCount isNil ifTrue: [ 0 ] ifFalse: [ ViewSwitchCount ] ]
+
+    WinShell class >> contentNameFor: aSymbol <Symbol> ^ <Symbol> [
+        ^('content_' , aSymbol asString) asSymbol
+    ]
+
+    WinShell class >> viewIsBuilt: aSymbol <Symbol> ^ <Boolean> [
+        | entry |
+        entry := self views detect: [ :v | (v at: 1) == aSymbol ] ifNone: [ nil ].
+        ^entry notNil and: [ (entry at: 3) == true ]
+    ]
+
+    WinShell class >> ensureViewBuilt: aSymbol <Symbol> [
+        "LAZY BUILD — the WG4 row's own word. A view's content child is
+         created the first time it is shown and never again, which is what
+         makes a shell with eight views cost one view's worth of handles at
+         startup. Creation sends messages; this runs in the drain, so that is
+         allowed here and would not be in the door."
+        | entry c |
+        (self viewIsBuilt: aSymbol) ifTrue: [ ^self ].
+        entry := self views detect: [ :v | (v at: 1) == aSymbol ] ifNone: [ nil ].
+        entry isNil ifTrue: [ ^self ].
+        c := self
+            addControl: (self contentNameFor: aSymbol)
+            class: 'EDIT'
+            text: (self placeholderTextFor: aSymbol)
+            style: (((WinApi constant: 'WS_CHILD')
+                bitOr: ((WinApi constant: 'WS_BORDER') bitOr: (WinApi constant: 'WS_VSCROLL')))
+                bitOr: (((WinApi constant: 'ES_MULTILINE')
+                    bitOr: (WinApi constant: 'ES_READONLY'))
+                    bitOr: (WinApi constant: 'ES_AUTOVSCROLL')))
+            exStyle: 0.
+        c show: false.
+        entry at: 3 put: true.
+        ViewBuildCount := (ViewBuildCount isNil ifTrue: [ 0 ] ifFalse: [ ViewBuildCount ]) + 1.
+        ^self
+    ]
+
+    WinShell class >> viewBuildCount ^ <Integer> [
+        ^ViewBuildCount isNil ifTrue: [ 0 ] ifFalse: [ ViewBuildCount ] ]
+
+    WinShell class >> placeholderTextFor: aSymbol <Symbol> ^ <String> [
+        "Every empty state carries its teaching text (WG8's row says it for
+         the whole shell; there is no reason for WG4's own views to wait)."
+        aSymbol == #welcome ifTrue: [
+            ^'MACVM on Windows on ARM64.', (String with: Character cr with: Character nl),
+             (String with: Character cr with: Character nl),
+             'This is the WG4 shell: a view bar above, a transcript docked below,',
+             (String with: Character cr with: Character nl),
+             'and live VM metrics on the right. Views build lazily — this one',
+             (String with: Character cr with: Character nl),
+             'was created the first time you looked at it.' ].
+        aSymbol == #transcript ifTrue: [
+            ^'The transcript view. Newest line first.' ].
+        aSymbol == #metrics ifTrue: [
+            ^'VM metrics, sampled off the primary.' ].
+        ^''
+    ]
+
+    "── the transcript dock ──────────────────────────────────────────────"
+
+    WinShell class >> transcriptOpenHeight ^ <Integer> [ ^120 ]
+    WinShell class >> transcriptCollapsedHeight ^ <Integer> [ ^0 ]
+
+    WinShell class >> transcriptCollapsed ^ <Boolean> [ ^TranscriptCollapsed == true ]
+
+    WinShell class >> toggleTranscript ^ <Boolean> [
+        "Collapse or reopen the dock. Answers the NEW collapsed state.
+         A height change plus a relayout — the band never leaves the layout
+         (see `setBottom:height:`), so this cannot get the arithmetic into a
+         state the open path does not also produce."
+        TranscriptCollapsed := self transcriptCollapsed not.
+        self layout
+            setBottom: #transcript
+            height: (self transcriptCollapsed
+                ifTrue: [ self transcriptCollapsedHeight ]
+                ifFalse: [ self transcriptOpenHeight ]).
+        (self controlNamed: #transcript) ifNotNil: [ :c |
+            c show: self transcriptCollapsed not ].
+        self requestLayout.
+        ^self transcriptCollapsed
+    ]
+
+    WinShell class >> appendTranscript: aString <String> [
+        "Newest line FIRST — the Mac's reverse-chronological dock, and for
+         its stated reason: a log to glance at, not a stream to follow."
+        | lines |
+        TranscriptLines isNil ifTrue: [ TranscriptLines := OrderedCollection new ].
+        TranscriptLines addFirst: aString.
+        [ TranscriptLines size > 200 ] whileTrue: [ TranscriptLines removeLast ].
+        (self controlNamed: #transcript) ifNotNil: [ :c |
+            "A Win32 multiline EDIT breaks lines on CRLF and on nothing else:
+             a bare CR renders as no break at all, which is what ran every
+             transcript line together in the first WG4 snap."
+            lines := String new.
+            TranscriptLines do: [ :l |
+                lines := lines , l , (String with: Character cr with: Character nl) ].
+            c setText: lines ].
+        ^self
+    ]
+
+    WinShell class >> resetTranscript [
+        "The tests need a known starting point, and a class-side collection
+         with no reset is a test-ordering bug waiting to be blamed on
+         something else."
+        TranscriptLines := OrderedCollection new.
+        ^self
+    ]
+
+    WinShell class >> transcriptFirstLine ^ <String> [
+        ^(TranscriptLines isNil or: [ TranscriptLines isEmpty ])
+            ifTrue: [ '' ] ifFalse: [ TranscriptLines first ]
+    ]
+
+    WinShell class >> transcriptLineCount ^ <Integer> [
+        ^TranscriptLines isNil ifTrue: [ 0 ] ifFalse: [ TranscriptLines size ] ]
+
+    "── the metrics cluster ──────────────────────────────────────────────"
+
+    WinShell class >> updateMetricsMem: mem <String> jit: jit <String> code: code <String>
+                       alloc: alloc <String> gc: gc <String> [
+        "The Mac's own selector, same fields, same semantics — sampled off
+         the PRIMARY and pushed in. Kept as ONE call because the five values
+         belong to one sample: five separate setters would let the cluster
+         show a mixture of two moments, which is exactly the kind of small
+         lie a metrics readout must not tell."
+        MetricsText := 'MEM ' , mem , '   JIT ' , jit , '   CODE ' , code ,
+                       '   ALLOC ' , alloc , '   GC ' , gc.
+        (self controlNamed: #metrics) ifNotNil: [ :c | c setText: MetricsText ].
+        MetricsUpdates := (MetricsUpdates isNil ifTrue: [ 0 ] ifFalse: [ MetricsUpdates ]) + 1.
+        ^self
+    ]
+
+    WinShell class >> metricsText ^ <String> [
+        ^MetricsText isNil ifTrue: [ '' ] ifFalse: [ MetricsText ] ]
+
+    WinShell class >> metricsUpdates ^ <Integer> [
+        ^MetricsUpdates isNil ifTrue: [ 0 ] ifFalse: [ MetricsUpdates ] ]
+
+    "── Do It / Print It enablement ──────────────────────────────────────"
+
+    WinShell class >> commandsEnabled ^ <Boolean> [
+        "The WG4 row: 'Do It/Print It enablement tracked by focus'. Until
+         WG5's Workspace exists there is no editable text to act on, so the
+         honest answer is 'enabled exactly when a view that can supply source
+         is active' — today none can, and this reads false rather than
+         offering a button that would do nothing."
+        ^CommandsEnabled == true
+    ]
+
+    WinShell class >> syncCommandEnablement [
+        | on |
+        on := ActiveView == #workspace.
+        CommandsEnabled := on.
+        #(#doit #printit) do: [ :n |
+            (self controlNamed: n) ifNotNil: [ :c | c enable: on ] ].
+        ^self
+    ]
+
+    "── the hooks 92 defined, taken over ─────────────────────────────────"
+
+    WinShell class >> layout ^ <WinLayout> [
+        Layout isNil ifTrue: [
+            Layout := self wg4Enabled ifTrue: [ self shellLayout ] ifFalse: [ WinLayout shell ] ].
+        ^Layout
+    ]
+
+    WinShell class >> shellLayout ^ <WinLayout> [
+        "The one-window grammar, as arithmetic: a view bar, a content area
+         that fills, and a transcript docked at the bottom."
+        ^WinLayout new
+            add: #viewbar height: 34;
+            fill: #content;
+            addBottom: #transcript height: self transcriptOpenHeight;
+            yourself
+    ]
+
+    WinShell class >> buildControls ^ <OrderedCollection> [
+        "WG3's controls first (its gate measures them), then the shell on
+         top. Open time only — never a doit, never a handler."
+        | built |
+        built := self wg3BuildControls.
+        self wg4Enabled ifFalse: [ ^built ].
+        self controlsEnabled ifFalse: [ ^built ].
+        self registerShellViews.
+        ViewBuildCount := 0.
+        ViewSwitchCount := 0.
+
+        "The view bar's buttons: one per registered view, then the commands."
+        self views do: [ :v |
+            self
+                addControl: (self viewButtonNameFor: (v at: 1))
+                class: 'BUTTON'
+                text: (v at: 2)
+                style: (((WinApi constant: 'WS_CHILD')
+                    bitOr: (WinApi constant: 'WS_VISIBLE'))
+                    bitOr: ((WinApi constant: 'WS_TABSTOP')
+                        bitOr: (WinApi constant: 'BS_PUSHBUTTON')))
+                exStyle: 0 ].
+        #(#doit 'Do It' #printit 'Print It') pairsDo: [ :sym :label |
+            self
+                addControl: sym
+                class: 'BUTTON'
+                text: label
+                style: (((WinApi constant: 'WS_CHILD')
+                    bitOr: (WinApi constant: 'WS_VISIBLE'))
+                    bitOr: ((WinApi constant: 'WS_TABSTOP')
+                        bitOr: (WinApi constant: 'BS_PUSHBUTTON')))
+                exStyle: 0 ].
+
+        "The metrics readout: right-anchored, static, monospaced digits by
+         virtue of the shell font — a STATIC and not an EDIT because it is a
+         readout and a caret in it would be a lie about what it accepts."
+        self
+            addControl: #metrics
+            class: 'STATIC'
+            text: 'MEM —   JIT —   CODE —   ALLOC —   GC —'
+            style: (((WinApi constant: 'WS_CHILD')
+                bitOr: (WinApi constant: 'WS_VISIBLE'))
+                bitOr: (WinApi constant: 'SS_RIGHT'))
+            exStyle: 0.
+
+        "The transcript dock."
+        self
+            addControl: #transcript
+            class: 'EDIT'
+            text: ''
+            style: (((WinApi constant: 'WS_CHILD')
+                bitOr: ((WinApi constant: 'WS_VISIBLE') bitOr: (WinApi constant: 'WS_BORDER')))
+                bitOr: (((WinApi constant: 'ES_MULTILINE')
+                    bitOr: (WinApi constant: 'ES_READONLY'))
+                    bitOr: (WinApi constant: 'ES_AUTOVSCROLL')))
+            exStyle: 0.
+
+        "WG3's demo trio has no band in this grammar. They stay ALIVE — the
+         drain, the door and their ids are unchanged — but a control with no
+         rect in the active layout must not be left drawing wherever it was
+         created."
+        #(#button #status #list) do: [ :n |
+            (self controlNamed: n) ifNotNil: [ :c | c show: false ] ].
+        self appendTranscript: 'WG4 shell up — ', self views size printString, ' views registered.'.
+        self switchToView: #welcome.
+        self syncCommandEnablement.
+        ^Controls
+    ]
+
+    WinShell class >> viewButtonNameFor: aSymbol <Symbol> ^ <Symbol> [
+        ^('view_' , aSymbol asString) asSymbol
+    ]
+
+    WinShell class >> applyLayout ^ <Integer> [
+        "One SetWindowPos per control, from the settled client rect. WG3's
+         controls keep their own bands; the shell's own children are placed
+         from the three bands above plus one row slice for the view bar."
+        | moved rects row lefts rights btnW |
+        self wg4Enabled ifFalse: [ ^self wg3ApplyLayout ].
+        self isOpen ifFalse: [ ^0 ].
+        moved := 0.
+        rects := self layout
+            rectsIn: self clientWidth
+            by: self clientHeight
+            dpi: (Dpi isNil ifTrue: [ WinApi constant: 'USER_DEFAULT_SCREEN_DPI' ] ifFalse: [ Dpi ]).
+
+        "The view bar: view buttons and the two commands packed left, the
+         metrics cluster anchored right."
+        btnW := 96.
+        row := self layout
+            packRow: (rects at: #viewbar)
+            left: ((self views collect: [ :v | btnW ]) asArray , (Array with: btnW with: btnW))
+            right: (Array with: 320)
+            gap: 6
+            dpi: (Dpi isNil ifTrue: [ 96 ] ifFalse: [ Dpi ]).
+        lefts := row at: 1.
+        rights := row at: 2.
+        self views doWithIndex: [ :v :i |
+            (self controlNamed: (self viewButtonNameFor: (v at: 1))) ifNotNil: [ :c |
+                (c moveTo: (lefts at: i)) ifTrue: [ moved := moved + 1 ] ] ].
+        (self controlNamed: #doit) ifNotNil: [ :c |
+            (c moveTo: (lefts at: self views size + 1)) ifTrue: [ moved := moved + 1 ] ].
+        (self controlNamed: #printit) ifNotNil: [ :c |
+            (c moveTo: (lefts at: self views size + 2)) ifTrue: [ moved := moved + 1 ] ].
+        (self controlNamed: #metrics) ifNotNil: [ :c |
+            (c moveTo: (rights at: 1)) ifTrue: [ moved := moved + 1 ] ].
+
+        "Every view's content child gets the SAME content rect — only the
+         active one is visible, so overlapping them is not a bug but the
+         mechanism (Win32's answer to AppKit swapping a tab item's view)."
+        self views do: [ :v |
+            (self controlNamed: (self contentNameFor: (v at: 1))) ifNotNil: [ :c |
+                (c moveTo: (rects at: #content)) ifTrue: [ moved := moved + 1 ] ] ].
+
+        (self controlNamed: #transcript) ifNotNil: [ :c |
+            self transcriptCollapsed
+                ifFalse: [ (c moveTo: (rects at: #transcript)) ifTrue: [ moved := moved + 1 ] ] ].
+
+        ^moved
+    ]
+
+    WinShell class >> serviceCommand: anId <Integer> code: aCode <Integer> from: aHandle <Integer> [
+        "A view-bar button, one drain pass after the click. Everything here
+         is synchronous Win32 work — which is precisely why it is here and
+         not in the door."
+        | c name |
+        c := self controlWithId: anId.
+        c isNil ifTrue: [ ^self wg3ServiceCommand: anId code: aCode from: aHandle ].
+        name := c name.
+        self views do: [ :v |
+            name == (self viewButtonNameFor: (v at: 1)) ifTrue: [
+                self switchToView: (v at: 1).
+                self appendTranscript: 'switched to ' , (v at: 2).
+                ^self ] ].
+        name == #doit ifTrue: [ ^self appendTranscript: 'Do It — needs WG5''s Workspace.' ].
+        name == #printit ifTrue: [ ^self appendTranscript: 'Print It — needs WG5''s Workspace.' ].
+        ^self wg3ServiceCommand: anId code: aCode from: aHandle
+    ]
+]

@@ -9938,10 +9938,8 @@ fn rewrite_uses(op: &mut Ir, from: u32, to: VReg) {
                 *b = to;
             }
         }
-        Ir::FBox { src, .. } | Ir::FUnbox { src, .. } | Ir::Move { src, .. } => {
-            if src.0 == from {
-                *src = to;
-            }
+        Ir::FBox { src, .. } | Ir::FUnbox { src, .. } | Ir::Move { src, .. } if src.0 == from => {
+            *src = to;
         }
         _ => {}
     }
@@ -11979,7 +11977,7 @@ fn root_trap_live_slots(
     method: MethodOop,
     irm: &IrMethod,
 ) -> std::collections::HashMap<usize, Vec<u32>> {
-    let n_slots = (method.argc() + method.ntemps()) as usize;
+    let n_slots = method.argc() + method.ntemps();
     let mut out_map: std::collections::HashMap<usize, Vec<u32>> = Default::default();
     if n_slots == 0 {
         return out_map;
@@ -12087,10 +12085,8 @@ fn root_trap_live_slots(
                             liveset[t as usize] = false;
                         }
                     }
-                    Instr::PushTemp(t) => {
-                        if (t as usize) < n_slots {
-                            liveset[t as usize] = true;
-                        }
+                    Instr::PushTemp(t) if (t as usize) < n_slots => {
+                        liveset[t as usize] = true;
                     }
                     _ => {}
                 }

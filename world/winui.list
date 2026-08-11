@@ -33,3 +33,6 @@
 # difference at all, which is how "the drain lands before the first control
 # exists" gets checked rather than claimed.
 92_winui_controls.mst
+# WINARM (WG4, docs/ROADMAP.md WG4 row): the shell — view bar, lazy view
+# switching, docked transcript, live metrics. Overrides 92's hooks in turn.
+93_winui_shell.mst

@@ -300,6 +300,20 @@ Object subclass: WinShell [
                 ClickCount CommonControlsReady SelectRequest ListRowCount
                 LastMeaningfulNotify ControlsEnabled RowScratch>
 
+    "── the WG3 hooks, as delegations ────────────────────────────────────
+     91 defines these as no-ops; this file supplies WG3's behaviour. They are
+     one line each so that a LATER layer (93, WG4's shell) can override the
+     hook and still reach this file's work by name — `super` cannot serve
+     that purpose, because reopening a class creates no superclass link to
+     its own previous definition, and a hook that could only be replaced
+     wholesale would force every later sprint to copy this one."
+
+    WinShell class >> buildControls ^ <OrderedCollection> [ ^self wg3BuildControls ]
+    WinShell class >> applyLayout ^ <Integer> [ ^self wg3ApplyLayout ]
+    WinShell class >> serviceCommand: anId <Integer> code: aCode <Integer> from: aHandle <Integer> [
+        ^self wg3ServiceCommand: anId code: aCode from: aHandle
+    ]
+
     "── the switch WG1's and WG2's gates need ────────────────────────────
      `tests_wg3.md` item 1 asks for WG2's entire gate to pass unchanged
      `with the drain installed and NO CONTROL CREATED`, and that phrase is
@@ -387,7 +401,7 @@ Object subclass: WinShell [
 
     "── D3: the controls ─────────────────────────────────────────────────"
 
-    WinShell class >> buildControls ^ <OrderedCollection> [
+    WinShell class >> wg3BuildControls ^ <OrderedCollection> [
         "Called from `openMain`, at open time — never from a doit (Δ2) and
          never from a handler (§2.4a). Idempotent, because `cycle: 10` opens
          ten windows in one VM and a second call must build children for the
@@ -537,7 +551,7 @@ Object subclass: WinShell [
 
     "── D4: the layout, run BY THE DRAIN ─────────────────────────────────"
 
-    WinShell class >> applyLayout ^ <Integer> [
+    WinShell class >> wg3ApplyLayout ^ <Integer> [
         "Compute every rect from the settled client size, then one SetWindowPos
          per control. Answers how many moved.
 
@@ -629,7 +643,7 @@ Object subclass: WinShell [
 
     "── the MEANING of a control message, run in the drain ───────────────"
 
-    WinShell class >> serviceCommand: anId <Integer> code: aCode <Integer> from: aHandle <Integer> [
+    WinShell class >> wg3ServiceCommand: anId <Integer> code: aCode <Integer> from: aHandle <Integer> [
         "The button's action. Two SendMessageW's into two other controls and a
          list-view insertion — synchronous Win32 work, i.e. exactly what a
          message handler may not do — running here, one pass later, with the VM

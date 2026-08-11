@@ -249,6 +249,18 @@ mod app {
             guarded_exec(&mut vm, "WinShell controlsEnabled: false.")
                 .map_err(|e| format!("MACVM_WINUI_CONTROLS=off: {e}"))?;
         }
+        // WINARM (WG4): the same escape hatch one sprint on. `gate-wg3` runs
+        // with the shell OFF, because its assertions are about WG3's own
+        // three controls in WG3's own three bands — a gate that could only
+        // ever run the newest layer could not bisect a regression to a
+        // sprint. Default is ON: this is the sprint that adds the shell.
+        if matches!(
+            std::env::var("MACVM_WINUI_WG4").as_deref(),
+            Ok("off") | Ok("0") | Ok("false")
+        ) {
+            guarded_exec(&mut vm, "WinShell wg4Enabled: false.")
+                .map_err(|e| format!("MACVM_WINUI_WG4=off: {e}"))?;
+        }
         Ok(vm)
     }
 

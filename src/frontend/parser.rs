@@ -432,7 +432,7 @@ impl<'a> Parser<'a> {
                 let all_digits = format!("{int_digits}{frac_digits}");
                 let numerator = Self::intlit_to_literal(negative, 10, &all_digits);
                 let mut den_digits = String::from("1");
-                den_digits.extend(std::iter::repeat('0').take(frac_digits.len()));
+                den_digits.extend(std::iter::repeat_n('0', frac_digits.len()));
                 let denominator = Self::intlit_to_literal(false, 10, &den_digits);
                 Ok((
                     Expr::Send {

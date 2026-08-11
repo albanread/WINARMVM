@@ -383,7 +383,7 @@ impl<'a> Lexer<'a> {
                     return Err(self.err(start, "integer exponent too large (limit 10000 digits)"));
                 }
                 let mut digits = lead;
-                digits.extend(std::iter::repeat('0').take(exp as usize));
+                digits.extend(std::iter::repeat_n('0', exp as usize));
                 return Ok(Tok::IntLit {
                     negative,
                     radix: 10,

@@ -100,7 +100,7 @@ fn read_frame(s: &mut TcpStream) -> std::io::Result<Option<String>> {
 }
 
 fn write_frame(s: &mut TcpStream, body: &str) -> std::io::Result<()> {
-    write!(s, "{}\n", body.len())?;
+    writeln!(s, "{}", body.len())?;
     s.write_all(body.as_bytes())?;
     s.flush()
 }
