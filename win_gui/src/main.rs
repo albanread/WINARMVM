@@ -257,6 +257,78 @@ mod app {
     /// Throttled to ~4 Hz: this runs from the pump, which turns as fast as
     /// Windows delivers messages, and a resize drag would otherwise spend a VM
     /// entry per frame formatting numbers nobody can read that fast.
+    /// WG7-2: the Monitor's roster, pushed into the guest ~1 Hz.
+    ///
+    /// `macvm::embed::monitor_snapshot()` is fed by each VM from its OWN
+    /// thread, so reading it crosses into nobody — which is the property that
+    /// makes a roster of live VMs safe to render at all.
+    ///
+    /// PUSHED, not pulled, and from the EXE rather than a DLL. The roster is a
+    /// process-wide `static`, and a cdylib that linked `macvm` separately would
+    /// get its OWN copy — a Monitor reading it would show one VM (its own) and
+    /// look plausible while being completely wrong. `win_gui` is the exe every
+    /// VM in this process was booted by, so it is the only place the roster is
+    /// the real one. That is the same "two copies is split state" pitfall
+    /// WG6d's design records for `winui_render`.
+    ///
+    /// ONE STRING for the WHOLE table each refresh — blast, don't patch, the
+    /// rule 60's editor note settled and `85_cocoamonitor.mst` states for this
+    /// view specifically. Rows are newline-separated, fields US-separated
+    /// (0x1F), the same wire format WG6b's Find already uses and the guest
+    /// already parses.
+    fn refresh_monitor(vm: &mut VmHandle) {
+        use std::time::{Duration, Instant};
+        static LAST: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+        {
+            let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(t) = *last {
+                if t.elapsed() < Duration::from_millis(1000) {
+                    return;
+                }
+            }
+            *last = Some(Instant::now());
+        }
+        const US: char = '\u{1f}';
+        let rows: Vec<String> = macvm::embed::monitor_snapshot()
+            .into_iter()
+            .map(|r| {
+                let m = &r.metrics;
+                // STALENESS is a column, not a footnote: a VM whose owner has
+                // stopped publishing shows its age rather than a confident,
+                // frozen, wrong number. Same argument the metrics cluster makes.
+                let age = match r.age_ms {
+                    Some(ms) if ms > 2000 => format!("{}s", ms / 1000),
+                    Some(_) => "live".to_string(),
+                    None => "—".to_string(),
+                };
+                let state = if !r.alive {
+                    "dead"
+                } else if r.busy {
+                    "busy"
+                } else {
+                    "idle"
+                };
+                format!(
+                    "{}{US}{}{US}{}{US}{}{US}{}{US}{}·{}{US}{}{US}{}",
+                    r.label,
+                    r.kind,
+                    state,
+                    age,
+                    format_bytes(m.eden_used + m.old_used),
+                    m.scavenges,
+                    m.full_gcs,
+                    m.bytes_allocated,
+                    m.compilations,
+                )
+            })
+            .collect();
+        // Escaped for a Smalltalk literal: the labels are ours, but a doit
+        // built by string concatenation is a place where "ours" is an
+        // assumption rather than a fact.
+        let payload = rows.join("\n").replace('\'', "''");
+        let _ = guarded_exec(vm, &format!("WinShell monitorRowsArrived: '{payload}'."));
+    }
+
     fn refresh_metrics(
         vm: &mut VmHandle,
         snap: &crate::boot::MetricsSnapshot,
@@ -889,6 +961,11 @@ mod app {
         link: &mut Option<crate::boot::PrimaryLink>,
     ) -> i32 {
         let mut msg = MSG::default();
+        // WG7-2: this VM's own row in the Monitor's roster. Registered here
+        // rather than at boot because this is the thread that will publish it,
+        // and a slot published from anywhere but its owner's thread is a heap
+        // read racing the mutator.
+        let ui_mon = macvm::embed::monitor_register("ui".into(), "ui");
         // The previous allocation total, so ALLOC can report a RATE rather than
         // a running sum — the Mac's own cluster does the same.
         let mut prev_alloc: Option<u64> = None;
@@ -939,6 +1016,15 @@ mod app {
                     if let Some(snap) = link.as_ref().map(|l| l.metrics.clone()) {
                         let vm: &mut VmHandle = unsafe { &mut *vmp };
                         refresh_metrics(vm, &snap, &mut prev_alloc);
+                    }
+                    // WG7-2: the Monitor's roster, on the same between-
+                    // dispatches beat and throttled to its own 1 Hz. This VM
+                    // publishes its OWN row first, from its own thread, which
+                    // is the same rule the primary follows on its beat.
+                    {
+                        let vm: &mut VmHandle = unsafe { &mut *vmp };
+                        ui_mon.publish(vm.metrics());
+                        refresh_monitor(vm);
                     }
                     if let Some(inbox) = link.as_ref().map(|l| &l.inbox) {
                         // SAFETY: as above — between dispatches, on the one

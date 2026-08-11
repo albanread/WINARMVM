@@ -50,7 +50,73 @@ TestCase subclass: WinUiEditorWg6cTests [
         self runTest: #testHitTestingFollowsTheScroll
              do: [ self testHitTestingFollowsTheScroll ].
         self runTest: #testANewDocumentScrollsToTheTop
-             do: [ self testANewDocumentScrollsToTheTop ]
+             do: [ self testANewDocumentScrollsToTheTop ].
+        self runTest: #testMonitorShedsColumnsNarrowestFirst
+             do: [ self testMonitorShedsColumnsNarrowestFirst ].
+        self runTest: #testMonitorRendersTheWholeTableItWasGiven
+             do: [ self testMonitorRendersTheWholeTableItWasGiven ]
+    ]
+
+    "── WG7-2: the Monitor ───────────────────────────────────────────────"
+
+    twoVmRows [
+        "The wire format the host pushes: rows newline-separated, fields
+         US-separated. WG6b's own, and for the reason it records — a unit
+         separator cannot occur in a VM label, so nothing needs escaping."
+        | us |
+        us := String with: (Character value: 31).
+        ^'primary', us, 'primary', us, 'idle', us, 'live', us, '2.0M', us, '3', us, '99', us, '7',
+          (String with: Character nl),
+          'ui-worker', us, 'hosted', us, 'busy', us, 'live', us, '1.2M', us, '1', us, '42', us, '0'
+    ]
+
+    testMonitorShedsColumnsNarrowestFirst [
+        "COLUMN PRIORITY is the SPRINTS row's own phrase: the table sheds its
+         least important columns as the pane narrows rather than scrolling
+         sideways, because a monitor you have to scroll to read is a monitor
+         nobody reads.
+
+         And NEVER below one column — a Monitor with no VM name is not a
+         narrower Monitor, it is a broken one. That floor is the assertion
+         worth having, because it is the one a plain `while it fits` loop gets
+         wrong at small widths."
+        | wide narrow tiny |
+        wide := WinShell monitorColumnsFitting: 200.
+        narrow := WinShell monitorColumnsFitting: 40.
+        tiny := WinShell monitorColumnsFitting: 1.
+        self assert: wide size = WinShell monitorColumns size
+            description: 'a wide pane shows every column'.
+        self assert: narrow size < wide size
+            description: 'a narrow one sheds some, but kept ' , narrow size printString.
+        self assert: narrow size >= 1 description: 'and never all of them'.
+        self assert: tiny size = 1
+            description: 'a width of one character still shows the VM name, but showed '
+                , tiny size printString.
+        self assert: ((tiny at: 1) at: 2) = 'VM'
+            description: 'and the column it keeps is the NAME'
+    ]
+
+    testMonitorRendersTheWholeTableItWasGiven [
+        "BLAST, DON'T PATCH: one string in, the whole table out. Every VM the
+         host published must appear — a Monitor that quietly dropped a row
+         would be worse than no Monitor, because it looks authoritative."
+        | text |
+        WinShell monitorRowsArrived: self twoVmRows.
+        self assert: WinShell monitorVmCount = 2
+            description: 'two VMs were published, but the table holds '
+                , WinShell monitorVmCount printString.
+        text := WinShell monitorTextFor: 200.
+        self assert: (text indexOfSubCollection: 'primary') > 0
+            description: 'the primary is in the table'.
+        self assert: (text indexOfSubCollection: 'ui-worker') > 0
+            description: 'and so is the UI worker'.
+        self assert: (text indexOfSubCollection: 'busy') > 0
+            description: 'and a VM''s STATE is shown, not just its name'.
+        "An empty push is an empty table, not a crash and not the last one
+         left on screen pretending to be current."
+        WinShell monitorRowsArrived: ''.
+        self assert: WinShell monitorVmCount = 0
+            description: 'an empty roster empties the table'
     ]
 
     threeLines [ ^'one', (String with: Character nl), 'two', (String with: Character nl), 'three' ]

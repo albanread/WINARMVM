@@ -1,0 +1,165 @@
+"── 112_winui_monitor.mst — WG7-2: the Monitor ───────────────────────────
+ docs/sprints/sprint_wg7_detail.md WG7-2. Every running VM, live: the primary,
+ the UI worker on main, and any spawned compute worker.
+
+ THE DATA COMES TO US. `win_gui` reads `macvm::embed::monitor_snapshot()` on
+ the between-dispatches beat and pushes the WHOLE table in as one string, the
+ same way WG4 D2's metrics cluster is pushed. Nothing here polls, and nothing
+ here crosses into another VM — each row was published by its own VM from its
+ own thread, which is the property that makes a roster of live VMs safe to
+ render at all.
+
+ BLAST, DON'T PATCH. One string, every refresh, whole table. This is 60's rule
+ (an incremental damage protocol DID drift and was abandoned) and
+ `85_cocoamonitor.mst` states it for this view by name. The wire format is
+ WG6b's: rows newline-separated, fields US-separated, which the guest already
+ parses and which cannot occur inside a VM label.
+
+ COLUMN PRIORITY, which is the SPRINTS row's own phrase, means the table sheds
+ its least important columns as the pane narrows rather than scrolling
+ sideways. A monitor you have to scroll to read is a monitor nobody reads."
+
+Object subclass: WinShell [
+    <classVars: MonitorRows MonitorRefreshes>
+
+    WinShell class >> monitorViewName ^ <Symbol> [ ^#metrics ]
+
+    "── arrival ─────────────────────────────────────────────────────────"
+
+    WinShell class >> monitorRowsArrived: aString <String> [
+        "The whole table, from the host. Parsed into rows of fields and
+         rendered — and NOT rendered when the Monitor is not the active view,
+         because formatting a table nobody is looking at once a second is work
+         for nothing."
+        MonitorRows := self parseMonitorRows: aString.
+        MonitorRefreshes := (MonitorRefreshes isNil ifTrue: [ 0 ] ifFalse: [ MonitorRefreshes ]) + 1.
+        self activeView == self monitorViewName ifTrue: [ self renderMonitor ].
+        ^self
+    ]
+
+    WinShell class >> parseMonitorRows: aString <String> ^ <OrderedCollection> [
+        "Newline-separated rows of US-separated fields — WG6b's own format, and
+         the reason it was chosen holds here too: a unit separator cannot occur
+         in a VM label, so a row never needs escaping and a parser never has to
+         guess."
+        | out |
+        out := OrderedCollection new.
+        aString isEmpty ifTrue: [ ^out ].
+        (self splitString: aString on: Character nl) do: [ :line |
+            line isEmpty ifFalse: [
+                out add: (self splitString: line on: (Character value: 31)) ] ].
+        ^out
+    ]
+
+    WinShell class >> splitString: aString <String> on: aChar <Character> ^ <OrderedCollection> [
+        | out ws |
+        out := OrderedCollection new.
+        ws := WriteStream on: String new.
+        1 to: aString size do: [ :i |
+            (aString at: i) = aChar
+                ifTrue: [ out add: ws contents. ws := WriteStream on: String new ]
+                ifFalse: [ ws nextPut: (aString at: i) ] ].
+        out add: ws contents.
+        ^out
+    ]
+
+    WinShell class >> monitorRows ^ <OrderedCollection> [
+        ^MonitorRows isNil ifTrue: [ OrderedCollection new ] ifFalse: [ MonitorRows ] ]
+    WinShell class >> monitorRefreshes ^ <Integer> [
+        ^MonitorRefreshes isNil ifTrue: [ 0 ] ifFalse: [ MonitorRefreshes ] ]
+    WinShell class >> monitorVmCount ^ <Integer> [ ^self monitorRows size ]
+
+    "── column priority ─────────────────────────────────────────────────"
+
+    WinShell class >> monitorColumns ^ <OrderedCollection> [
+        "#(index heading width), in DROP ORDER — least important LAST, because
+         that is the order they are shed. The field indices are the wire
+         format's: 1 label, 2 kind, 3 state, 4 age, 5 memory, 6 gc, 7 alloc,
+         8 jit."
+        "Built with `add:` rather than `Array with:...`, which stops at FIVE
+         arguments — 94's own note records the same limit, where a six-argument
+         send raised a DNU that unwound a paint handler before it drew
+         anything. Seven columns is two past that."
+        | out |
+        out := OrderedCollection new.
+        out add: (Array with: 1 with: 'VM' with: 22).
+        out add: (Array with: 3 with: 'STATE' with: 6).
+        out add: (Array with: 5 with: 'MEM' with: 10).
+        out add: (Array with: 4 with: 'AGE' with: 6).
+        out add: (Array with: 6 with: 'GC' with: 8).
+        out add: (Array with: 7 with: 'ALLOC' with: 14).
+        out add: (Array with: 8 with: 'JIT' with: 8).
+        ^out
+    ]
+
+    WinShell class >> monitorColumnsFitting: cols <Integer> ^ <OrderedCollection> [
+        "As many columns as fit, in priority order, and NEVER fewer than the
+         first: a Monitor with no VM name is not a narrower Monitor, it is a
+         broken one. PURE over a width, so the shedding rule is checkable with
+         no window — which is the whole reason this is a method and not a loop
+         inside the renderer."
+        | out used |
+        out := OrderedCollection new.
+        used := 0.
+        self monitorColumns do: [ :c |
+            (out isEmpty or: [ used + (c at: 3) + 1 <= cols ]) ifTrue: [
+                out add: c.
+                used := used + (c at: 3) + 1 ] ].
+        ^out
+    ]
+
+    "── rendering ───────────────────────────────────────────────────────"
+
+    WinShell class >> padded: aString <String> to: n <Integer> ^ <String> [
+        | s ws |
+        s := aString size > n ifTrue: [ aString copyFrom: 1 to: n ] ifFalse: [ aString ].
+        ws := WriteStream on: String new.
+        ws nextPutAll: s.
+        s size + 1 to: n do: [ :i | ws nextPut: $  ].
+        ^ws contents
+    ]
+
+    WinShell class >> monitorTextFor: cols <Integer> ^ <String> [
+        "The whole table as monospaced text. PURE over (rows, width), so what
+         the Monitor would show is checkable without a window — and it is the
+         only thing this view computes."
+        "CR+LF, NOT bare LF. A Win32 EDIT breaks lines on CRLF only — hand it
+         `\\n` alone and it shows one run of text or nothing at all, which is
+         exactly what this did: the control held all 246 correct characters and
+         the pane was blank. The text was right and invisible, which is the
+         hardest kind of wrong to see."
+        | shown ws |
+        shown := self monitorColumnsFitting: cols.
+        ws := WriteStream on: String new.
+        shown do: [ :c | ws nextPutAll: (self padded: (c at: 2) to: (c at: 3)); nextPut: $  ].
+        ws nextPut: (Character value: 13); nextPut: Character nl.
+        self monitorRows do: [ :row |
+            shown do: [ :c |
+                | v |
+                v := (c at: 1) <= row size ifTrue: [ row at: (c at: 1) ] ifFalse: [ '' ].
+                ws nextPutAll: (self padded: v to: (c at: 3)); nextPut: $  ].
+            ws nextPut: (Character value: 13); nextPut: Character nl ].
+        ^ws contents
+    ]
+
+    WinShell class >> monitorWidthInChars ^ <Integer> [
+        "The content pane's width in characters of the MONOSPACED face the
+         transcript already uses. Falls back to a sane 100 with no window, so
+         the pure formatting above is testable headless."
+        | c r w |
+        c := self controlNamed: (self contentNameFor: self monitorViewName).
+        c isNil ifTrue: [ ^100 ].
+        r := [ c screenRect ] on: Error do: [ :e | nil ].
+        r isNil ifTrue: [ ^100 ].
+        w := ((r at: 3) - (r at: 1)) // 7.
+        ^w max: 24
+    ]
+
+    WinShell class >> renderMonitor [
+        | c |
+        c := self controlNamed: (self contentNameFor: self monitorViewName).
+        c isNil ifTrue: [ ^self ].
+        c setText: (self monitorTextFor: self monitorWidthInChars).
+        ^self
+    ]
+]

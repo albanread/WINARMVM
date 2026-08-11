@@ -310,6 +310,13 @@ fn primary_thread_main(
     // than at the first real request. Empty bytes = a bare nudge.
     primary.send_to_worker(id, 0, Vec::new());
 
+    // WG7-2: join the Monitor's roster. `monitor_register` REUSES a dead slot
+    // with the same label, so a restarted primary (WG7-3) keeps ONE row and
+    // flips it back to alive on its first beat rather than accreting a
+    // tombstone per restart — which is exactly what makes the two slices
+    // compose instead of fighting.
+    let monitor = macvm::embed::monitor_register("primary".into(), "primary");
+
     let trace = std::env::var("MACVM_WINUI_PRIMARY_TRACE").is_ok();
     eprintln!("macvm-winui: primary serving (trace={trace})");
     // The dispatch loop: one `Worker pumpInbox:` beat per iteration, forever.
@@ -335,15 +342,31 @@ fn primary_thread_main(
         // restart waits.
         if stop.load(Ordering::Relaxed) {
             eprintln!("macvm-winui: primary stopping after {beats} beats (restart)");
+            // The row goes dead rather than silently freezing: a Monitor that
+            // showed a stopped VM as merely quiet would be lying with a
+            // straight face.
+            monitor.mark_dead();
             return;
         }
         beats += 1;
         // WG4 D2: republish this VM's own metrics for the UI to read. Taken
         // HERE, on the primary's thread, between beats — the only place the
         // primary's heap can be read without racing the mutator.
+        let m = primary.metrics();
         if let Ok(mut slot) = metrics.lock() {
-            *slot = Some((primary.metrics(), Instant::now()));
+            *slot = Some((m, Instant::now()));
         }
+        // WG7-2: and into the ROSTER, which is a different audience. The
+        // metrics slot above feeds one cluster in the bar; this feeds the
+        // Monitor's row for this VM. Publishing here rather than from the UI
+        // thread is the whole safety argument — a VM's heap is read by its own
+        // thread, between beats, and never by anyone else.
+        //
+        // It also makes the AGE column mean something: a primary wedged inside
+        // a long doit stops publishing, and a growing age while still marked
+        // alive is precisely "stuck in guest code" — the busy signal for a VM
+        // whose pump blocks inside `exec`.
+        monitor.publish(m);
 
         // WG4 D1 bring-up trace: `MACVM_WINUI_PRIMARY_TRACE=1` reports what the
         // beat actually saw. Temporary, and cheap enough to leave until D1 has

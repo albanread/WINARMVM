@@ -114,3 +114,7 @@
 # arrangement of class variables can serve. Loads after 110 (it names
 # WinRender) and after 100 (WinSyntax).
 111_winui_codepane.mst
+# WINARM (WG7-2): the Monitor — every running VM, live. The roster is PUSHED in
+# by win_gui on the between-dispatches beat (the exe, because the roster is a
+# process-wide static and a DLL would get its own copy), and this renders it.
+112_winui_monitor.mst

@@ -168,5 +168,8 @@ tier1.mst
 # WG6e: WinCodePane. Its navigation and selection arithmetic is pure over the
 # pane's OWN text, so 67 checks it with no window and no renderer.
 ../111_winui_codepane.mst
+# WG7-2: the Monitor. Its column-shedding rule and its table formatting are
+# PURE over (rows, width), so 67 checks both with no window and no host.
+../112_winui_monitor.mst
 67_winui_editor_tests.mst
 99_run_all.mst
