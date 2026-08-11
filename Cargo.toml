@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "gui", "image_store", "ffi_gen", "win_gui", "winui_host"]
+members = [".", "gui", "image_store", "ffi_gen", "win_gui", "winui_host", "winui_render"]
 # WINARM (WG5b-2): `winui_host` joins - the Windows GUI's host service, a
 # cdylib over `image_store::flows` reached through the FFI's new `library:`
 # part. It is a NON-default member like every GUI-side crate here, so a bare

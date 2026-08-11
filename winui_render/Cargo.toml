@@ -1,0 +1,36 @@
+[package]
+name = "winui_render"
+version = "1.0.0"
+edition = "2021"
+
+# WINARM (WG6d): the Editor pane's renderer — a cell grid on DirectWrite +
+# Direct2D over a DXGI flip-model swapchain (docs/sprints/sprint_wg6d_detail.md).
+#
+# A `cdylib` for the same reason `winui_host` is one: the guest reaches it
+# through the FFI's `library:` part, Rust owns every resource behind
+# `#[no_mangle]` entry points, and the VM learns nothing new. Smalltalk pokes
+# codepoint+colour cells into a buffer this crate owns; this crate turns the
+# buffer into glyph runs. Two authorities over one set of pixels is the defect
+# class this crate exists to retire — the guest never computes a pixel again.
+#
+# NOT linked by win_gui or anything else as an rlib: the statics (device,
+# swapchain, cell buffer) must exist ONCE, in the copy the guest loaded. The
+# design doc's pitfall list names this; the crate-type list enforces it.
+[lib]
+name = "winui_render"
+crate-type = ["cdylib"]
+
+[target.'cfg(windows)'.dependencies.windows]
+# The same 0.62 `gui` and `win_gui` pin, so a workspace build shares one copy.
+version = "0.62"
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct2D",
+    "Win32_Graphics_Direct2D_Common",
+    "Win32_Graphics_DirectWrite",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Imaging",
+]
