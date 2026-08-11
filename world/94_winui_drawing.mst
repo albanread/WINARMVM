@@ -223,6 +223,9 @@ Object subclass: WinShell [
         (DrawIds includes: anId) ifFalse: [ DrawIds add: anId ].
         c := self controlWithId: anId.
         c isNil ifTrue: [ DrawMisses := (DrawMisses isNil ifTrue: [ 0 ] ifFalse: [ DrawMisses ]) + 1. ^0 ].
+        c name == self ghostName ifTrue: [
+            ^[ self drawGhost: hdc x: x y: y w: w h: h ]
+                on: Error do: [ :e | DrawError := e messageText. 0 ] ].
         c name == #splitter ifTrue: [
             ^[ self drawSplitter: hdc x: x y: y w: w h: h ]
                 on: Error do: [ :e | DrawError := e messageText. 0 ] ].

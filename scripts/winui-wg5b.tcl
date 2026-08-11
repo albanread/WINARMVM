@@ -105,6 +105,27 @@ puts "WG5C richedit-loaded [gui eval {WinShell richEditAvailable}]"
 puts "WG5C pane-class [gui eval {WinShell codePaneClass}]"
 puts "WG5C workspace-is-source [gui eval {(WinShell controlNamed: (WinShell contentNameFor: #workspace)) isSourceSurface}]"
 
+# ── WG5c D5: the ghost line, and the claim that matters ─────────────────
+# WG5a D4 shipped this broken — EM_SETCUEBANNER returns 0 on a multiline
+# control, nothing drew, and its test asserted the TEXT the ghost would use
+# rather than that anything appeared. So the assertions here are about the
+# WINDOW, and about the property that makes the overlay design safe: the
+# hint is NOT in the document. If it were, Do It would evaluate it.
+# BACK TO THE WORKSPACE FIRST — the browser-switch above left another view
+# active, and the hint is correctly hidden on any view that is not the
+# Workspace. Measured that way: `ghost-shown-when-empty false`, which was the
+# gate asking in the wrong view rather than the ghost failing.
+gui eval {WinShell switchToView: #workspace}
+gui doit {(WinShell controlNamed: (WinShell contentNameFor: #workspace)) setText: ''.}
+gui drain now
+puts "WG5D ghost-shown-when-empty [gui eval {WinShell ghostIsVisible}]"
+puts "WG5D buffer-really-empty [gui eval {WinShell workspaceText isEmpty}]"
+puts "WG5D doit-would-see-nothing [gui eval {WinShell workspaceTarget first isEmpty}]"
+puts "WG5D drew-without-error [gui eval {WinShell drawError}]"
+gui doit {(WinShell controlNamed: (WinShell contentNameFor: #workspace)) setText: 'x'.}
+gui drain now
+puts "WG5D ghost-gone-when-typed [gui eval {WinShell ghostIsVisible}]"
+
 # ── WG5c D4: the colour is applied ──────────────────────────────────────
 # Three claims. That runs are computed AND applied (a gate asserting only
 # that the tokenizer ran would repeat WG5a D4's mistake exactly — it checked

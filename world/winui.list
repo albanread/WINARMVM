@@ -72,3 +72,8 @@
 # whole thing on an edit-idle rather than per keystroke. Loads after 101,
 # whose panes it colours, and after 100, whose runs it applies.
 102_winui_colour.mst
+# WINARM (WG5c D5): the ghost line, re-implemented as an OVERLAY after
+# WG5a D4's EM_SETCUEBANNER turned out to be refused (it returns 0 on a
+# multiline control). A STATIC raised above the pane, so the hint is never
+# part of the document and so can never be evaluated, saved, or lost.
+103_winui_ghost.mst

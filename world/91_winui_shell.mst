@@ -1543,6 +1543,9 @@ Object subclass: WinShell [
          until 102 defines it, and a no-op on every pass where nothing was
          edited — it costs one nil test."
         self serviceColourIdle.
+        "WG5c D5: show or hide the Workspace's hint. Idempotent and cheap —
+         one WM_GETTEXTLENGTH and a compare on a pass where nothing changed."
+        self serviceGhost.
         ReaskOnce == true ifTrue: [
             "The guest's own escape hatch, and `tests_wg3.md` item 5's whole
              mechanism: work discovered DURING a pass. Answering non-zero
@@ -1590,6 +1593,9 @@ Object subclass: WinShell [
     WinShell class >> paintBarOnce [ ^self ]
     "WG5c D4's idle recolour; 102 overrides."
     WinShell class >> serviceColourIdle [ ^false ]
+    "WG5c D5's ghost overlay; 103 overrides."
+    WinShell class >> serviceGhost [ ^false ]
+    WinShell class >> layoutGhost: content [ ^self ]
     WinShell class >> ownsControlId: anId <Integer> ^ <Boolean> [ ^false ]
     WinShell class >> serviceCommand: anId <Integer> code: aCode <Integer> from: aHandle <Integer> [ ^self ]
     WinShell class >> serviceNotifyFrom: aHandle <Integer> id: anId <Integer> code: aCode <Integer> [ ^self ]

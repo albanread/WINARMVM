@@ -308,13 +308,19 @@ Object subclass: WinShell [
              load, so this stays a working control either way."
             class: (aSymbol == #workspace ifTrue: [ self codePaneClass ] ifFalse: [ 'EDIT' ])
             text: (aSymbol == #workspace ifTrue: [ '' ] ifFalse: [ self placeholderTextFor: aSymbol ])
-            style: (((WinApi constant: 'WS_CHILD')
+            style: ((((WinApi constant: 'WS_CHILD')
                 bitOr: ((WinApi constant: 'WS_BORDER') bitOr: (WinApi constant: 'WS_VSCROLL')))
                 bitOr: (((WinApi constant: 'ES_MULTILINE')
                     bitOr: (aSymbol == #workspace
                         ifTrue: [ 0 ]
                         ifFalse: [ WinApi constant: 'ES_READONLY' ]))
                     bitOr: (WinApi constant: 'ES_AUTOVSCROLL')))
+                "WS_CLIPSIBLINGS, for WG5c D5: without it this pane paints
+                 over whatever sits ABOVE it in the sibling z-order, and the
+                 ghost overlay sits exactly there. Measured that way — the
+                 overlay was positioned correctly, flagged visible, holding
+                 its text, and simply painted over."
+                bitOr: (WinApi constant: 'WS_CLIPSIBLINGS'))
             exStyle: 0.
         aSymbol == #workspace ifTrue: [
             self prepareCodePane: c.
@@ -618,6 +624,11 @@ Object subclass: WinShell [
         "The Browser's four panes share the content rect between them."
         (self viewIsBuilt: #browser) ifTrue: [
             self layoutBrowserPanes: (rects at: #content) ].
+        "WG5c D5: the ghost overlay sits on the Workspace's own rect. Laid out
+         here rather than at build time because unlike a content child it must
+         also be RAISED above the pane, and z-order is worth re-asserting
+         whenever geometry is."
+        self layoutGhost: (rects at: #content).
 
         (self controlNamed: #splitter) ifNotNil: [ :c |
             (c moveTo: (rects at: #splitter)) ifTrue: [ moved := moved + 1 ] ].
@@ -697,6 +708,8 @@ Object subclass: WinShell [
          the whole document for every character."
         (aCode = (WinApi constant: 'EN_CHANGE') and: [ self isCodePane: name ])
             ifTrue: [ self noteEdit: name. ^self ].
+        "WG5c D5: a click on the ghost belongs to the pane underneath it."
+        name == self ghostName ifTrue: [ self onGhostClicked. ^self ].
         ^self wg3ServiceCommand: anId code: aCode from: aHandle
     ]
 ]

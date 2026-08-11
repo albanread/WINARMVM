@@ -85,7 +85,7 @@ first.
 * **D5 — the ghost line, for real this time.** Whatever WG5c does here must
   be checked ON SCREEN, because that is precisely what was not done before.
 
-## As built — D1, D2, D3, D4
+## As built — D1 through D5
 
 **D1/D2 landed pure**, as designed, and their gate is the tiling property
 (`world/tests/66_winui_syntax_tests.mst`): the runs must reassemble the
@@ -159,6 +159,36 @@ below U+0080 and diverge above it — the same boundary rule WG5a records for
 `EM_GETSEL`. The honest fix is one conversion at that boundary when the panes
 first hold non-ASCII; a partial one now would be harder to find later than
 none.
+
+**D5 replaced the ghost line rather than fixing it**, because there was
+nothing to fix: `EM_SETCUEBANNER` is refused by a multiline control and
+always was.
+
+It is now an **overlay** — an `SS_OWNERDRAW` STATIC raised above the pane —
+and that choice is the whole design. The obvious approach is greyed text
+placed IN the pane and cleared on the first keystroke, but that makes the
+hint part of the DOCUMENT, and the document is what Do It evaluates and what
+Accept writes. A user pressing Ctrl-D on an untouched Workspace would
+evaluate the hint, and any bug in the "is the ghost showing?" flag would
+either evaluate it or discard real typing. As an overlay those failures are
+gone by construction: `workspaceText` is genuinely empty while the hint
+shows, and the gate asserts exactly that alongside the visual claims.
+
+Two things it took a screen to find, both invisible to state:
+
+* **It was positioned, flagged visible, holding its text — and painted over.**
+  Sibling windows need `WS_CLIPSIBLINGS` on BOTH sides or the one below
+  repaints across the one above. Added to the ghost and to the code pane.
+* **A plain STATIC uses the dialog text colour**, so the first working
+  version drew the hint in ordinary black — which reads as code the user did
+  not type, and is arguably worse than no hint at all. Colouring a stock
+  static needs `WM_CTLCOLORSTATIC`, a message the door does not carry;
+  `SS_OWNERDRAW` reuses the `WM_DRAWITEM` path WG4 D3 already built.
+
+It shows whenever the Workspace is on screen and empty — deliberately NOT
+"and unfocused", which is the cue banner's rule and the wrong one here. The
+moment a hint is most wanted is exactly when someone has clicked into an
+empty pane and does not know what to type.
 
 ## Pitfalls, recorded now
 

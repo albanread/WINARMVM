@@ -1420,6 +1420,16 @@ gate-wg5b:
     grep -q "WG5C pane-class 'RICHEDIT50W'" /tmp/wg5b_gate.txt
     grep -q 'WG5C workspace-is-source true' /tmp/wg5b_gate.txt
     grep -q 'WG5C browser-source-is-source true' /tmp/wg5b_gate.txt
+    # WG5c D5: the ghost line, whose predecessor shipped invisible. The
+    # window claims first, then the property that makes the design safe.
+    grep -q 'WG5D ghost-shown-when-empty true' /tmp/wg5b_gate.txt
+    grep -q 'WG5D ghost-gone-when-typed false' /tmp/wg5b_gate.txt
+    grep -q "WG5D drew-without-error ''" /tmp/wg5b_gate.txt
+    # THE HINT IS NOT IN THE DOCUMENT. If it were, Do It would evaluate it and
+    # Accept would write it — which is why it is an overlay and not greyed
+    # text in the pane.
+    grep -q 'WG5D buffer-really-empty true' /tmp/wg5b_gate.txt
+    grep -q 'WG5D doit-would-see-nothing true' /tmp/wg5b_gate.txt
     # WG5c D4: runs are not merely COMPUTED, they are APPLIED — and the
     # selection survives the pass, which is what separates colouring from
     # sabotaging the editor.
