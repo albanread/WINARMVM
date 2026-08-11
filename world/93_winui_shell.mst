@@ -228,6 +228,7 @@ Object subclass: WinShell [
          hard-coded switch statement."
         self registerViewNamed: #workspace title: 'Workspace'.
         self registerViewNamed: #browser title: 'Browser'.
+        self registerViewNamed: #outliner title: 'Outliner'.
         self registerViewNamed: #welcome title: 'Welcome'.
         self registerViewNamed: #transcript title: 'Transcript'.
         self registerViewNamed: #metrics title: 'Metrics'.
@@ -255,6 +256,8 @@ Object subclass: WinShell [
         (self controlNamed: (self contentNameFor: aSymbol))
             ifNotNil: [ :c | c show: aSymbol ~~ #browser ].
         self showBrowserPanes: aSymbol == #browser.
+        (self controlNamed: self outlinerName)
+            ifNotNil: [ :c | c show: aSymbol == #outliner ].
         self views do: [ :v |
             | c |
             (v at: 1) == aSymbol ifFalse: [
@@ -325,6 +328,19 @@ Object subclass: WinShell [
         aSymbol == #workspace ifTrue: [
             self prepareCodePane: c.
             self installGhost ].
+        "WG6a: the Outliner's content child is a HOST for its tree, the same
+         way the Browser's is for its four panes — the tree is a sibling
+         positioned over the content rect rather than a child of it."
+        aSymbol == #outliner ifTrue: [
+            self buildOutlinerTree.
+            self isOpen ifTrue: [
+                | rects |
+                rects := self layout
+                    rectsIn: self clientWidth
+                    by: self clientHeight
+                    dpi: (Dpi isNil ifTrue: [ WinApi constant: 'USER_DEFAULT_SCREEN_DPI' ] ifFalse: [ Dpi ]).
+                self layoutOutliner: (rects at: #content) ].
+            self refreshOutliner ].
         "WG5b-1: the Browser's content child is a HOST for four panes rather
          than a text surface of its own — it stays hidden and the panes sit in
          its rect, so the view registry needs no notion of `composite view`."
@@ -629,6 +645,9 @@ Object subclass: WinShell [
          also be RAISED above the pane, and z-order is worth re-asserting
          whenever geometry is."
         self layoutGhost: (rects at: #content).
+        "WG6a: the Outliner's tree fills the content rect."
+        (self viewIsBuilt: #outliner) ifTrue: [
+            self layoutOutliner: (rects at: #content) ].
 
         (self controlNamed: #splitter) ifNotNil: [ :c |
             (c moveTo: (rects at: #splitter)) ifTrue: [ moved := moved + 1 ] ].

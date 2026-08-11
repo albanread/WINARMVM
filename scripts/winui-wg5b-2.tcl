@@ -23,6 +23,20 @@ puts "WG5B browser-refreshes [gui eval {WinShell browserRefreshes}]"
 # recipe's whole wait to fire. The debounce is 200ms; the wait is 15s.
 puts "WG5C passes-after-idle [gui eval {WinShell colourPasses}]"
 
+# ── WG6a: the Outliner ──────────────────────────────────────────────────
+# It renders the SAME tree the Browser fetched, so by the time part 2 runs
+# the snapshot has landed and the tree can be built without a second wait.
+# Row count is a RELATIONSHIP, never a frozen integer (WG2 Δ 14).
+gui send "0 0x111 [gui eval {(WinShell controlNamed: #view_outliner) id}] 0"
+gui drain now
+puts "WG6A active-view [gui eval {WinShell activeView}]"
+puts "WG6A rows [gui eval {WinShell rebuildOutliner}]"
+puts "WG6A built [gui eval {WinShell outlinerIsBuilt}]"
+# The composed struct size, asserted from the running window as well as from
+# the headless tests — this is the one struct whose recorded size is a trap.
+puts "WG6A tv-recorded [gui eval {WinApi sizeOf: 'TVINSERTSTRUCTW'}]"
+puts "WG6A tv-composed [gui eval {WinShell tvInsertSize}]"
+
 # WG5c D3: the Browser's source pane is the OTHER swapped surface, and the
 # one Accept reads from — so it must satisfy the same predicate.
 puts "WG5C browser-source-is-source [gui eval {(WinShell controlNamed: #browserSource) isSourceSurface}]"

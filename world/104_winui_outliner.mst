@@ -1,0 +1,310 @@
+"── 104_winui_outliner.mst — WG6a: the Outliner ──────────────────────────
+ docs/sprints/sprint_wg6_detail.md WG6a, and docs/win_gui_design.md's WG6
+ row: *tree over live reflection with counts*.
+
+ IT NEEDS NO NEW RUST, and that is the finding the sprint turned on.
+ `UiBrowserService class>>browseSnapshot` already answers a 6-slot node —
+ {name. instVars. classVars. instSelectors. classSelectors. children} — which
+ IS the Strongtalk outline, nested, and WG5b-1 already fetches it from the
+ PRIMARY and caches it. This file is a second rendering of a tree the shell
+ was already holding.
+
+ AND IT IS AHEAD OF THE REFERENCE. The Mac's `69_cocoaoutliner.mst` reflects
+ the UI worker's OWN VM through ClassMirror, and carries a scope note
+ admitting what follows: a class defined by a Workspace Do It on the primary
+ does not appear until a UI rebuild. Windows has WG4 D1's `#uiReq` seam, so
+ this reflects the PRIMARY and that caveat does not exist here.
+
+ ONE OUTLINE, NOT PANES — Strongtalk's signature shape, and the reason to
+ have this view at all when a Browser already exists. The Browser splits a
+ class across four panes and shows one selector's source; the Outliner shows
+ a class's whole shape at once, and its place in the hierarchy, in one tree
+ you can walk."
+
+Object subclass: WinShell [
+    <classVars: OutlinerBuilt OutlinerRows OutlinerNodes NodeByName Populated>
+
+    "── The tree control ─────────────────────────────────────────────────"
+
+    WinShell class >> outlinerName ^ <Symbol> [ ^#outlinerTree ]
+
+    WinShell class >> buildOutlinerTree [
+        "TVS_HASBUTTONS/HASLINES/LINESATROOT is the classic expandable tree —
+         the one a Windows user already knows how to drive, which is most of
+         what `looks native` means."
+        (self controlNamed: self outlinerName) ifNotNil: [ :c | ^self ].
+        self
+            addControl: self outlinerName
+            class: 'SysTreeView32'
+            text: ''
+            style: (((WinApi constant: 'WS_CHILD')
+                bitOr: ((WinApi constant: 'WS_BORDER') bitOr: (WinApi constant: 'WS_VSCROLL')))
+                bitOr: (((WinApi constant: 'TVS_HASBUTTONS')
+                    bitOr: (WinApi constant: 'TVS_HASLINES'))
+                    bitOr: (WinApi constant: 'TVS_LINESATROOT')))
+            exStyle: 0.
+        (self controlNamed: self outlinerName) ifNotNil: [ :c |
+            c setFont: self guiFont ].
+        ^self
+    ]
+
+    "── TVINSERTSTRUCTW, composed rather than taken ──────────────────────"
+
+    WinShell class >> tvItemOffset ^ <Integer> [
+        "Where the anonymous union (the TVITEMW) starts."
+        ^WinApi offsetOf: 'TVINSERTSTRUCTW' field: 'Anonymous'
+    ]
+
+    WinShell class >> tvInsertSize ^ <Integer> [
+        "NOT `sizeOf: 'TVINSERTSTRUCTW'`, which answers 24 and would be a heap
+         overwrite of 48 bytes on the first insert.
+
+         The struct's third member is an anonymous UNION of TVITEMEXW/TVITEMW,
+         and Win32Metadata records the union as a nested TYPE REFERENCE rather
+         than inline — so the recorded size covers the two handles and the
+         union's START, not its contents. This is the one place in this port
+         where `derive, never transcribe` is not enough on its own: the
+         database's answer is MISLEADING rather than missing, so the size has
+         to be COMPOSED. Every part of the composition is still derived; none
+         of it is a counted byte."
+        ^self tvItemOffset + (WinApi sizeOf: 'TVITEMW')
+    ]
+
+    WinShell class >> tvScratch ^ <Integer> [
+        OutlinerNodes isNil ifTrue: [ OutlinerNodes := WinArena alloc: self tvInsertSize ].
+        ^OutlinerNodes
+    ]
+
+    WinShell class >> insertOutlineItem: aString <String> under: hParent <Integer> ^ <Integer> [
+        ^self insertOutlineItem: aString under: hParent after: (WinApi constant: 'TVI_LAST')
+    ]
+
+    WinShell class >> insertOutlineItem: aString <String> under: hParent <Integer> after: hAfter <Integer> ^ <Integer> [
+        "Answers the new HTREEITEM, which is the parent handle for its own
+         children — so the caller threads it down and the tree builds itself.
+
+         `after:` exists because a class's own rows are added LAZILY, when it
+         is selected, and TVI_LAST would then put them behind every subclass
+         already there — `Object`'s methods below a hundred descendants, which
+         is not an outline of Object. The caller threads each group's handle
+         into the next so they lead, in order."
+        | p c item |
+        c := self controlNamed: self outlinerName.
+        c isNil ifTrue: [ ^0 ].
+        p := self tvScratch.
+        item := p + self tvItemOffset.
+        WinArena i64At: p + (WinApi offsetOf: 'TVINSERTSTRUCTW' field: 'hParent') put: hParent.
+        WinArena i64At: p + (WinApi offsetOf: 'TVINSERTSTRUCTW' field: 'hInsertAfter')
+            put: hAfter.
+        WinArena u32At: item + (WinApi offsetOf: 'TVITEMW' field: 'mask')
+            put: (WinApi constant: 'TVIF_TEXT').
+        WinArena i64At: item + (WinApi offsetOf: 'TVITEMW' field: 'pszText')
+            put: (WinArena nativeUtf16: aString).
+        OutlinerRows := (OutlinerRows isNil ifTrue: [ 0 ] ifFalse: [ OutlinerRows ]) + 1.
+        ^c send: (WinApi constant: 'TVM_INSERTITEMW') wParam: 0 lParam: p
+    ]
+
+    "── Building the outline ─────────────────────────────────────────────"
+
+    WinShell class >> outlineGroupLabel: aLabel <String> count: n <Integer> ^ <String> [
+        "Counts belong on the GROUP rows and nowhere else. `instance methods
+         (42)` answers a question; `Point (17)` invites one — seventeen what?
+
+         Pure, so the rule is testable with no tree in sight."
+        ^aLabel , ' (' , n printString , ')'
+    ]
+
+    WinShell class >> insertOutlineGroup: aLabel <String> names: names <Object> under: h <Integer> after: hAfter <Integer> ^ <Integer> [
+        "Answers the group row's handle so the caller can place the NEXT group
+         after it, or `hAfter` unchanged when the group was empty — a group
+         with nothing in it is omitted rather than shown as a `(0)`, and the
+         chain has to survive that without a gap."
+        | list g |
+        list := names isNil ifTrue: [ #() ] ifFalse: [ names ].
+        list isEmpty ifTrue: [ ^hAfter ].
+        g := self insertOutlineItem: (self outlineGroupLabel: aLabel count: list size)
+            under: h after: hAfter.
+        list do: [ :n | self insertOutlineItem: n asString under: g ].
+        ^g
+    ]
+
+    WinShell class >> insertOutlineNode: node <Array> under: hParent <Integer> [
+        "THE CLASS HIERARCHY ONLY — a class's own detail is filled in when it
+         is selected (`populateSelectedClass`), not now.
+
+         Measured, and it is why: inserting everything eagerly is 3507 rows
+         and ~600ms of synchronous UI-thread work on the first open of this
+         view. That is a visible freeze on a view switch — the exact
+         complaint the author raised about the shell earlier — and the
+         standard tree-view answer is to fill a node when it is asked for.
+         The hierarchy alone is 175 rows.
+
+         The node is remembered by NAME rather than through the item's
+         lParam: class names are unique in the snapshot, the door hands this
+         layer only NMHDR's three fields (so an item pointer never arrives
+         anyway), and a Dictionary lookup is simpler than marshalling a
+         64-bit cookie through TVITEMW and back."
+        | h |
+        (node isKindOf: Array) ifFalse: [ ^self ].
+        node size >= 6 ifFalse: [ ^self ].
+        h := self insertOutlineItem: (node at: 1) asString under: hParent.
+        self nodeByName at: (node at: 1) asString put: node.
+        (node at: 6) do: [ :child | self insertOutlineNode: child under: h ].
+        ^self
+    ]
+
+    WinShell class >> nodeByName ^ <Dictionary> [
+        NodeByName isNil ifTrue: [ NodeByName := Dictionary new ].
+        ^NodeByName
+    ]
+
+    WinShell class >> outlinePopulated ^ <Dictionary> [
+        Populated isNil ifTrue: [ Populated := Dictionary new ].
+        ^Populated
+    ]
+
+    WinShell class >> populateSelectedClass ^ <Boolean> [
+        "Fill in the selected class's own rows — variables and selectors —
+         once, the first time it is chosen. Answers whether it did anything,
+         so a gate can tell `already populated` from `not a class row`.
+
+         Selection rather than EXPANSION, and that is forced rather than
+         preferred: TVN_ITEMEXPANDING says which item only through the
+         NMTREEVIEW struct, and the door deliberately reads NMHDR's three
+         fields and lets the pointer go (WG2's rule — the struct is invalid by
+         the time the drain runs). A selection, by contrast, can simply be
+         ASKED for afterwards with TVM_GETNEXTITEM/TVGN_CARET. Working with
+         the door's guarantee instead of around it."
+        | name node h a |
+        name := self outlinerSelectedText.
+        name isNil ifTrue: [ ^false ].
+        (self outlinePopulated includesKey: name) ifTrue: [ ^false ].
+        node := self nodeByName at: name ifAbsent: [ nil ].
+        node isNil ifTrue: [ ^false ].
+        h := self outlinerSelectedItem.
+        h = 0 ifTrue: [ ^false ].
+        self outlinePopulated at: name put: true.
+        "Threaded, so the four groups lead the class's subclasses in order."
+        a := WinApi constant: 'TVI_FIRST'.
+        a := self insertOutlineGroup: 'instance variables' names: (node at: 2) under: h after: a.
+        a := self insertOutlineGroup: 'class variables' names: (node at: 3) under: h after: a.
+        a := self insertOutlineGroup: 'instance methods' names: (node at: 4) under: h after: a.
+        self insertOutlineGroup: 'class methods' names: (node at: 5) under: h after: a.
+        ^true
+    ]
+
+    WinShell class >> rebuildOutliner ^ <Integer> [
+        "Answers how many rows were inserted, so a gate can tell `it built an
+         empty tree` from `it never built one`.
+
+         ON REFRESH, NEVER ON RECONCILE. One TVM_INSERTITEMW per node over a
+         175-class world is thousands of sends; doing that on a drain pass
+         would be the same mistake WG4 D6 corrected for view switching."
+        | c tree |
+        c := self controlNamed: self outlinerName.
+        c isNil ifTrue: [ ^0 ].
+        tree := self browserTree.
+        tree isNil ifTrue: [ ^0 ].
+        "Redraw off for the build. HONESTLY: this did NOT measurably help —
+         3507 rows took 168ms with it and 180ms without, so the cost is the
+         sends themselves and not the intermediate repaints. It is kept
+         because suppressing 3507 layout recomputations is correct regardless
+         of whether this world is large enough for it to show, and because a
+         bigger image would make it show. It is recorded as `kept on
+         principle, not measured as a win` so nobody later reads it as the
+         reason the build is fast."
+        c send: (WinApi constant: 'WM_SETREDRAW') wParam: 0 lParam: 0.
+        [ c send: (WinApi constant: 'TVM_DELETEITEM') wParam: 0
+              lParam: (WinApi constant: 'TVI_ROOT').
+          OutlinerRows := 0.
+          NodeByName := Dictionary new.
+          Populated := Dictionary new.
+          self insertOutlineNode: tree under: 0 ]
+            ensure: [
+                c send: (WinApi constant: 'WM_SETREDRAW') wParam: 1 lParam: 0.
+                WinApi invalidateRect: c handle rect: 0 erase: 1 ].
+        OutlinerBuilt := true.
+        ^OutlinerRows
+    ]
+
+    WinShell class >> outlinerRows ^ <Integer> [
+        ^OutlinerRows isNil ifTrue: [ 0 ] ifFalse: [ OutlinerRows ] ]
+    WinShell class >> outlinerIsBuilt ^ <Boolean> [ ^OutlinerBuilt == true ]
+
+    WinShell class >> rebuildOutlinerIfBuilt [
+        "Called when a fresh snapshot lands. Rebuilds only if the tree control
+         exists — an Outliner never opened has nothing to rebuild, and paying
+         thousands of TVM_INSERTITEMW for a view nobody is looking at is the
+         cost this guard exists to avoid."
+        (self controlNamed: self outlinerName) ifNotNil: [ :c | self rebuildOutliner ].
+        ^self
+    ]
+
+    WinShell class >> refreshOutliner [
+        "The tree comes from the PRIMARY, across the same seam the Browser
+         uses — so an Outliner opened before the Browser has to ask for it,
+         and one opened after finds it already cached. `refreshBrowser` is the
+         one asking either way; this only renders what arrives."
+        self browserTree
+            ifNil: [ self refreshBrowser ]
+            ifNotNil: [ :t | self rebuildOutliner ].
+        ^self
+    ]
+
+    WinShell class >> layoutOutliner: content <Array> [
+        (self controlNamed: self outlinerName) ifNotNil: [ :c | c moveTo: content ].
+        ^self
+    ]
+
+    "── Selection lands in the Browser ───────────────────────────────────"
+
+    WinShell class >> outlinerSelectedItem ^ <Integer> [
+        "The caret HTREEITEM, or 0. Asked of the control rather than
+         remembered — the tree is the authority on its own selection."
+        | c |
+        c := self controlNamed: self outlinerName.
+        c isNil ifTrue: [ ^0 ].
+        ^c send: (WinApi constant: 'TVM_GETNEXTITEM')
+            wParam: (WinApi constant: 'TVGN_CARET') lParam: 0
+    ]
+
+    WinShell class >> outlinerSelectedText ^ <Object> [
+        "The caret item's text, or nil. Asked of the CONTROL rather than
+         mirrored in a classvar — the tree is the authority on its own
+         selection, exactly as the Browser's list panes are on theirs."
+        | c h item p |
+        c := self controlNamed: self outlinerName.
+        c isNil ifTrue: [ ^nil ].
+        h := self outlinerSelectedItem.
+        h = 0 ifTrue: [ ^nil ].
+        p := self tvScratch.
+        item := p + self tvItemOffset.
+        WinArena u32At: item + (WinApi offsetOf: 'TVITEMW' field: 'mask')
+            put: (WinApi constant: 'TVIF_TEXT').
+        WinArena i64At: item + (WinApi offsetOf: 'TVITEMW' field: 'hItem') put: h.
+        WinArena i64At: item + (WinApi offsetOf: 'TVITEMW' field: 'pszText')
+            put: (WinArena nativeUtf16: (String new: 256)).
+        WinArena u32At: item + (WinApi offsetOf: 'TVITEMW' field: 'cchTextMax') put: 255.
+        c send: (WinApi constant: 'TVM_GETITEMW') wParam: 0 lParam: item.
+        "TRIMMED AT THE NUL. TVM_GETITEMW fills the buffer and terminates it,
+         but says nothing about how much it used — so reading a fixed 255
+         units answers a 255-character String padded with NULs. It PRINTS as
+         `Object`, because NULs are invisible, and compares equal to nothing
+         at all: the dictionary lookup missed every time and the tree simply
+         never populated. The NULs also leaked into the control port's output
+         and made grep call it a binary file, which is what gave it away."
+        ^self trimAtNul: (WinArena stringFromUtf16At:
+            (WinArena i64At: item + (WinApi offsetOf: 'TVITEMW' field: 'pszText'))
+            units: 255)
+    ]
+
+    WinShell class >> trimAtNul: aString <String> ^ <String> [
+        "Everything before the first NUL. Pure, so the rule is testable with
+         no window — and it is the rule for every fixed-size buffer Win32
+         fills, not just this one."
+        | i |
+        i := 1.
+        [ i <= aString size and: [ (aString at: i) value ~= 0 ] ] whileTrue: [ i := i + 1 ].
+        ^aString copyFrom: 1 to: i - 1
+    ]
+]

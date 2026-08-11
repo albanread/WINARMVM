@@ -60,6 +60,10 @@ Object subclass: WinShell [
         BrowserTree := reply at: 2.
         BrowserRefreshes := (BrowserRefreshes isNil ifTrue: [ 0 ] ifFalse: [ BrowserRefreshes ]) + 1.
         self rebuildBrowserPanes.
+        "WG6a: the Outliner renders the SAME tree, so it fills from the same
+         arrival. A no-op until 104 defines it, and a no-op whenever the
+         Outliner has never been opened — there is nothing to rebuild."
+        self rebuildOutlinerIfBuilt.
         ^self
     ]
 

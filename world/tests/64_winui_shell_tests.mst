@@ -60,7 +60,47 @@ TestCase subclass: WinUiShellWg4Tests [
              do: [ self testEmptySelectionEvaluatesEverything ].
         self runTest: #testNonEmptySelectionWins do: [ self testNonEmptySelectionWins ].
         self runTest: #testPrintItInsertsAfterTheSelection
-             do: [ self testPrintItInsertsAfterTheSelection ]
+             do: [ self testPrintItInsertsAfterTheSelection ].
+
+        "WG6a: the Outliner's pure parts — the group label and the composed
+         TVINSERTSTRUCTW size, which is the one struct in this port whose
+         recorded size cannot be used directly."
+        self runTest: #testCountsGoOnGroupRows do: [ self testCountsGoOnGroupRows ].
+        self runTest: #testTvInsertSizeIsComposedNotTaken
+             do: [ self testTvInsertSizeIsComposedNotTaken ]
+    ]
+
+    "── WG6a: the Outliner ───────────────────────────────────────────────"
+
+    testCountsGoOnGroupRows [
+        "`instance methods (42)` answers a question; `Point (17)` invites one
+         — seventeen what? So counts live on the group rows only, and the
+         label builder is where that rule is enforced."
+        self assert: (WinShell outlineGroupLabel: 'instance methods' count: 42)
+                = 'instance methods (42)'
+            description: 'a group row carries its count'.
+        self assert: (WinShell outlineGroupLabel: 'class variables' count: 0)
+                = 'class variables (0)'
+            description: 'and the builder is total, even where the caller will not use it'
+    ]
+
+    testTvInsertSizeIsComposedNotTaken [
+        "THE ONE STRUCT WHOSE RECORDED SIZE IS A TRAP. Win32Metadata records
+         TVINSERTSTRUCTW as 24 bytes because its third member is an anonymous
+         UNION held as a type reference rather than inline — so the recorded
+         size covers the two handles and the union's START. Allocating 24 and
+         letting TVM_INSERTITEMW write into it is a 48-byte heap overwrite.
+
+         Asserted as a RELATIONSHIP rather than as 72, so it stays true if the
+         struct ever grows: the composed size must exceed the recorded one,
+         and must be exactly the union offset plus a whole TVITEMW."
+        | recorded composed |
+        recorded := WinApi sizeOf: 'TVINSERTSTRUCTW'.
+        composed := WinShell tvInsertSize.
+        self assert: composed > recorded
+            description: 'the composed size must exceed the misleading recorded one'.
+        self assert: composed = (WinShell tvItemOffset + (WinApi sizeOf: 'TVITEMW'))
+            description: 'and must be the union offset plus a whole TVITEMW'
     ]
 
     "── WG5a D1: selection-or-everything ─────────────────────────────────"

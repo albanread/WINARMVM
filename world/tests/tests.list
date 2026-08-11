@@ -119,6 +119,11 @@ tier1.mst
 ../95_winui_focus.mst
 ../96_winui_splitter.mst
 ../97_winui_workspace.mst
+# WINARM (WG6a): the Outliner. 64 reaches its two PURE parts — the group
+# label and the composed TVINSERTSTRUCTW size — so it loads with the rest of
+# the layer 64 needs. It compiles against 91's classes only; everything it
+# takes from 98 (the cached tree) it reaches by message send.
+../104_winui_outliner.mst
 64_winui_shell_tests.mst
 # WINARM (WG5b): the Browser and the host service. 98 is loaded here for the
 # same compile-time reason the rest are - 65 names WinShell methods it

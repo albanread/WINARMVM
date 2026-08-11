@@ -678,6 +678,14 @@ Object subclass: WinShell [
          member of the storm class that reaches this layer at all. Recorded but
          not treated as news, so `lastMeaningfulNotify` answers the thing a test
          (or a user) actually asked about rather than whatever was drawn last."
+        "WG6a: the Outliner fills a class's own rows when it is selected.
+         TVN_SELCHANGEDW arrives as 4294966845 — the UNSIGNED form of -451,
+         which is how every tree-view notification code arrives. Comparing it
+         against a signed constant would silently never match and the tree
+         would simply never populate, with nothing to see."
+        (aCode = (WinApi constant: 'TVN_SELCHANGEDW')
+            and: [ c name == self outlinerName ])
+                ifTrue: [ self populateSelectedClass ].
         aCode = (WinApi constant: 'NM_CUSTOMDRAW') ifFalse: [
             LastMeaningfulNotify := Array with: aHandle with: anId with: aCode ].
         ^self

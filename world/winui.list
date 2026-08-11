@@ -77,3 +77,7 @@
 # multiline control). A STATIC raised above the pane, so the hint is never
 # part of the document and so can never be evaluated, saved, or lost.
 103_winui_ghost.mst
+# WINARM (WG6a): the Outliner — one SysTreeView32 over the PRIMARY's own
+# browseSnapshot, which already carries the whole Strongtalk outline. No host
+# service and no new seam traffic: it renders a tree 98 already caches.
+104_winui_outliner.mst

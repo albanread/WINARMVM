@@ -1444,6 +1444,24 @@ gate-wg5b:
     AFTER=$(grep -E '^WG5C passes-after-idle ' /tmp/wg5b_gate.txt | awk '{print $NF}')
     echo "colour: $BEFORE passes before idle, $AFTER after"
     test "$AFTER" -gt "$BEFORE"
+    # WG6a: the Outliner rendered the primary's own tree, in a real window.
+    grep -q 'WG6A active-view #outliner' /tmp/wg5b_gate.txt
+    ROWS=$(grep -E '^WG6A rows ' /tmp/wg5b_gate.txt | awk '{print $NF}')
+    echo "outliner: $ROWS class rows over the primary's hierarchy"
+    # The HIERARCHY only — a class's own rows are added when it is selected.
+    # Eager insertion was 3507 rows and ~600ms of synchronous UI work on the
+    # first open, which timed out three control-port calls in a row and would
+    # have been a visible freeze on a view switch. A relationship, not a
+    # frozen integer: the world grows.
+    test "$ROWS" -gt 100
+    test "$ROWS" -lt 1000
+    grep -q 'WG6A built true' /tmp/wg5b_gate.txt
+    # TVINSERTSTRUCTW's recorded size is 24 and would be a 48-byte heap
+    # overwrite; the composed one must be larger. Asserted as a relationship.
+    REC=$(grep -E '^WG6A tv-recorded ' /tmp/wg5b_gate.txt | awk '{print $NF}')
+    COMP=$(grep -E '^WG6A tv-composed ' /tmp/wg5b_gate.txt | awk '{print $NF}')
+    echo "TVINSERTSTRUCTW: recorded $REC, composed $COMP"
+    test "$COMP" -gt "$REC"
     # And the channel resolves HERE, in the process that owns the window.
     grep -q 'WG5B host-available true' /tmp/wg5b_gate.txt
     grep -q 'WG5B host-ping 22343' /tmp/wg5b_gate.txt

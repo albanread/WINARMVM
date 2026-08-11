@@ -1596,6 +1596,11 @@ Object subclass: WinShell [
     "WG5c D5's ghost overlay; 103 overrides."
     WinShell class >> serviceGhost [ ^false ]
     WinShell class >> layoutGhost: content [ ^self ]
+    "WG6a's Outliner tree; 104 overrides."
+    WinShell class >> layoutOutliner: content [ ^self ]
+    WinShell class >> outlinerName [ ^#outlinerTree ]
+    WinShell class >> rebuildOutlinerIfBuilt [ ^self ]
+    WinShell class >> populateSelectedClass [ ^false ]
     WinShell class >> ownsControlId: anId <Integer> ^ <Boolean> [ ^false ]
     WinShell class >> serviceCommand: anId <Integer> code: aCode <Integer> from: aHandle <Integer> [ ^self ]
     WinShell class >> serviceNotifyFrom: aHandle <Integer> id: anId <Integer> code: aCode <Integer> [ ^self ]

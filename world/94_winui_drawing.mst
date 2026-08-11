@@ -189,6 +189,7 @@ Object subclass: WinShell [
         aSymbol == #metrics    ifTrue: [ ^16rE9D9 ].  "Diagnostic"
         aSymbol == #workspace  ifTrue: [ ^16rE70F ].  "Edit"
         aSymbol == #browser    ifTrue: [ ^16rE8A4 ].  "List"
+        aSymbol == #outliner   ifTrue: [ ^16rE9D2 ].  "Org / hierarchy"
         ^16rE897                                       "Help"
     ]
 
@@ -250,7 +251,7 @@ Object subclass: WinShell [
 
     WinShell class >> drawBarItem: c <WinControl> state: aState <Integer> dc: hdc <Integer>
                        x: x <Integer> y: y <Integer> w: w <Integer> h: h <Integer> ^ <Integer> [
-        | rect isActive isPressed glyph label brush old |
+        | rect isActive isPressed glyph label brush old showLabel |
         DrawStep := 1.
         rect := self drawRectScratch.
         DrawStep := 2.
@@ -288,7 +289,18 @@ Object subclass: WinShell [
                 DrawStep := 10.
                 old := WinApi selectObject: hdc object: self glyphFont.
                 DrawStep := 11.
-                self setRect: rect x: x y: y + (2 * h // 100) w: w h: h * 55 // 100.
+                "Does the label fit? Measured with the LABEL font, which has to
+                 be selected for the measurement to mean anything — so it goes
+                 in first, the answer is kept, and the glyph font replaces it
+                 below. The glyph then sits in the top 55% when a label will
+                 follow it and fills the cell when none will, so a label-less
+                 cell has no icon floating above empty space."
+                old := WinApi selectObject: hdc object: self labelFont.
+                showLabel := self allViewLabelsFitIn: w dc: hdc.
+                WinApi selectObject: hdc object: old.
+                showLabel
+                    ifTrue: [ self setRect: rect x: x y: y + (2 * h // 100) w: w h: h * 55 // 100 ]
+                    ifFalse: [ self setRect: rect x: x y: y w: w h: h ].
                 DrawStep := 12.
                 WinApi drawText: hdc
                     text: glyph count: 0 - 1
@@ -296,14 +308,26 @@ Object subclass: WinShell [
                     format: ((WinApi constant: 'DT_CENTER')
                         bitOr: ((WinApi constant: 'DT_BOTTOM') bitOr: (WinApi constant: 'DT_SINGLELINE'))).
                 WinApi selectObject: hdc object: old.
-                old := WinApi selectObject: hdc object: self labelFont.
-                self setRect: rect x: x y: y + (h * 55 // 100) w: w h: h * 45 // 100.
-                WinApi drawText: hdc
-                    text: (WinArena scratchUtf16: label) count: 0 - 1
-                    rect: rect
-                    format: ((WinApi constant: 'DT_CENTER')
-                        bitOr: ((WinApi constant: 'DT_TOP') bitOr: (WinApi constant: 'DT_SINGLELINE'))).
-                WinApi selectObject: hdc object: old ]
+                "ICON-ONLY WHEN THE CELL IS NARROW. WG6a's Outliner made the
+                 bar six views wide, the adaptive cell width fell to 48px, and
+                 `Workspace` came out as `Vorkspac` — clipped at BOTH ends,
+                 which does not read as a tight fit, it reads as broken.
+
+                 Dropping the label below a threshold is the standard command
+                 bar answer (it is what the ribbon does) and it is better than
+                 an ellipsis here: a row of glyphs is legible and deliberate,
+                 where `Works…` / `Trans…` / `Outli…` is neither. The glyph
+                 then centres in the whole cell rather than sitting above a
+                 gap."
+                showLabel ifTrue: [
+                    old := WinApi selectObject: hdc object: self labelFont.
+                    self setRect: rect x: x y: y + (h * 55 // 100) w: w h: h * 45 // 100.
+                    WinApi drawText: hdc
+                        text: (WinArena scratchUtf16: label) count: 0 - 1
+                        rect: rect
+                        format: ((WinApi constant: 'DT_CENTER')
+                            bitOr: ((WinApi constant: 'DT_TOP') bitOr: (WinApi constant: 'DT_SINGLELINE'))).
+                    WinApi selectObject: hdc object: old ] ]
             ifFalse: [
                 "A verb button — Do It / Print It: one centred label, greyed when
                  its own control is disabled, which is D4's contract showing
@@ -373,6 +397,45 @@ Object subclass: WinShell [
                  so erasing to the background first is a flash with no purpose."
                 WinApi invalidateRect: c handle rect: 0 erase: 0 ] ].
         ^self
+    ]
+
+    WinShell class >> allViewLabelsFitIn: w <Integer> dc: hdc <Integer> ^ <Boolean> [
+        "ALL the view labels, or none of them. Measuring each cell against its
+         own label was exact and looked arbitrary — `Browser`, `Outliner` and
+         `Metrics` captioned while `Workspace`, `Welcome` and `Transcript`
+         showed bare glyphs, which reads as three cells having gone wrong
+         rather than as a deliberate compact mode.
+
+         Every view cell shares one width, so asking whether the WIDEST label
+         fits gives every cell the same answer and the strip stays coherent.
+         The verbs are excluded: they are short, they always fit, and they are
+         a different kind of cell."
+        ^self views allSatisfy: [ :v | self label: (v at: 2) fitsIn: w dc: hdc ]
+    ]
+
+    WinShell class >> label: aLabel <String> fitsIn: w <Integer> dc: hdc <Integer> ^ <Boolean> [
+        "DT_CALCRECT measures the string in the CURRENT font without drawing
+         it, so this is the real width of this label in this cell rather than
+         a threshold someone guessed.
+
+         Guessing was the first attempt and it was wrong in both directions:
+         68px hid labels that fit at 59, and 48 was where `Workspace` came out
+         as `Vorkspac`. A per-cell measurement has no threshold to be wrong —
+         the label is drawn exactly when it fits, whatever the font, the DPI
+         or the number of views turns out to be.
+
+         The caller has already selected the label font into `hdc`, which is
+         what makes measuring here free: no DC to acquire, no font to
+         re-select, no cache to invalidate when the DPI changes."
+        | rect |
+        rect := self drawRectScratch.
+        self setRect: rect x: 0 y: 0 w: 4096 h: 64.
+        WinApi drawText: hdc
+            text: (WinArena scratchUtf16: aLabel) count: 0 - 1
+            rect: rect
+            format: ((WinApi constant: 'DT_CALCRECT')
+                bitOr: ((WinApi constant: 'DT_LEFT') bitOr: (WinApi constant: 'DT_SINGLELINE'))).
+        ^((WinArena rectAt: rect) at: 3) <= w
     ]
 
     WinShell class >> isBarControl: aName <Symbol> ^ <Boolean> [
