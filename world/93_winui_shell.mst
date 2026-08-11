@@ -184,7 +184,7 @@ Object subclass: WinApi [
 Object subclass: WinShell [
     <classVars: Wg4Enabled Views ActiveView ViewSwitchCount ViewBuildCount
                 TranscriptCollapsed TranscriptLines MetricsText MetricsUpdates
-                CommandsEnabled AccentColor LabelFont GlyphFont DrawRect DrawCalls DrawMisses DrawError>
+                CommandsEnabled AccentColor LabelFont GlyphFont DrawRect DrawCalls DrawMisses DrawError DrawLast DrawIds DrawResult DrawResultClass DrawStep GlyphBuf>
 
     WinShell class >> wg4Enabled ^ <Boolean> [
         "`MACVM_WINUI_WG4=off` restores WG3's window exactly — the same shape

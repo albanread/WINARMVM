@@ -178,13 +178,28 @@ Object subclass: WinShell [
      table reads as a table — and so a view that arrives without one gets a
      visible placeholder rather than a blank cell."
 
-    WinShell class >> glyphFor: aSymbol <Symbol> ^ <String> [
-        aSymbol == #welcome    ifTrue: [ ^String with: (Character value: 16rE80F) ].  "Home"
-        aSymbol == #transcript ifTrue: [ ^String with: (Character value: 16rE9D5) ].  "Script"
-        aSymbol == #metrics    ifTrue: [ ^String with: (Character value: 16rE9D9) ].  "Diagnostic"
-        aSymbol == #workspace  ifTrue: [ ^String with: (Character value: 16rE70F) ].  "Edit"
-        aSymbol == #browser    ifTrue: [ ^String with: (Character value: 16rE8A4) ].  "List"
-        ^String with: (Character value: 16rE897)                                      "Help"
+    WinShell class >> glyphCodeFor: aSymbol <Symbol> ^ <Integer> [
+        "A Segoe Fluent Icons code point, as a NUMBER. Deliberately not a
+         String: these live in the Private Use Area (U+E700..U+F8FF), and
+         routing one through `String with: (Character value: ...)` and a UTF-16
+         conversion is two chances to lose it — measured, and it lost it at the
+         first, unwinding the paint handler with nothing drawn."
+        aSymbol == #welcome    ifTrue: [ ^16rE80F ].  "Home"
+        aSymbol == #transcript ifTrue: [ ^16rE9D5 ].  "Script"
+        aSymbol == #metrics    ifTrue: [ ^16rE9D9 ].  "Diagnostic"
+        aSymbol == #workspace  ifTrue: [ ^16rE70F ].  "Edit"
+        aSymbol == #browser    ifTrue: [ ^16rE8A4 ].  "List"
+        ^16rE897                                       "Help"
+    ]
+
+    WinShell class >> glyphBufferFor: aSymbol <Symbol> ^ <Integer> [
+        "The glyph as a NUL-terminated UTF-16 string, written straight into the
+         arena. One 32-bit store does the whole job — the code unit in the low
+         half, the terminator in the high — which is what DrawTextW wants and
+         skips every conversion between here and there."
+        GlyphBuf isNil ifTrue: [ GlyphBuf := WinArena alloc: 8 ].
+        WinArena u32At: GlyphBuf put: (self glyphCodeFor: aSymbol).
+        ^GlyphBuf
     ]
 
     "── the handler the door calls ───────────────────────────────────────"
@@ -200,24 +215,39 @@ Object subclass: WinShell [
          passing the pointer through."
         | c |
         DrawCalls := (DrawCalls isNil ifTrue: [ 0 ] ifFalse: [ DrawCalls ]) + 1.
+        "FIVE, not six: `Array class>>with:` stops at five arguments, and the
+         six-argument send raised a DNU that unwound this handler before it
+         drew anything — instrumentation breaking the thing it was measuring."
+        DrawLast := Array with: anId with: x with: y with: w with: h.
+        DrawIds isNil ifTrue: [ DrawIds := OrderedCollection new ].
+        (DrawIds includes: anId) ifFalse: [ DrawIds add: anId ].
         c := self controlWithId: anId.
         c isNil ifTrue: [ DrawMisses := (DrawMisses isNil ifTrue: [ 0 ] ifFalse: [ DrawMisses ]) + 1. ^0 ].
         "A raise inside a PAINT is invisible by nature — the cell simply stays
          blank and nothing says why. Captured rather than propagated, because
          an unhandled error here would also unwind through the door."
-        ^[ self drawBarItem: c state: aState dc: hdc x: x y: y w: w h: h ]
+        DrawResult := [ self drawBarItem: c state: aState dc: hdc x: x y: y w: w h: h ]
             on: Error
-            do: [ :e | DrawError := e messageText. 0 ]
+            do: [ :e | DrawError := e messageText. 0 ].
+        DrawResultClass := DrawResult class name.
+        ^DrawResult
     ]
 
     WinShell class >> drawCalls ^ <Integer> [ ^DrawCalls isNil ifTrue: [ 0 ] ifFalse: [ DrawCalls ] ]
+    WinShell class >> drawLast ^ <Object> [ ^DrawLast ]
+    WinShell class >> drawResult ^ <Object> [ ^DrawResult ]
+    WinShell class >> drawStep ^ <Object> [ ^DrawStep ]
+    WinShell class >> drawResultClass ^ <Object> [ ^DrawResultClass ]
+    WinShell class >> drawIds ^ <Object> [ ^DrawIds isNil ifTrue: [ OrderedCollection new ] ifFalse: [ DrawIds ] ]
     WinShell class >> drawMisses ^ <Integer> [ ^DrawMisses isNil ifTrue: [ 0 ] ifFalse: [ DrawMisses ] ]
     WinShell class >> drawError ^ <String> [ ^DrawError isNil ifTrue: [ '' ] ifFalse: [ DrawError ] ]
 
     WinShell class >> drawBarItem: c <WinControl> state: aState <Integer> dc: hdc <Integer>
                        x: x <Integer> y: y <Integer> w: w <Integer> h: h <Integer> ^ <Integer> [
         | rect isActive isPressed glyph label brush old |
+        DrawStep := 1.
         rect := self drawRectScratch.
+        DrawStep := 2.
         isPressed := (aState bitAnd: (WinApi constant: 'ODS_SELECTED')) ~= 0.
         isActive := self activeViewButtonName == c name.
 
@@ -225,28 +255,37 @@ Object subclass: WinShell [
             active one gets nothing but its underline, because the underline IS
             the selection in this idiom."
         self setRect: rect x: x y: y w: w h: h.
+        DrawStep := 3.
         brush := WinApi createSolidBrush: (isPressed
             ifTrue: [ self systemPrefersDark ifTrue: [ 16r003A3A3A ] ifFalse: [ 16r00E8E8E8 ] ]
             ifFalse: [ self backgroundColorRef ]).
+        DrawStep := 4.
         WinApi fillRect: hdc rect: rect brush: brush.
+        DrawStep := 5.
         WinApi deleteObject: brush.
-
+        DrawStep := 6.
         WinApi setBkMode: hdc mode: (WinApi constant: 'TRANSPARENT').
+        DrawStep := 7.
 
         "2. The glyph, then the label beneath it — the two-row cell §2.1 asks
             for, and the reason a view-bar button is 34 DIPs tall rather than a
             push button's 23."
-        glyph := self glyphFor: (self viewSymbolForButton: c name).
+        glyph := self glyphBufferFor: (self viewSymbolForButton: c name).
+        DrawStep := 8.
         label := c barLabel.
+        DrawStep := 9.
         (self isViewButton: c name)
             ifTrue: [
                 WinApi setTextColor: hdc color: (isActive
                     ifTrue: [ self barTextColorRef ]
                     ifFalse: [ self barDimTextColorRef ]).
+                DrawStep := 10.
                 old := WinApi selectObject: hdc object: self glyphFont.
+                DrawStep := 11.
                 self setRect: rect x: x y: y + (2 * h // 100) w: w h: h * 55 // 100.
+                DrawStep := 12.
                 WinApi drawText: hdc
-                    text: (WinArena scratchUtf16: glyph) count: 0 - 1
+                    text: glyph count: 0 - 1
                     rect: rect
                     format: ((WinApi constant: 'DT_CENTER')
                         bitOr: ((WinApi constant: 'DT_BOTTOM') bitOr: (WinApi constant: 'DT_SINGLELINE'))).
