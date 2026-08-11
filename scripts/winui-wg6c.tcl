@@ -210,9 +210,64 @@ gui drain now
 puts "WG6C paint-calls [gui eval {WinShell paintCalls}]"
 puts "WG6C paint-error [gui eval {WinShell paintError}]"
 
-# ── a picture, for the human half of the gate ───────────────────────────
-puts "WG6C snap [gui snap C:/projects/WINARM/target/winui-wg6c.png]"
+# ── WG6c-3: the Editor VIEW ─────────────────────────────────────────────
+# Everything above drove the pane directly, because until now nothing owned
+# it. This switches to the real view through a real WM_COMMAND on its bar
+# cell, exactly as a click does, and then round-trips a class through it.
+#
+# THE IMAGE IS A SCRATCH ONE, set by the recipe through MACVM_IMAGE_PATH. A
+# gate that wrote the developer's own image as a side effect of taking a
+# screenshot would be a genuinely nasty thing to leave behind — gate-wg5b's
+# own words — and this is the first winui gate whose WINDOW can write at all.
+gui send "0 0x111 [gui eval {(WinShell controlNamed: (WinShell viewButtonNameFor: #editor)) id}] 0"
+gui drain now
+puts "WG6C view-active [gui eval {WinShell activeView}]"
+puts "WG6C view-picker-exists [gui eval {(WinShell controlNamed: #editorClasses) notNil}]"
+puts "WG6C view-save-exists [gui eval {(WinShell controlNamed: #editorSave) notNil}]"
+# THE PANE IS THE VIEW'S NOW. Positioned by the view's own layout rather than
+# by this script, and to the RIGHT of the picker — a pane laid out over the
+# picker would hide it completely and look like a view with no class list.
+puts "WG6C pane-right-of-picker [gui eval {((WinShell controlNamed: WinShell editorPaneName) screenRect at: 1) > ((WinShell controlNamed: #editorClasses) screenRect at: 1)}]"
 
-# Close cleanly, so the gate can assert the exit code rather than leaving a
-# window behind for the next run's build to trip over.
-gui quit
+# A CLASS, ALL THE WAY ROUND: write one through the view's own Save cell,
+# then ask the view to open it back. Both halves go through WG6c-3's host
+# verbs and `image_store::flows`, which is the point — the same write path the
+# web GUI and the Mac use, not a third implementation of it.
+gui doit {WinShell openEditorOn: 'Object subclass: GateDemo [ run [ ^41 ] ]'.}
+gui send "0 0x111 [gui eval {(WinShell controlNamed: #editorSave) id}] 0"
+gui drain now
+puts "WG6C save-message [gui eval {WinShell editorSaveMessage}]"
+puts "WG6C save-count [gui eval {WinShell editorSaveCount}]"
+
+gui doit {WinShell openEditorOnClassNamed: 'GateDemo'.}
+gui drain now
+puts "WG6C reopened-class [gui eval {WinShell editorViewClass}]"
+puts "WG6C reopened-has-method [gui eval {(WinShell editorText indexOf: $4) > 0}]"
+
+# AND THE PARSE GATE REFUSES, without changing anything. `flows` answers its
+# own summary rather than an error — the guest must not invent a status the
+# other two callers of `persist_editor_class` do not report — so the WORDS are
+# the signal here and the recipe checks the image separately.
+gui doit {WinShell openEditorOn: 'this is not a class definition at all'.}
+gui send "0 0x111 [gui eval {(WinShell controlNamed: #editorSave) id}] 0"
+gui drain now
+puts "WG6C refusal-message [gui eval {WinShell editorSaveMessage}]"
+# The class written above must still be exactly as it was — a refusal that had
+# already half-written something is worse than no gate at all, because the
+# user has been told it did not happen.
+gui doit {WinShell openEditorOnClassNamed: 'GateDemo'.}
+gui drain now
+puts "WG6C survived-the-refusal [gui eval {(WinShell editorText indexOf: $4) > 0}]"
+
+# Back to the buffer with a selection in it, for the picture.
+gui doit {WinShell openEditorOn: ('Object subclass: Demo [', (String with: Character nl), '    "the comment"', (String with: Character nl), '    run [ ^self foo: 3 + 4 ]', (String with: Character nl), ']').}
+gui doit {WinShell editorCaretAt: 1.}
+gui doit {WinShell editorSelectAll.}
+gui drain now
+
+# Part 1 ends here. The class picker fills from a REPLY — `refreshBrowser`
+# ships a #uiReq to the primary and the tree arrives on a later drain pass —
+# and THE WAIT IS NOT HERE, for the reason winui-wg5b.tcl records against
+# itself: `gui sleep` blocks the APP, not just this driver, so waiting inside
+# the script starves the very drain pass it is waiting for. The recipe
+# disconnects, waits in bash, and runs scripts/winui-wg6c-2.tcl.

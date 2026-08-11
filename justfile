@@ -1229,10 +1229,17 @@ gate-wg4: gate-wg3
     grep -q 'WG4 enabled true' /tmp/wg4_gate.txt
 
     # ── LAZY BUILD, which is the WG4 row's own word ───────────────────────
-    # Three views registered and exactly ONE built at open. A shell that built
-    # every view up front would answer 3 here and would pay every future
+    # Views registered, and exactly ONE built at open. A shell that built every
+    # view up front would answer the full count here and would pay every future
     # view's handles at startup — the difference this assertion exists for.
-    grep -q 'WG4 views 3' /tmp/wg4_gate.txt
+    #
+    # A RELATIONSHIP, not a frozen integer (WG2 Δ 14): this read `WG4 views 3`
+    # and the shell has had seven since WG6a, so it had been failing silently
+    # for three sprints. The claim was never "there are three views" — it is
+    # "registering a view does not build it", and that is what is asserted now.
+    VIEWS=$(grep -E '^WG4 views ' /tmp/wg4_gate.txt | awk '{print $NF}')
+    echo "shell: $VIEWS views registered, 1 built"
+    test "$VIEWS" -ge 3
     grep -q 'WG4 built-at-open 1' /tmp/wg4_gate.txt
     grep -q "WG4 active-at-open #welcome" /tmp/wg4_gate.txt
 
@@ -1537,14 +1544,32 @@ gate-wg6c:
     grep -q 'testSelectionRectsCoverExactlyTheSelectedLines' /tmp/wg6c_world.txt
 
     # 2: THE WINDOW.
+    #
+    # WG6c-3 makes this the first winui gate whose WINDOW can WRITE — the
+    # Editor's Save cell reaches `image_store::flows` through winui_host.dll —
+    # so it runs against a SCRATCH image and proves the developer's own is
+    # untouched, exactly as gate-wg5b does for its end-to-end leg. A gate that
+    # wrote `world/image.sqlite3` as a side effect of taking a screenshot
+    # would be a genuinely nasty thing to leave behind.
+    OWN_IMAGE_SUM=""
+    if [ -f world/image.sqlite3 ]; then OWN_IMAGE_SUM="$(md5sum < world/image.sqlite3)"; fi
+    IMG=/tmp/wg6c_gate.sqlite3
+    rm -f "$IMG"
     cargo build --quiet -p win_gui
+    cargo build --quiet -p winui_host
     rm -f /tmp/wg6c_exit /tmp/wg6c_app.txt target/winui-wg6c.png
-    ( MACVM_WINUI_CTL=7673 ./target/debug/macvm-winui.exe > /tmp/wg6c_app.txt 2>&1; \
+    ( MACVM_WINUI_CTL=7673 MACVM_IMAGE_PATH="$IMG" ./target/debug/macvm-winui.exe > /tmp/wg6c_app.txt 2>&1; \
         echo $? > /tmp/wg6c_exit ) &
     for i in $(seq 1 60); do
         (exec 3<>/dev/tcp/127.0.0.1/7673) 2>/dev/null && break || sleep 0.5
     done
     ./target/debug/macvm rusttcl scripts/winui-wg6c.tcl | tee /tmp/wg6c_gate.txt
+    # The picker fills from a REPLY across the seam, and the wait has to happen
+    # with NOTHING attached: `gui sleep` blocks the app itself, so waiting
+    # inside the script starves the drain pass it is waiting for. Same shape,
+    # same reason, as gate-wg5b's own split.
+    sleep 15
+    ./target/debug/macvm rusttcl scripts/winui-wg6c-2.tcl | tee -a /tmp/wg6c_gate.txt
     cat /tmp/wg6c_app.txt
 
     grep -q 'WG6C open true' /tmp/wg6c_gate.txt
@@ -1641,7 +1666,71 @@ gate-wg6c:
     test "$PC" -gt 0
     grep -q "WG6C paint-error ''" /tmp/wg6c_gate.txt
 
+    # ── WG6c-3: the Editor VIEW ─────────────────────────────────────────
+    # Reached by a real WM_COMMAND on its bar cell, like a click.
+    grep -q 'WG6C view-active #editor' /tmp/wg6c_gate.txt
+    grep -q 'WG6C view-picker-exists true' /tmp/wg6c_gate.txt
+    grep -q 'WG6C view-save-exists true' /tmp/wg6c_gate.txt
+    # The pane is laid out by the VIEW now, to the right of the picker. A pane
+    # covering the picker would look like a view with no class list at all.
+    grep -q 'WG6C pane-right-of-picker true' /tmp/wg6c_gate.txt
+
+    # A CLASS ALL THE WAY ROUND, through the view's own Save cell and back
+    # through its own open — both over `flows`, which is the whole point.
+    grep -q 'WG6C save-message.*saved GateDemo' /tmp/wg6c_gate.txt
+    grep -q 'WG6C reopened-class .GateDemo.' /tmp/wg6c_gate.txt
+    grep -q 'WG6C reopened-has-method true' /tmp/wg6c_gate.txt
+
+    # AND THE PARSE GATE REFUSES WITHOUT CHANGING ANYTHING — the sprint's own
+    # phrase. `flows` reports its refusal as a summary rather than an error,
+    # deliberately (the guest must not invent a status the other two callers do
+    # not report), so the words are asserted here and the survival of the class
+    # written a moment ago is asserted separately. A refusal that had already
+    # half-written something is worse than no gate at all.
+    grep -q 'WG6C refusal-message.*nothing to save' /tmp/wg6c_gate.txt
+    grep -q 'WG6C survived-the-refusal true' /tmp/wg6c_gate.txt
+
+    # THE CLASS PICKER FILLED, from the primary's own hierarchy and across the
+    # seam — the half a screenshot taken too early shows as an empty box.
+    # Counts as a RELATIONSHIP (WG2 Δ 14): the world grows, so what is asserted
+    # is that the picker holds exactly what the snapshot holds. A list that
+    # filled with a different number is the `listSet:items:` bug WG6b hit, where
+    # the view showed nothing while the transcript reported five hits.
+    CLASSES=$(grep -E '^WG6C2 browser-classes ' /tmp/wg6c_gate.txt | awk '{print $NF}')
+    ROWS=$(grep -E '^WG6C2 picker-rows ' /tmp/wg6c_gate.txt | awk '{print $NF}')
+    echo "editor: $ROWS picker rows over the primary's $CLASSES classes"
+    test "$CLASSES" -ge 100
+    test "$ROWS" = "$CLASSES"
+    grep -q 'WG6C2 still-editor #editor' /tmp/wg6c_gate.txt
+    grep -q "WG6C2 paint-error ''" /tmp/wg6c_gate.txt
+
+    # A PARTIAL PAINT really happened. `refreshEditorPane` invalidates with
+    # NULL, so rcPaint always arrived at the client origin and the document —
+    # drawn at `rcPaint.left + column * charW` — always landed correctly. Drag
+    # another window across the pane and rcPaint is a SUB-rectangle, at which
+    # point the whole document was redrawn displaced by its origin, over the
+    # copy already there. Every gate here passed and every screenshot looked
+    # right; it was found by looking at the running app.
+    #
+    # The assertion is that the awkward shape was EXERCISED — a paint arrived
+    # with a non-zero origin — because a gate that only ever provokes the easy
+    # one is what let this ship in the first place.
+    grep -q 'WG6C2 partial-origin-nonzero true' /tmp/wg6c_gate.txt
+    grep -q "WG6C2 partial-paint-error ''" /tmp/wg6c_gate.txt
+
     test -s target/winui-wg6c.png
     for i in $(seq 1 60); do [ -f /tmp/wg6c_exit ] && break || sleep 0.5; done
     test "$(cat /tmp/wg6c_exit)" = "0"
+
+    # The scratch image was really written — otherwise every assertion above
+    # could be describing a Save that never reached the disk.
+    test -s "$IMG"
+    rm -f "$IMG"
+    # And the developer's OWN image is untouched. Not "does not exist": it
+    # legitimately does once `import_world` has been run, and the GUI needs it
+    # to show source at all. What must hold is that a GATE never writes it.
+    if [ -f world/image.sqlite3 ]; then
+        test "$(md5sum < world/image.sqlite3)" = "$OWN_IMAGE_SUM"
+        echo "own image: unchanged"
+    fi
     echo "gate-wg6c: PASS"

@@ -98,3 +98,8 @@
 # WINARM (WG6c-2b): the clipboard. Loads after 107, which dispatches Ctrl-C/X/V
 # to it; 91 declares the three as no-ops so 107 is complete without this file.
 108_winui_editorclip.mst
+# WINARM (WG6c-3): the Editor VIEW — a class picker over the primary's live
+# hierarchy, whole-class source from the image, and Save through the shared
+# `flows::persist_editor_class`. Loads after 106/107/108 (it positions and
+# shows their pane) and after 99, whose host verbs it calls.
+109_winui_editorview.mst

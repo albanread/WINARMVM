@@ -64,6 +64,10 @@ Object subclass: WinShell [
          arrival. A no-op until 104 defines it, and a no-op whenever the
          Outliner has never been opened — there is nothing to rebuild."
         self rebuildOutlinerIfBuilt.
+        "WG6c-3: and the Editor's class picker, from the SAME snapshot. Three
+         views, one traversal of the image — which is the reason this arrival
+         is the fan-out point rather than each view asking for its own."
+        self rebuildEditorClassesIfBuilt.
         ^self
     ]
 

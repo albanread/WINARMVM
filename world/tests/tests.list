@@ -159,5 +159,8 @@ tier1.mst
 # WG6c-2b: the clipboard. 67 reaches its two PURE parts - the verbs' refusal
 # to act on an empty selection - and the Win32 half is inert until called.
 ../108_winui_editorclip.mst
+# WG6c-3: the Editor view. 67 reaches its PURE part - the pane rects, which
+# are arithmetic over the content rect like every other layout here.
+../109_winui_editorview.mst
 67_winui_editor_tests.mst
 99_run_all.mst

@@ -38,7 +38,9 @@ TestCase subclass: WinUiEditorWg6cTests [
         self runTest: #testPasteInsertsTextNotKeyNames
              do: [ self testPasteInsertsTextNotKeyNames ].
         self runTest: #testCopyingNothingLeavesTheClipboardAlone
-             do: [ self testCopyingNothingLeavesTheClipboardAlone ]
+             do: [ self testCopyingNothingLeavesTheClipboardAlone ].
+        self runTest: #testTheEditorViewTilesItsContentRect
+             do: [ self testTheEditorViewTilesItsContentRect ]
     ]
 
     threeLines [ ^'one', (String with: Character nl), 'two', (String with: Character nl), 'three' ]
@@ -268,5 +270,39 @@ TestCase subclass: WinUiEditorWg6cTests [
             description: 'and so does cut'.
         self assert: WinShell editorText = self threeLines
             description: 'a cut with no selection changed nothing'
+    ]
+
+    "── WG6c-3: the view's own arithmetic ────────────────────────────────"
+
+    testTheEditorViewTilesItsContentRect [
+        "Three panes over one content rect, and the claim is that they stay
+         INSIDE it and do not overlap the picker. A layout that ran off the
+         right-hand edge would put the Save cell outside the window, where it
+         is not merely ugly — it is unclickable, and nothing says why."
+        | r classes save pane |
+        r := WinShell editorViewRects: (Array with: 10 with: 20 with: 900 with: 400).
+        classes := r at: #editorClasses.
+        save := r at: #editorSave.
+        pane := r at: WinShell editorPaneName.
+        self assert: (classes at: 1) = 10
+            description: 'the picker starts at the content rect''s own left edge'.
+        self assert: (classes at: 4) = 400
+            description: 'and is full height'.
+        self assert: (pane at: 1) > ((classes at: 1) + (classes at: 3))
+            description: 'the buffer starts to the RIGHT of the picker, but at '
+                , (pane at: 1) printString.
+        self assert: (pane at: 1) + (pane at: 3) <= (10 + 900)
+            description: 'and does not run off the right-hand edge'.
+        self assert: (save at: 1) + (save at: 2) > 0
+            description: 'the Save cell has a position'.
+        self assert: (save at: 1) + (save at: 3) <= (10 + 900)
+            description: 'and is INSIDE the window, not past its right edge'.
+        "A narrow window must not give the picker the whole rect and the
+         buffer a negative width — `min:` on the column is what stops that,
+         and a negative width is a control Win32 simply does not draw."
+        r := WinShell editorViewRects: (Array with: 0 with: 0 with: 200 with: 100).
+        pane := r at: WinShell editorPaneName.
+        self assert: (pane at: 3) >= 0
+            description: 'a narrow window still gives the buffer a non-negative width'
     ]
 ]

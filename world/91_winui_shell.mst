@@ -1639,6 +1639,16 @@ Object subclass: WinShell [
     WinShell class >> editorCopy [ ^#defwindowproc ]
     WinShell class >> editorCut [ ^#defwindowproc ]
     WinShell class >> editorPaste [ ^#defwindowproc ]
+    "WG6c-3's Editor view; 109 overrides. 93 registers the view and dispatches
+     its panes, and loads long before 109 does — the same discipline the Find
+     and Browser hooks above follow, and what keeps 93 complete on its own."
+    WinShell class >> buildEditorViewPanes [ ^self ]
+    WinShell class >> layoutEditorViewPanes: content [ ^self ]
+    WinShell class >> showEditorViewPanes: aBool [ ^self ]
+    WinShell class >> isEditorViewPane: aName [ ^false ]
+    WinShell class >> onEditorClassChosen [ ^self ]
+    WinShell class >> saveEditorClass [ ^self ]
+    WinShell class >> rebuildEditorClassesIfBuilt [ ^self ]
     "WG6b's Find view; 105 overrides."
     WinShell class >> showFindPanes: aBool [ ^self ]
     WinShell class >> layoutFindPanes: content [ ^self ]

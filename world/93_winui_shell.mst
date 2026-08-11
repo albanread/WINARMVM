@@ -230,6 +230,10 @@ Object subclass: WinShell [
         self registerViewNamed: #browser title: 'Browser'.
         self registerViewNamed: #outliner title: 'Outliner'.
         self registerViewNamed: #find title: 'Find'.
+        "WG6c-3. Registered next to the other code views rather than appended,
+         because the bar reads left to right and Editor belongs with Browser
+         and Find, not after Metrics."
+        self registerViewNamed: #editor title: 'Editor'.
         self registerViewNamed: #welcome title: 'Welcome'.
         self registerViewNamed: #transcript title: 'Transcript'.
         self registerViewNamed: #metrics title: 'Metrics'.
@@ -254,12 +258,16 @@ Object subclass: WinShell [
          before showing the incoming one whenever the outgoing sorts first, and
          that leaves a frame in which NEITHER is on screen. A tab control never
          has that frame; it is the whole difference between a swap and a blink."
+        "The Browser's content child is a HOST for four panes rather than a
+         surface of its own, and WG6c-3's Editor is the same shape — a picker
+         and a custom pane sit in its rect, so the child itself stays hidden."
         (self controlNamed: (self contentNameFor: aSymbol))
-            ifNotNil: [ :c | c show: aSymbol ~~ #browser ].
+            ifNotNil: [ :c | c show: (aSymbol ~~ #browser and: [ aSymbol ~~ #editor ]) ].
         self showBrowserPanes: aSymbol == #browser.
         (self controlNamed: self outlinerName)
             ifNotNil: [ :c | c show: aSymbol == #outliner ].
         self showFindPanes: aSymbol == #find.
+        self showEditorViewPanes: aSymbol == #editor.
         self views do: [ :v |
             | c |
             (v at: 1) == aSymbol ifFalse: [
@@ -356,6 +364,23 @@ Object subclass: WinShell [
          than a text surface of its own — it stays hidden and the panes sit in
          its rect, so the view registry needs no notion of `composite view`."
         aSymbol == #browser ifTrue: [ self buildBrowserPanes ].
+        "WG6c-3: the Editor's picker, Save cell and custom pane. Built AFTER
+         the content child above, which is what puts the pane on top of it in
+         the sibling z-order — it is WS_CLIPSIBLINGS, so being underneath
+         would clip its paint away and show nothing at all. The class list is
+         filled from whatever snapshot has already arrived; a later one
+         refills it through `rebuildEditorClassesIfBuilt`."
+        aSymbol == #editor ifTrue: [
+            self buildEditorViewPanes.
+            self rebuildEditorClassesIfBuilt.
+            self isOpen ifTrue: [
+                | rects |
+                rects := self layout
+                    rectsIn: self clientWidth
+                    by: self clientHeight
+                    dpi: (Dpi isNil ifTrue: [ WinApi constant: 'USER_DEFAULT_SCREEN_DPI' ] ifFalse: [ Dpi ]).
+                self layoutEditorViewPanes: (rects at: #content) ].
+            self refreshBrowser ].
         c show: false.
         "Position it NOW, at the content rect it will always occupy. A view
          switch deliberately does not relayout (every content child shares one
@@ -661,6 +686,8 @@ Object subclass: WinShell [
             self layoutOutliner: (rects at: #content) ].
         (self viewIsBuilt: #find) ifTrue: [
             self layoutFindPanes: (rects at: #content) ].
+        (self viewIsBuilt: #editor) ifTrue: [
+            self layoutEditorViewPanes: (rects at: #content) ].
 
         (self controlNamed: #splitter) ifNotNil: [ :c |
             (c moveTo: (rects at: #splitter)) ifTrue: [ moved := moved + 1 ] ].
@@ -749,6 +776,12 @@ Object subclass: WinShell [
         name == #findSend ifTrue: [ self find: #senders. ^self ].
         (aCode = 1 and: [ name == #findResults ])
             ifTrue: [ self onFindResultChosen. ^self ].
+        "WG6c-3: the Editor's Save cell, and a class chosen from its picker.
+         LBN_SELCHANGE is 1 here for the same reason it is everywhere else in
+         this method — one door, one drain, one pass later."
+        name == #editorSave ifTrue: [ self saveEditorClass. ^self ].
+        (aCode = 1 and: [ name == #editorClasses ])
+            ifTrue: [ self onEditorClassChosen. ^self ].
         ^self wg3ServiceCommand: anId code: aCode from: aHandle
     ]
 ]
