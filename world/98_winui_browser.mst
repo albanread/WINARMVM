@@ -181,9 +181,9 @@ Object subclass: WinShell [
          strip, and standard controls under visual styles wear the system's."
         self browserPaneNames do: [ :n |
             (self controlNamed: n) ifNotNil: [ :c |
-                c setFont: (n == #browserSource
-                    ifTrue: [ self monoFont ]
-                    ifFalse: [ self guiFont ]) ] ].
+                n == #browserSource
+                    ifTrue: [ self prepareCodePane: c ]
+                    ifFalse: [ c setFont: self guiFont ] ] ].
         "Position them NOW, for the same reason a content child is positioned
          at build time: a view switch does not relayout (WG4 D6 — every content
          child shares one rect, so a switch changes no geometry), which means a

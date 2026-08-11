@@ -98,27 +98,31 @@ Object subclass: WinShell [
             ifFalse: [ 'EDIT' ]
     ]
 
-    "── The two code surfaces ────────────────────────────────────────────"
+    "── What a code pane needs after it is created ───────────────────────
+     There is deliberately NO `addCodePane:` helper here. The two surfaces
+     are created in the files that own their views (93 for the Workspace, 98
+     for the Browser's source pane) with styles those files decide, and a
+     constructor here would have to be called by both to be worth anything.
+     One was written, neither file called it, and it sat looking like it was
+     doing the work — the same shape as WG5a's stale placeholder handler,
+     which RESPONDED and so looked fine until someone read it. Deleted.
 
-    WinShell class >> codePaneStyle ^ <Integer> [
-        "Shared by both surfaces so they cannot drift. WS_VSCROLL and
-         ES_AUTOVSCROLL together are what make a long method scrollable;
-         ES_MULTILINE is also what WG4 D4's predicate reads."
-        ^((WinApi constant: 'WS_CHILD')
-            bitOr: ((WinApi constant: 'WS_BORDER') bitOr: (WinApi constant: 'WS_VSCROLL')))
-            bitOr: ((WinApi constant: 'ES_MULTILINE')
-                bitOr: (WinApi constant: 'ES_AUTOVSCROLL'))
-    ]
+     What both sites DO share is `prepareCodePane:`, which is a message they
+     send rather than a constructor they must route through."
 
-    WinShell class >> addCodePane: aName <Symbol> ^ <Object> [
-        | c |
-        c := self addControl: aName class: self codePaneClass text: ''
-            style: self codePaneStyle exStyle: 0.
+    WinShell class >> prepareCodePane: c <Object> [
+        "Everything a freshly created code pane needs, in one place so the two
+         creation sites cannot drift apart."
+        c isNil ifTrue: [ ^self ].
         "A RichEdit does NOT inherit the dialog font the way a stock control
          does — left alone it comes up in its own default, which is not the
          shell's and looks like a pane from a different application. The
          monospaced face is the right one for code either way."
-        c ifNotNil: [ :x | x setFont: self monoFont ].
-        ^c
+        c setFont: self monoFont.
+        "And it sends NO notifications by default, unlike a plain EDIT.
+         Without this, WG5c D4's EN_CHANGE handler simply never fires — which
+         reads as a broken handler and is not one."
+        self enableChangeNotifications: c.
+        ^self
     ]
 ]

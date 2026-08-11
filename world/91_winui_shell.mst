@@ -1539,6 +1539,10 @@ Object subclass: WinShell [
          guarantees. One GetFocus and a compare per pass; the hook is a no-op
          until 95_winui_focus.mst defines it."
         self checkFocusChanged.
+        "WG5c D4: recolour a code pane once typing has paused. A no-op hook
+         until 102 defines it, and a no-op on every pass where nothing was
+         edited — it costs one nil test."
+        self serviceColourIdle.
         ReaskOnce == true ifTrue: [
             "The guest's own escape hatch, and `tests_wg3.md` item 5's whole
              mechanism: work discovered DURING a pass. Answering non-zero
@@ -1584,6 +1588,8 @@ Object subclass: WinShell [
     WinShell class >> buildControls [ ^self ]
     "WG4 D3's owner-drawn bar needs its first frame asked for; 93 overrides."
     WinShell class >> paintBarOnce [ ^self ]
+    "WG5c D4's idle recolour; 102 overrides."
+    WinShell class >> serviceColourIdle [ ^false ]
     WinShell class >> ownsControlId: anId <Integer> ^ <Boolean> [ ^false ]
     WinShell class >> serviceCommand: anId <Integer> code: aCode <Integer> from: aHandle <Integer> [ ^self ]
     WinShell class >> serviceNotifyFrom: aHandle <Integer> id: anId <Integer> code: aCode <Integer> [ ^self ]

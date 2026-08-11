@@ -1420,6 +1420,20 @@ gate-wg5b:
     grep -q "WG5C pane-class 'RICHEDIT50W'" /tmp/wg5b_gate.txt
     grep -q 'WG5C workspace-is-source true' /tmp/wg5b_gate.txt
     grep -q 'WG5C browser-source-is-source true' /tmp/wg5b_gate.txt
+    # WG5c D4: runs are not merely COMPUTED, they are APPLIED — and the
+    # selection survives the pass, which is what separates colouring from
+    # sabotaging the editor.
+    FOUND=$(grep -E '^WG5C runs-found ' /tmp/wg5b_gate.txt | awk '{print $NF}')
+    APPLIED=$(grep -E '^WG5C runs-applied ' /tmp/wg5b_gate.txt | awk '{print $NF}')
+    echo "colour: $FOUND runs found, $APPLIED applied"
+    test "$FOUND" -gt 0
+    test "$APPLIED" = "$FOUND"
+    grep -q 'WG5C selection-survives #(4 8)' /tmp/wg5b_gate.txt
+    # And a real EN_CHANGE through the door reached the debounce, which fired.
+    BEFORE=$(grep -E '^WG5C passes-before-idle ' /tmp/wg5b_gate.txt | awk '{print $NF}')
+    AFTER=$(grep -E '^WG5C passes-after-idle ' /tmp/wg5b_gate.txt | awk '{print $NF}')
+    echo "colour: $BEFORE passes before idle, $AFTER after"
+    test "$AFTER" -gt "$BEFORE"
     # And the channel resolves HERE, in the process that owns the window.
     grep -q 'WG5B host-available true' /tmp/wg5b_gate.txt
     grep -q 'WG5B host-ping 22343' /tmp/wg5b_gate.txt

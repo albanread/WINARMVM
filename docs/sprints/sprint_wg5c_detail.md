@@ -85,7 +85,7 @@ first.
 * **D5 — the ghost line, for real this time.** Whatever WG5c does here must
   be checked ON SCREEN, because that is precisely what was not done before.
 
-## As built — D1, D2, D3
+## As built — D1, D2, D3, D4
 
 **D1/D2 landed pure**, as designed, and their gate is the tiling property
 (`world/tests/66_winui_syntax_tests.mst`): the runs must reassemble the
@@ -124,6 +124,41 @@ either right or unnecessary:
 Only the *other* views' content children stay plain `EDIT`s: they are
 read-only placeholders with no code in them, and a text engine they never
 colour would be cost for nothing.
+
+**D4 applies it, and it is on screen.** A method with a comment, a class
+name, keywords, a string, a symbol, a character, a radix number and `self`
+colours the way a Smalltalk reader expects. Verified visually — not merely
+counted — because a gate that asserted only "36 runs were computed" would
+repeat WG5a D4's mistake exactly.
+
+The three hazards the design predicted all turned out real, and all are
+handled:
+
+* **The selection had to be saved and restored.** `EM_SETCHARFORMAT` applies
+  to the selection, so colouring N runs is N selection changes; a pass that
+  did not put the caret back would move the user's cursor as a side effect of
+  colouring. Restored in an `ensure:`, so it happens even if the pass raises.
+* **It had to stop flickering.** `WM_SETREDRAW` off for the whole pass, one
+  `InvalidateRect` at the end.
+* **It could have looped**, since `EM_SETCHARFORMAT` can itself raise
+  `EN_CHANGE`. A flag held for exactly the length of the pass.
+
+And one the design did not predict: **a RichEdit sends no notifications at
+all by default**, unlike a plain EDIT. Without `EM_SETEVENTMASK`/`ENM_CHANGE`
+the EN_CHANGE handler simply never fires, which reads as a broken handler and
+is not one.
+
+The struct is DERIVED, not transcribed, and that paid: Win32Metadata records
+`CHARFORMAT2W` as inheriting `CHARFORMATW` through a `Base` field at offset
+0, so `cbSize`/`dwMask`/`crTextColor` are looked up on the base type. Counting
+bytes by hand would have been a silent off-by-92.
+
+**Known limit, recorded rather than half-fixed.** The tokenizer counts in the
+guest String's units and `EM_EXSETSEL` counts in the control's. They agree
+below U+0080 and diverge above it — the same boundary rule WG5a records for
+`EM_GETSEL`. The honest fix is one conversion at that boundary when the panes
+first hold non-ASCII; a partial one now would be harder to find later than
+none.
 
 ## Pitfalls, recorded now
 

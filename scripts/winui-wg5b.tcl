@@ -105,5 +105,27 @@ puts "WG5C richedit-loaded [gui eval {WinShell richEditAvailable}]"
 puts "WG5C pane-class [gui eval {WinShell codePaneClass}]"
 puts "WG5C workspace-is-source [gui eval {(WinShell controlNamed: (WinShell contentNameFor: #workspace)) isSourceSurface}]"
 
+# ── WG5c D4: the colour is applied ──────────────────────────────────────
+# Three claims. That runs are computed AND applied (a gate asserting only
+# that the tokenizer ran would repeat WG5a D4's mistake exactly — it checked
+# the text the ghost would use, never that anything appeared). That the
+# SELECTION SURVIVES, because a recolour that moves the caret puts the user's
+# next keystroke somewhere else and is worse than no colour at all. And that
+# a real EN_CHANGE routes to the debounce.
+gui doit {(WinShell controlNamed: (WinShell contentNameFor: #workspace)) setText: '"c" self foo: 3 + 4. ^Point new'.}
+gui drain now
+puts "WG5C runs-found [gui eval {(WinSyntax colouredRunsFor: (WinShell controlNamed: (WinShell contentNameFor: #workspace)) text) size}]"
+puts "WG5C runs-applied [gui eval {WinShell colourise: (WinShell contentNameFor: #workspace)}]"
+gui doit {WinShell select: (WinShell controlNamed: (WinShell contentNameFor: #workspace)) from: 4 to: 8.}
+gui doit {WinShell colourise: (WinShell contentNameFor: #workspace).}
+puts "WG5C selection-survives [gui eval {WinShell selectionOf: (WinShell controlNamed: (WinShell contentNameFor: #workspace))}]"
+
+# A REAL EN_CHANGE through the door. The wParam is built in Smalltalk because
+# this tcl's `expr` has no `<<` — found the hard way, after three "failures"
+# that were malformed sends rather than a broken route.
+puts "WG5C passes-before-idle [gui eval {WinShell colourPasses}]"
+gui send "0 0x111 [gui eval {(768 * 65536) + (WinShell controlNamed: (WinShell contentNameFor: #workspace)) id}] 0"
+gui drain now
+
 # Part 1 ends here. `just gate-wg5b` now waits in bash and runs
 # scripts/winui-wg5b-2.tcl, which reads the panes and closes the window.

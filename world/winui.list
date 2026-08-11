@@ -67,3 +67,8 @@
 # `isSourceSurface`, and after 93/98 is irrelevant — they reach it by message
 # send at open time, not by name at compile time.
 101_winui_richedit.mst
+# WINARM (WG5c D4): applying the colour — CHARFORMAT2W derived from winkb,
+# EM_SETCHARFORMAT over each run, selection and scroll restored, and the
+# whole thing on an edit-idle rather than per keystroke. Loads after 101,
+# whose panes it colours, and after 100, whose runs it applies.
+102_winui_colour.mst

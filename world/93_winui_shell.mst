@@ -317,7 +317,7 @@ Object subclass: WinShell [
                     bitOr: (WinApi constant: 'ES_AUTOVSCROLL')))
             exStyle: 0.
         aSymbol == #workspace ifTrue: [
-            c setFont: self monoFont.
+            self prepareCodePane: c.
             self installGhost ].
         "WG5b-1: the Browser's content child is a HOST for four panes rather
          than a text surface of its own — it stays hidden and the panes sit in
@@ -692,6 +692,11 @@ Object subclass: WinShell [
          one pass later."
         (aCode = 1 and: [ self isBrowserPane: name ])
             ifTrue: [ self onBrowserPaneChanged: name. ^self ].
+        "WG5c D4: a code pane changed. Recorded, not acted on — colouring
+         happens on idle, because doing it per keystroke costs a pass over
+         the whole document for every character."
+        (aCode = (WinApi constant: 'EN_CHANGE') and: [ self isCodePane: name ])
+            ifTrue: [ self noteEdit: name. ^self ].
         ^self wg3ServiceCommand: anId code: aCode from: aHandle
     ]
 ]

@@ -19,6 +19,10 @@ puts "WG5B browser-refreshes [gui eval {WinShell browserRefreshes}]"
 # WG5b-2 wires up`. This asserts the promise was KEPT rather than restated:
 # the sentence is gone, and an unselected browser asks for a class instead of
 # showing an empty box, which reads as a failed load.
+# WG5c D4: the recolour the EN_CHANGE in part 1 scheduled has had the
+# recipe's whole wait to fire. The debounce is 200ms; the wait is 15s.
+puts "WG5C passes-after-idle [gui eval {WinShell colourPasses}]"
+
 # WG5c D3: the Browser's source pane is the OTHER swapped surface, and the
 # one Accept reads from — so it must satisfy the same predicate.
 puts "WG5C browser-source-is-source [gui eval {(WinShell controlNamed: #browserSource) isSourceSurface}]"
