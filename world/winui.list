@@ -45,3 +45,6 @@
 # WINARM (WG4 D5): the transcript's splitter — a visible grab bar with a
 # chevron and Clear, a draggable dock height, and Cascadia Mono.
 96_winui_splitter.mst
+# WINARM (WG5a): the Workspace — selection-or-everything, Do It / Print It
+# over the primary seam, Ctrl-D / Ctrl-P, and the ghost line.
+97_winui_workspace.mst

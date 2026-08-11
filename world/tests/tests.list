@@ -118,5 +118,6 @@ tier1.mst
 ../94_winui_drawing.mst
 ../95_winui_focus.mst
 ../96_winui_splitter.mst
+../97_winui_workspace.mst
 64_winui_shell_tests.mst
 99_run_all.mst

@@ -52,7 +52,43 @@ TestCase subclass: WinUiShellWg4Tests [
         self runTest: #testEveryViewHasItsOwnGlyph do: [ self testEveryViewHasItsOwnGlyph ].
         self runTest: #testSignedWordsHandleNegatives do: [ self testSignedWordsHandleNegatives ].
         self runTest: #testDockHeightClampsBothEnds do: [ self testDockHeightClampsBothEnds ].
-        self runTest: #testSplitterBandSitsAboveTheDock do: [ self testSplitterBandSitsAboveTheDock ]
+        self runTest: #testSplitterBandSitsAboveTheDock do: [ self testSplitterBandSitsAboveTheDock ].
+
+        "WG5a D1: the selection rule, which is PURE and is the Mac's own — so
+         it is tested with the Mac's own cases and no window in sight."
+        self runTest: #testEmptySelectionEvaluatesEverything
+             do: [ self testEmptySelectionEvaluatesEverything ].
+        self runTest: #testNonEmptySelectionWins do: [ self testNonEmptySelectionWins ].
+        self runTest: #testPrintItInsertsAfterTheSelection
+             do: [ self testPrintItInsertsAfterTheSelection ]
+    ]
+
+    "── WG5a D1: selection-or-everything ─────────────────────────────────"
+
+    testEmptySelectionEvaluatesEverything [
+        "A collapsed caret means `run the whole buffer`, and the insertion
+         point is its END — so Print It on an unselected workspace appends
+         rather than overwriting."
+        | t |
+        t := WinShell evalTargetFor: '3 + 4' loc: 2 len: 0.
+        self assert: (t at: 1) equals: '3 + 4'.
+        self assert: (t at: 2) equals: 5
+    ]
+
+    testNonEmptySelectionWins [
+        "A real selection is what runs, and nothing else — the property that
+         makes a Workspace usable as a scratchpad full of half-finished lines."
+        | t |
+        t := WinShell evalTargetFor: 'foo. 3 + 4. bar' loc: 5 len: 5.
+        self assert: (t at: 1) equals: '3 + 4'
+    ]
+
+    testPrintItInsertsAfterTheSelection [
+        "The insertion point is the END of the selection, so Print It writes
+         after what it evaluated rather than replacing it."
+        | t |
+        t := WinShell evalTargetFor: 'foo. 3 + 4. bar' loc: 5 len: 5.
+        self assert: (t at: 2) equals: 10
     ]
 
     "── WG4 D3: the glyph table ──────────────────────────────────────────"

@@ -1,0 +1,184 @@
+"── 97_winui_workspace.mst — WG5a: the Workspace ─────────────────────────
+ docs/ROADMAP.md's WG5 row, first half: *Workspace with syntax colouring +
+ ghost line + Ctrl-D/Ctrl-P*. Syntax colouring is deliberately NOT here —
+ see `sprint_wg5_detail.md` D5, which moves it to its own slice because a
+ plain EDIT cannot colour text and the choice between RichEdit and a
+ custom-drawn pane should be made with the Browser's needs known.
+
+ WHAT MAKES THIS SLICE POSSIBLE AT ALL: WG4 D1. Do It runs the user's code,
+ and the user's code lives on the PRIMARY. Before the primary existed this
+ view could only have been built dishonestly — evaluating in the UI VM, in
+ the wrong heap, on the thread that must not block — which is exactly why
+ the first attempt at it was stopped.
+
+ And WG4 D4 lights up on its own: its predicate already asks `can the
+ focused control supply source?` and already answers true for an editable
+ multiline EDIT. The Workspace IS one. Nothing in 95 changes."
+
+Object subclass: WinApi [
+    WinApi class >> getKeyState: vk <Integer> ^ <Integer> [
+        <primitive: FFI function: #GetKeyState ret: #g args: #(g)>
+        ^self primitiveFailed: 'GetKeyState'
+    ]
+]
+
+Object subclass: WinShell [
+
+    "── D1. Selection-or-everything — PURE, and ported verbatim ──────────"
+
+    WinShell class >> evalTargetFor: full <String> loc: loc <Integer> len: len <Integer> ^ <Array> [
+        "The Mac's own rule (`CocoaUI class>>evalTargetFor:loc:len:`), ported
+         UNCHANGED: a non-empty selection wins; an empty (collapsed) selection
+         falls back to the whole buffer. Answers #(source insertAt).
+
+         Ported rather than rewritten against Win32's API shape on purpose.
+         It is arithmetic over a string and two integers with nothing platform
+         in it, and two GUIs that disagreed about what Do It evaluates would
+         be a bug invisible in either one alone.
+
+         `loc`/`len` are 0-based, as both NSRange and EM_GETSEL are."
+        len = 0 ifTrue: [ ^Array with: full with: full size ].
+        ^Array with: (full copyFrom: loc + 1 to: loc + len) with: loc + len
+    ]
+
+    WinShell class >> workspaceControl ^ <Object> [
+        ^self controlNamed: (self contentNameFor: #workspace)
+    ]
+
+    WinShell class >> workspaceSelection ^ <Array> [
+        "EM_GETSEL with two out-pointers: start and end, in the control's own
+         UTF-16 code units. Answers #(loc len).
+
+         The units matter and are the sprint's recorded pitfall: an offset that
+         crosses this boundary is in the CONTROL's units, not the guest
+         String's, and must be converted here, once. Today every character the
+         Workspace holds is BMP-and-below so the two agree; the moment one is
+         not, this is the only place that has to change."
+        | c startPtr endPtr |
+        c := self workspaceControl.
+        c isNil ifTrue: [ ^Array with: 0 with: 0 ].
+        startPtr := self selScratch.
+        endPtr := self selScratch + 8.
+        WinArena u32At: startPtr put: 0.
+        WinArena u32At: endPtr put: 0.
+        c send: (WinApi constant: 'EM_GETSEL') wParam: startPtr lParam: endPtr.
+        ^Array
+            with: (WinArena u32At: startPtr)
+            with: (WinArena u32At: endPtr) - (WinArena u32At: startPtr)
+    ]
+
+    WinShell class >> selScratch ^ <Integer> [
+        SelScratch isNil ifTrue: [ SelScratch := WinArena alloc: 16 ].
+        ^SelScratch
+    ]
+
+    WinShell class >> workspaceTarget ^ <Array> [
+        "The live selection, through the pure rule above."
+        | sel |
+        sel := self workspaceSelection.
+        ^self evalTargetFor: self workspaceText loc: (sel at: 1) len: (sel at: 2)
+    ]
+
+    WinShell class >> workspaceText ^ <String> [
+        ^self workspaceControl ifNil: [ '' ] ifNotNil: [ :c | c text ]
+    ]
+
+    "── D2. Do It and Print It, over the seam ────────────────────────────"
+
+    WinShell class >> doIt [
+        "Ship the target to the PRIMARY and report the answer in the
+         transcript. The evaluation happens where the objects live; this VM
+         stays free to pump, which is §2.2's whole point and is measurable —
+         the window keeps drawing while a long Do It runs."
+        | target source |
+        target := self workspaceTarget.
+        source := target at: 1.
+        source isEmpty ifTrue: [ ^self ].
+        DoItCount := (DoItCount isNil ifTrue: [ 0 ] ifFalse: [ DoItCount ]) + 1.
+        Worker uiDoit: source onReplyTimed: [ :result :ms |
+            WinShell appendTranscript: source , ' => ' , result , ' (' , ms printString , ' ms)' ].
+        ^self
+    ]
+
+    WinShell class >> printIt [
+        "Insert the answer INLINE, so the Workspace is a notebook rather than
+         a command line.
+
+         CAPTURE THE INSERTION POINT NOW, at invocation — not when the reply
+         lands. The reply is asynchronous and the user can move the caret,
+         type, or select something else while the primary works; inserting at
+         `the selection` on arrival puts the answer wherever they happen to
+         be. The Mac calls this its `pendingPrintInsertAt` discipline and
+         ported it verbatim from the web GUI. Inherited here as a RULE rather
+         than rediscovered as a bug."
+        | target source insertAt |
+        target := self workspaceTarget.
+        source := target at: 1.
+        insertAt := target at: 2.
+        source isEmpty ifTrue: [ ^self ].
+        PrintItCount := (PrintItCount isNil ifTrue: [ 0 ] ifFalse: [ PrintItCount ]) + 1.
+        Worker uiDoit: source onReplyTimed: [ :result :ms |
+            WinShell insertPrintResult: result at: insertAt ].
+        ^self
+    ]
+
+    WinShell class >> insertPrintResult: result <String> at: insertAt <Integer> [
+        "Re-find the control rather than having captured it: a reply may
+         outlive the view it came from — the user can switch views or collapse
+         the dock while the primary works — and a captured control could be one
+         the shell has since rebuilt."
+        | c |
+        c := self workspaceControl.
+        c isNil ifTrue: [ ^self ].
+        c send: (WinApi constant: 'EM_SETSEL') wParam: insertAt lParam: insertAt.
+        c send: (WinApi constant: 'EM_REPLACESEL')
+            wParam: 1
+            lParam: (WinArena scratchUtf16: ' ' , result).
+        ^self
+    ]
+
+    WinShell class >> doItCount ^ <Integer> [ ^DoItCount isNil ifTrue: [ 0 ] ifFalse: [ DoItCount ] ]
+    WinShell class >> printItCount ^ <Integer> [ ^PrintItCount isNil ifTrue: [ 0 ] ifFalse: [ PrintItCount ] ]
+
+    "── D3. Ctrl-D / Ctrl-P ──────────────────────────────────────────────"
+
+    WinShell class >> controlIsDown ^ <Boolean> [
+        "GetKeyState's high bit is `currently down`. The low bit is the toggle
+         state, which for Ctrl is meaningless and for Caps Lock is the whole
+         point — reading the wrong one is a classic, and it makes a shortcut
+         fire on the wrong keystroke rather than not at all."
+        ^((WinApi getKeyState: 16r11) bitAnd: 16r8000) ~= 0   "VK_CONTROL"
+    ]
+
+    WinShell class >> onKeyDown: vk <Integer> ^ <Object> [
+        "§2.5: Ctrl, not Cmd — Cmd is not a Windows key. No accelerator table,
+         because there is no menu yet to own one; WG6 adds the menu and this
+         moves into it."
+        self controlIsDown ifFalse: [ ^#defwindowproc ].
+        vk = 16r44 ifTrue: [ self doIt. ^0 ].     "D"
+        vk = 16r50 ifTrue: [ self printIt. ^0 ].  "P"
+        ^#defwindowproc
+    ]
+
+    "── D4. The ghost line ───────────────────────────────────────────────"
+
+    WinShell class >> ghostText ^ <String> [
+        "§2.1's weakness #4: one ghosted line at the caret on first open, gone
+         on the first keystroke. A teaching affordance, not a placeholder — a
+         user who has never met a Smalltalk workspace has no way to guess what
+         an empty one wants from them."
+        ^'3 + 4 * 2   — Ctrl-P prints the result'
+    ]
+
+    WinShell class >> installGhost [
+        "EM_SETCUEBANNER shows text only while the control is EMPTY and
+         UNFOCUSED, and Windows removes it itself the moment either changes.
+         That is exactly the ghost's contract, done by the system — no
+         first-keystroke hook of our own to get wrong."
+        self workspaceControl ifNotNil: [ :c |
+            c send: (WinApi constant: 'EM_SETCUEBANNER')
+                wParam: 1
+                lParam: (WinArena nativeUtf16: self ghostText) ].
+        ^self
+    ]
+]

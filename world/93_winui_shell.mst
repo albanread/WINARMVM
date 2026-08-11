@@ -184,7 +184,7 @@ Object subclass: WinApi [
 Object subclass: WinShell [
     <classVars: Wg4Enabled Views ActiveView ViewSwitchCount ViewBuildCount
                 TranscriptCollapsed TranscriptLines MetricsText MetricsUpdates
-                CommandsEnabled AccentColor LabelFont GlyphFont DrawRect DrawCalls DrawMisses DrawError DrawLast DrawIds DrawResult DrawResultClass DrawStep GlyphBuf LastFocusHwnd FocusChanges TranscriptHeight DragActive DragStartY DragStartHeight MonoFont>
+                CommandsEnabled AccentColor LabelFont GlyphFont DrawRect DrawCalls DrawMisses DrawError DrawLast DrawIds DrawResult DrawResultClass DrawStep GlyphBuf LastFocusHwnd FocusChanges TranscriptHeight DragActive DragStartY DragStartHeight MonoFont SelScratch DoItCount PrintItCount>
 
     WinShell class >> wg4Enabled ^ <Boolean> [
         "`MACVM_WINUI_WG4=off` restores WG3's window exactly — the same shape
@@ -226,6 +226,7 @@ Object subclass: WinShell [
          themselves from their own files, exactly as CocoaBrowser2 and the
          rest do on the Mac — which is why this is a REGISTRY and not a
          hard-coded switch statement."
+        self registerViewNamed: #workspace title: 'Workspace'.
         self registerViewNamed: #welcome title: 'Welcome'.
         self registerViewNamed: #transcript title: 'Transcript'.
         self registerViewNamed: #metrics title: 'Metrics'.
@@ -292,16 +293,25 @@ Object subclass: WinShell [
         (self viewIsBuilt: aSymbol) ifTrue: [ ^self ].
         entry := self views detect: [ :v | (v at: 1) == aSymbol ] ifNone: [ nil ].
         entry isNil ifTrue: [ ^self ].
+        "WG5a: the Workspace is EDITABLE and every other view is not — which is
+         also what makes WG4 D4's focus predicate light up here and nowhere
+         else, with no change to that file. A read-only EDIT is not a source
+         surface; this one is."
         c := self
             addControl: (self contentNameFor: aSymbol)
             class: 'EDIT'
-            text: (self placeholderTextFor: aSymbol)
+            text: (aSymbol == #workspace ifTrue: [ '' ] ifFalse: [ self placeholderTextFor: aSymbol ])
             style: (((WinApi constant: 'WS_CHILD')
                 bitOr: ((WinApi constant: 'WS_BORDER') bitOr: (WinApi constant: 'WS_VSCROLL')))
                 bitOr: (((WinApi constant: 'ES_MULTILINE')
-                    bitOr: (WinApi constant: 'ES_READONLY'))
+                    bitOr: (aSymbol == #workspace
+                        ifTrue: [ 0 ]
+                        ifFalse: [ WinApi constant: 'ES_READONLY' ]))
                     bitOr: (WinApi constant: 'ES_AUTOVSCROLL')))
             exStyle: 0.
+        aSymbol == #workspace ifTrue: [
+            c setFont: self monoFont.
+            self installGhost ].
         c show: false.
         "Position it NOW, at the content rect it will always occupy. A view
          switch deliberately does not relayout (every content child shares one
@@ -533,7 +543,7 @@ Object subclass: WinShell [
         "§2.1: the transcript is a log OF CODE, so it wears Cascadia Mono."
         (self controlNamed: #transcript) ifNotNil: [ :c | c setFont: self monoFont ].
         self appendTranscript: 'WG4 shell up — ', self views size printString, ' views registered.'.
-        self switchToView: #welcome.
+        self switchToView: #workspace.
         self syncCommandEnablement.
         ^Controls
     ]
@@ -546,7 +556,7 @@ Object subclass: WinShell [
         "One SetWindowPos per control, from the settled client rect. WG3's
          controls keep their own bands; the shell's own children are placed
          from the three bands above plus one row slice for the view bar."
-        | moved rects row lefts rights btnW |
+        | moved rects row lefts rights btnW avail verbW dipW |
         self wg4Enabled ifFalse: [ ^self wg3ApplyLayout ].
         self isOpen ifFalse: [ ^0 ].
         moved := 0.
@@ -557,10 +567,19 @@ Object subclass: WinShell [
 
         "The view bar: view buttons and the two commands packed left, the
          metrics cluster anchored right."
-        btnW := 96.
+        "Cell widths are NOT constants: a fourth view pushed `Print It` off the
+         end of the strip at 900px, and the sixth would have taken `Do It`
+         with it. The views share whatever is left after the metrics cluster
+         and the two verbs, floored so a very narrow window clips rather than
+         inverting."
+        dipW := self clientWidth * 96 // (Dpi isNil ifTrue: [ 96 ] ifFalse: [ Dpi ]).
+        verbW := 72.
+        avail := dipW - 20 - 320 - (verbW * 2) - (6 * (self views size + 2)).
+        btnW := (avail // (self views size max: 1)) min: 96.
+        btnW := btnW max: 44.
         row := self layout
             packRow: (rects at: #viewbar)
-            left: ((self views collect: [ :v | btnW ]) asArray , (Array with: btnW with: btnW))
+            left: ((self views collect: [ :v | btnW ]) asArray , (Array with: verbW with: verbW))
             right: (Array with: 320)
             gap: 6
             dpi: (Dpi isNil ifTrue: [ 96 ] ifFalse: [ Dpi ]).
