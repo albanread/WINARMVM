@@ -174,6 +174,30 @@ drain re-evaluates enablement. The predicate becomes *"the focused control
 can supply source"*, which is the Mac's own contract (§2.1: *greyed by focus
 context — the Mac contract, stated and tested*).
 
+### D5. The transcript's splitter, and the fonts (added 2026-08-11)
+
+§2.1 specifies two things the ladder never attached to a sprint row, and
+both are why the window still reads as a *dialog* rather than an *app*:
+
+* **The dock is on a real splitter** with a **visible grab bar + chevron**
+  (§2.1's "fixing weakness #3" — the Mac's own dock has no visible grab and
+  users do not discover it), plus a **Clear** button at its right. Today the
+  dock's height is a constant only a script can change; a user cannot drag it.
+* **The fonts are wrong.** §2.1 asks for **Segoe UI Variable** for text at
+  Fluent's 9pt/12px metrics, and **Cascadia Mono** for code panes and the
+  transcript. Everything currently draws in the stock dialog font, which is
+  the single largest reason the window looks like a dialog box.
+
+Recorded as a row of this sprint rather than left to WG8's "polish sweep",
+because a shell whose own chrome is placeholder is not "the one-window
+grammar standing" in any sense a reader of the row would expect.
+
+**Deliberately still NOT here: a status bar.** Neither this document nor the
+Mac has one — the docked Transcript is that surface, and the metrics cluster
+carries the VM state a status bar would otherwise hold. If one is wanted it
+is a genuine ADDITION to the design, not an omission from it, and it should
+be argued for on its own terms rather than smuggled in as polish.
+
 ## Implementation order
 
 1. **D1, alone.** The primary VM and the `#uiReq`/`#uiReply` round trip,
@@ -186,6 +210,7 @@ context — the Mac contract, stated and tested*).
    proven, as WG3 proved theming: a themed strip is not the same colours as
    an unthemed one, and the snap can settle it.
 4. **D4.** Focus tracking, and the enablement predicate that reads it.
+5. **D5.** The splitter (drag, grab bar, chevron, Clear) and the fonts.
 
 ## Pitfalls
 

@@ -201,7 +201,22 @@ const _WM_APP_DRAIN_IS_PRIVATE: () = assert!(WM_APP_DRAIN >= 0x8000);
 /// `allowlist_matches_winkb` (world side, `62_winui_door_tests.mst`) checks
 /// every one of them against winkb when the database IS present — so a typo is
 /// caught by data rather than trusted to care.
-pub const ALLOWLIST: [u32; 11] = [
+/// `WM_DRAWITEM` (0x2B). WG4 D3: an owner-drawn control asks its PARENT to
+/// paint it. Allowlisted for the same reason `WM_NOTIFY` is — its meaning is
+/// Smalltalk's — but it is the one message whose handler may not simply flag
+/// and return: a paint cannot be deferred to the drain without leaving the
+/// strip blank until something else repaints it.
+///
+/// The permission is narrow and stated (sprint_wg4_detail.md D3): painting is
+/// a RESPONSE, not work — bounded, allocation-free, and re-entrancy-free by
+/// construction, because every GDI call goes into a DC Windows just handed us
+/// and none of them sends a message back. The handler draws from fields
+/// already copied out of the struct, calls no VM entry of its own, and touches
+/// no control other than the one being drawn.
+pub const WM_DRAWITEM: u32 = 0x002B;
+
+pub const ALLOWLIST: [u32; 12] = [
+    WM_DRAWITEM,
     WM_CLOSE,
     WM_DESTROY,
     WM_SIZE,
@@ -942,6 +957,16 @@ fn cross_into_smalltalk(hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> 
     let sample = msg == WM_SIZE;
     let t0 = if sample { qpc() } else { 0 };
     let raw = handle.dispatch_callback(NOT_HANDLED, |vm| {
+        if msg == WM_DRAWITEM {
+            // WG4 D3. The SAME payload-lifetime constraint as WM_NOTIFY —
+            // `lParam` is a `DRAWITEMSTRUCT*` alive only for this call — but
+            // with one difference stated in the sprint design: this handler
+            // DRAWS before it returns, because a paint cannot be deferred to
+            // the drain without leaving the control blank. It draws from
+            // copied-out values into a DC Windows just handed us; it stashes
+            // nothing and calls nothing that sends a message back.
+            return perform_drawitem(vm, lparam);
+        }
         if msg == WM_NOTIFY {
             // D3's payload-lifetime constraint. `lParam` is an `NMHDR*` that is
             // valid ONLY for the duration of this call, so the three fields are
@@ -999,6 +1024,75 @@ unsafe fn read_nmhdr(p: isize) -> (isize, usize, u32) {
     let id_from = std::ptr::read_unaligned(base.add(8) as *const usize);
     let code = std::ptr::read_unaligned(base.add(16) as *const u32);
     (hwnd_from, id_from, code)
+}
+
+/// The four `DRAWITEMSTRUCT` fields WG4 D3 needs, read out of a pointer that
+/// dies when this call returns: `CtlID` (offset 4), `itemState` (16), `hDC`
+/// (32) and `rcItem` (40, four `LONG`s).
+///
+/// Transcribed offsets, same exception and same compensating control as
+/// [`read_nmhdr`]: `testDrawItemOffsetsMatchWinkb` asks winkb for each by name
+/// and asserts these literals, so a wrong one fails in-language rather than
+/// painting into the wrong place.
+///
+/// # Safety
+/// `p` must be the `DRAWITEMSTRUCT*` Windows passed in `WM_DRAWITEM`'s
+/// `lParam`, read during the call. Called only from inside
+/// `dispatch_callback`, so a bad pointer is a recovered fault.
+unsafe fn read_drawitem(p: isize) -> (u32, u32, isize, [i32; 4]) {
+    let base = p as *const u8;
+    let ctl_id = std::ptr::read_unaligned(base.add(4) as *const u32);
+    let item_state = std::ptr::read_unaligned(base.add(16) as *const u32);
+    let hdc = std::ptr::read_unaligned(base.add(32) as *const isize);
+    let left = std::ptr::read_unaligned(base.add(40) as *const i32);
+    let top = std::ptr::read_unaligned(base.add(44) as *const i32);
+    let right = std::ptr::read_unaligned(base.add(48) as *const i32);
+    let bottom = std::ptr::read_unaligned(base.add(52) as *const i32);
+    (ctl_id, item_state, hdc, [left, top, right, bottom])
+}
+
+/// `WM_DRAWITEM` -> `WinShell class>>drawItem:state:dc:x:y:w:h:`, every argument
+/// a `SmallInteger` and no pointer among them — D3's constraint, unchanged by
+/// the fact that this one draws inline.
+fn perform_drawitem(vm: &mut VmState, lparam: isize) -> u64 {
+    let (ctl_id, item_state, hdc, r) = unsafe { read_drawitem(lparam) };
+    let (Some(a_id), Some(a_state), Some(a_dc)) = (
+        SmallInt::try_new(ctl_id as i64),
+        SmallInt::try_new(item_state as i64),
+        SmallInt::try_new(hdc as i64),
+    ) else {
+        return NOT_HANDLED;
+    };
+    let (Some(a_x), Some(a_y), Some(a_w), Some(a_h)) = (
+        SmallInt::try_new(r[0] as i64),
+        SmallInt::try_new(r[1] as i64),
+        SmallInt::try_new((r[2] - r[0]) as i64),
+        SmallInt::try_new((r[3] - r[1]) as i64),
+    ) else {
+        return NOT_HANDLED;
+    };
+    let Some(cls) = win_shell_class(vm) else {
+        return NOT_HANDLED;
+    };
+    let sel = vm.universe.intern(b"drawItem:state:dc:x:y:w:h:");
+    let k = crate::runtime::primitives::klass_of(vm, cls);
+    let Some(m) = crate::runtime::lookup::lookup(vm, k, sel) else {
+        return NOT_HANDLED;
+    };
+    let argv = [
+        a_id.oop(),
+        a_state.oop(),
+        a_dc.oop(),
+        a_x.oop(),
+        a_y.oop(),
+        a_w.oop(),
+        a_h.oop(),
+    ];
+    let result = crate::interpreter::run_method_reentrant(vm, m, cls, &argv);
+    match SmallInt::try_from(result) {
+        Some(n) => n.value() as u64,
+        None => NOT_HANDLED,
+    }
 }
 
 /// The three `NMHDR` fields as `SmallInteger`s, or `None` if any of them will

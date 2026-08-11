@@ -1,0 +1,379 @@
+"── 94_winui_drawing.mst — WG4 D3: the custom-drawn command bar ──────────
+ docs/win_gui_design.md §2.1's Toolbar row, which is a refusal before it is a
+ design: *a custom-drawn command bar (one owner-drawn strip, NOT comctl's
+ dated TOOLBARCLASS chrome)*. What replaces it:
+
+   * view glyphs from **Segoe Fluent Icons** — the system icon font, Windows'
+     own answer to SF Symbols — **with 9pt labels beneath** them. That is
+     §2.5's deliberate divergence from the Mac (weakness #1: an icon with no
+     label is a puzzle), and the Mac may adopt it back.
+   * the active view marked by an **accent-colour underline** — the Windows
+     tab idiom, the thing Settings and Edge do — with the accent **READ FROM
+     THE SYSTEM**, never invented here.
+   * Do It / Print It as labelled buttons on the same strip.
+
+ THE ONE PLACE §2.4a BENDS, and it is stated in the sprint design before it
+ was coded. Every other message FLAGS and returns, and the drain does the
+ work. `WM_DRAWITEM` cannot: a paint deferred to the drain leaves the control
+ blank until something else repaints it, which is not a latency problem but a
+ wrong picture. So this handler DRAWS, inline, and the permission it operates
+ under is narrow and checkable:
+
+   * it draws from values ALREADY COPIED out of the `DRAWITEMSTRUCT` by the
+     door (D3's payload-lifetime rule — the pointer dies with the call and is
+     never stashed);
+   * every GDI call goes into a DC Windows just handed us;
+   * it creates no window, moves no window, sends no message, and calls no
+     other VM entry — so it cannot provoke the re-entrancy the drain exists
+     to prevent;
+   * it allocates GDI objects and DELETES them in the same method, because a
+     leak here is one per repaint and repaints are unbounded.
+
+ If that permission ever proves too strong — if a paint handler is measured
+ provoking a message — the fallback is the Cocoa answer, written down in the
+ sprint doc so it is a decision rather than a scramble: draw into a cached
+ bitmap in the drain, and let the handler blit it."
+
+"── the GDI surface, and only what the bar needs ─────────────────────────
+ Every one resolved by NAME through the P5 winkb resolver, exactly as WG0's
+ user32 calls are. No new mechanism, and deliberately no more of GDI than the
+ strip actually draws with."
+Object subclass: WinApi [
+
+    WinApi class >> createSolidBrush: colorref <Integer> ^ <Integer> [
+        <primitive: FFI function: #CreateSolidBrush ret: #g args: #(g)>
+        ^self primitiveFailed: 'CreateSolidBrush'
+    ]
+
+    WinApi class >> fillRect: hdc <Integer> rect: rectPtr <Integer> brush: hbr <Integer> ^ <Integer> [
+        <primitive: FFI function: #FillRect ret: #g args: #(g g g)>
+        ^self primitiveFailed: 'FillRect'
+    ]
+
+    WinApi class >> deleteObject: hgdiobj <Integer> ^ <Integer> [
+        <primitive: FFI function: #DeleteObject ret: #g args: #(g)>
+        ^self primitiveFailed: 'DeleteObject'
+    ]
+
+    WinApi class >> selectObject: hdc <Integer> object: hgdiobj <Integer> ^ <Integer> [
+        <primitive: FFI function: #SelectObject ret: #g args: #(g g)>
+        ^self primitiveFailed: 'SelectObject'
+    ]
+
+    WinApi class >> setTextColor: hdc <Integer> color: colorref <Integer> ^ <Integer> [
+        <primitive: FFI function: #SetTextColor ret: #g args: #(g g)>
+        ^self primitiveFailed: 'SetTextColor'
+    ]
+
+    WinApi class >> setBkMode: hdc <Integer> mode: m <Integer> ^ <Integer> [
+        <primitive: FFI function: #SetBkMode ret: #g args: #(g g)>
+        ^self primitiveFailed: 'SetBkMode'
+    ]
+
+    WinApi class >> drawText: hdc <Integer> text: textPtr <Integer> count: c <Integer>
+                     rect: rectPtr <Integer> format: fmt <Integer> ^ <Integer> [
+        <primitive: FFI function: #DrawTextW ret: #g args: #(g g g g g)>
+        ^self primitiveFailed: 'DrawTextW'
+    ]
+
+    WinApi class >> createFontHeight: cHeight <Integer> width: cWidth <Integer>
+                     escapement: cEsc <Integer> orientation: cOri <Integer>
+                     weight: cWeight <Integer> italic: bItalic <Integer>
+                     underline: bUnder <Integer> strikeOut: bStrike <Integer>
+                     charSet: iCharSet <Integer> outPrecision: iOut <Integer>
+                     clipPrecision: iClip <Integer> quality: iQuality <Integer>
+                     pitchAndFamily: iPitch <Integer> face: facePtr <Integer> ^ <Integer> [
+        "All fourteen, because the resolver requires the token list to match the
+         selector's arity exactly — and that refusal is right: a 14-token pragma
+         on a 3-argument method would have marshalled eleven words of whatever
+         happened to be next on the stack."
+        <primitive: FFI function: #CreateFontW ret: #g args: #(g g g g g g g g g g g g g g)>
+        ^self primitiveFailed: 'CreateFontW'
+    ]
+
+    WinApi class >> createFont: height <Integer> weight: w <Integer> face: facePtr <Integer> ^ <Integer> [
+        "The three arguments this bar actually varies. Everything else is the
+         documented default, and 0 means 'the system decides' — the restraint
+         principle, in an argument list. CLEARTYPE_QUALITY (5) is the one
+         deliberate non-zero: text this small is unreadable without it."
+        ^self
+            createFontHeight: height width: 0
+            escapement: 0 orientation: 0
+            weight: w italic: 0
+            underline: 0 strikeOut: 0
+            charSet: 1 outPrecision: 0
+            clipPrecision: 0 quality: 5
+            pitchAndFamily: 0 face: facePtr
+    ]
+]
+
+Object subclass: WinShell [
+
+    "── the system accent, read and never invented ───────────────────────"
+
+    WinShell class >> accentColorRef ^ <Integer> [
+        "HKCU\\Software\\Microsoft\\Windows\\DWM\\AccentColor is already a
+         COLORREF (0x00BBGGRR), which is what every GDI call here wants — so
+         this is a read with no arithmetic on it at all.
+
+         The fallback is Windows' own default accent blue rather than a colour
+         chosen here: a preference this project made up would not be the
+         host's, which is the same sentence `appsUseLightTheme` is written
+         under."
+        | v |
+        AccentColor isNil ifFalse: [ ^AccentColor ].
+        v := WinApi
+            dwordAt: (WinApi constant: 'HKEY_CURRENT_USER')
+            path: 'Software\Microsoft\Windows\DWM'
+            value: 'AccentColor'.
+        AccentColor := v isNil
+            ifTrue: [ 16r00D77800 ]
+            ifFalse: [ v bitAnd: 16r00FFFFFF ].
+        ^AccentColor
+    ]
+
+    WinShell class >> barTextColorRef ^ <Integer> [
+        "Monochrome chrome (§2.1's Colour row): near-black on light, near-white
+         on dark. Accent is spent ONLY on the active-view underline and focus
+         rings, which is what keeps it meaning something."
+        ^self systemPrefersDark ifTrue: [ 16r00E8E8E8 ] ifFalse: [ 16r00202020 ]
+    ]
+
+    WinShell class >> barDimTextColorRef ^ <Integer> [
+        ^self systemPrefersDark ifTrue: [ 16r00A0A0A0 ] ifFalse: [ 16r00707070 ]
+    ]
+
+    "── the two fonts the strip draws with ───────────────────────────────
+     §2.1's Type row: Segoe UI Variable for text at Fluent's 9pt, and Segoe
+     Fluent Icons for the glyphs. Both ship with Win11. Created ONCE and kept
+     — a font per repaint would be a leak with a frame rate."
+
+    WinShell class >> pointsToHeight: pt <Integer> ^ <Integer> [
+        "CreateFontW's height is in logical units and NEGATIVE means 'character
+         height, not cell height' — the form every Windows UI font is asked for.
+         Scaled by the window's own DPI, so 9pt is 9pt on any monitor."
+        ^0 - (pt * (Dpi isNil ifTrue: [ 96 ] ifFalse: [ Dpi ]) // 72)
+    ]
+
+    WinShell class >> labelFont ^ <Integer> [
+        LabelFont isNil ifTrue: [
+            LabelFont := WinApi
+                createFont: (self pointsToHeight: 9)
+                weight: 400
+                face: (WinArena nativeUtf16: 'Segoe UI Variable Text') ].
+        ^LabelFont
+    ]
+
+    WinShell class >> glyphFont ^ <Integer> [
+        GlyphFont isNil ifTrue: [
+            GlyphFont := WinApi
+                createFont: (self pointsToHeight: 14)
+                weight: 400
+                face: (WinArena nativeUtf16: 'Segoe Fluent Icons') ].
+        ^GlyphFont
+    ]
+
+    "── the glyphs, by view ──────────────────────────────────────────────
+     Segoe Fluent Icons code points. Named here rather than inlined so the
+     table reads as a table — and so a view that arrives without one gets a
+     visible placeholder rather than a blank cell."
+
+    WinShell class >> glyphFor: aSymbol <Symbol> ^ <String> [
+        aSymbol == #welcome    ifTrue: [ ^String with: (Character value: 16rE80F) ].  "Home"
+        aSymbol == #transcript ifTrue: [ ^String with: (Character value: 16rE9D5) ].  "Script"
+        aSymbol == #metrics    ifTrue: [ ^String with: (Character value: 16rE9D9) ].  "Diagnostic"
+        aSymbol == #workspace  ifTrue: [ ^String with: (Character value: 16rE70F) ].  "Edit"
+        aSymbol == #browser    ifTrue: [ ^String with: (Character value: 16rE8A4) ].  "List"
+        ^String with: (Character value: 16rE897)                                      "Help"
+    ]
+
+    "── the handler the door calls ───────────────────────────────────────"
+
+    WinShell class >> drawItem: anId <Integer> state: aState <Integer> dc: hdc <Integer>
+                       x: x <Integer> y: y <Integer> w: w <Integer> h: h <Integer> ^ <Integer> [
+        "WM_DRAWITEM, decoded by the door into seven SmallIntegers. Answers 1
+         (handled) or 0 (let the default happen).
+
+         Everything below is drawn from these VALUES. The `DRAWITEMSTRUCT`
+         they came out of is already gone by the time this runs, which is the
+         constraint D3 stated and the reason the door copies rather than
+         passing the pointer through."
+        | c |
+        DrawCalls := (DrawCalls isNil ifTrue: [ 0 ] ifFalse: [ DrawCalls ]) + 1.
+        c := self controlWithId: anId.
+        c isNil ifTrue: [ DrawMisses := (DrawMisses isNil ifTrue: [ 0 ] ifFalse: [ DrawMisses ]) + 1. ^0 ].
+        "A raise inside a PAINT is invisible by nature — the cell simply stays
+         blank and nothing says why. Captured rather than propagated, because
+         an unhandled error here would also unwind through the door."
+        ^[ self drawBarItem: c state: aState dc: hdc x: x y: y w: w h: h ]
+            on: Error
+            do: [ :e | DrawError := e messageText. 0 ]
+    ]
+
+    WinShell class >> drawCalls ^ <Integer> [ ^DrawCalls isNil ifTrue: [ 0 ] ifFalse: [ DrawCalls ] ]
+    WinShell class >> drawMisses ^ <Integer> [ ^DrawMisses isNil ifTrue: [ 0 ] ifFalse: [ DrawMisses ] ]
+    WinShell class >> drawError ^ <String> [ ^DrawError isNil ifTrue: [ '' ] ifFalse: [ DrawError ] ]
+
+    WinShell class >> drawBarItem: c <WinControl> state: aState <Integer> dc: hdc <Integer>
+                       x: x <Integer> y: y <Integer> w: w <Integer> h: h <Integer> ^ <Integer> [
+        | rect isActive isPressed glyph label brush old |
+        rect := self drawRectScratch.
+        isPressed := (aState bitAnd: (WinApi constant: 'ODS_SELECTED')) ~= 0.
+        isActive := self activeViewButtonName == c name.
+
+        "1. The cell's own background. A pressed cell gets a subtle wash; the
+            active one gets nothing but its underline, because the underline IS
+            the selection in this idiom."
+        self setRect: rect x: x y: y w: w h: h.
+        brush := WinApi createSolidBrush: (isPressed
+            ifTrue: [ self systemPrefersDark ifTrue: [ 16r003A3A3A ] ifFalse: [ 16r00E8E8E8 ] ]
+            ifFalse: [ self backgroundColorRef ]).
+        WinApi fillRect: hdc rect: rect brush: brush.
+        WinApi deleteObject: brush.
+
+        WinApi setBkMode: hdc mode: (WinApi constant: 'TRANSPARENT').
+
+        "2. The glyph, then the label beneath it — the two-row cell §2.1 asks
+            for, and the reason a view-bar button is 34 DIPs tall rather than a
+            push button's 23."
+        glyph := self glyphFor: (self viewSymbolForButton: c name).
+        label := c barLabel.
+        (self isViewButton: c name)
+            ifTrue: [
+                WinApi setTextColor: hdc color: (isActive
+                    ifTrue: [ self barTextColorRef ]
+                    ifFalse: [ self barDimTextColorRef ]).
+                old := WinApi selectObject: hdc object: self glyphFont.
+                self setRect: rect x: x y: y + (2 * h // 100) w: w h: h * 55 // 100.
+                WinApi drawText: hdc
+                    text: (WinArena scratchUtf16: glyph) count: 0 - 1
+                    rect: rect
+                    format: ((WinApi constant: 'DT_CENTER')
+                        bitOr: ((WinApi constant: 'DT_BOTTOM') bitOr: (WinApi constant: 'DT_SINGLELINE'))).
+                WinApi selectObject: hdc object: old.
+                old := WinApi selectObject: hdc object: self labelFont.
+                self setRect: rect x: x y: y + (h * 55 // 100) w: w h: h * 45 // 100.
+                WinApi drawText: hdc
+                    text: (WinArena scratchUtf16: label) count: 0 - 1
+                    rect: rect
+                    format: ((WinApi constant: 'DT_CENTER')
+                        bitOr: ((WinApi constant: 'DT_TOP') bitOr: (WinApi constant: 'DT_SINGLELINE'))).
+                WinApi selectObject: hdc object: old ]
+            ifFalse: [
+                "A verb button — Do It / Print It: one centred label, greyed when
+                 its own control is disabled, which is D4's contract showing
+                 through in the only place it can be seen."
+                WinApi setTextColor: hdc color: (c isEnabled
+                    ifTrue: [ self barTextColorRef ]
+                    ifFalse: [ self barDimTextColorRef ]).
+                old := WinApi selectObject: hdc object: self labelFont.
+                self setRect: rect x: x y: y w: w h: h.
+                WinApi drawText: hdc
+                    text: (WinArena scratchUtf16: label) count: 0 - 1
+                    rect: rect
+                    format: ((WinApi constant: 'DT_CENTER')
+                        bitOr: ((WinApi constant: 'DT_VCENTER') bitOr: (WinApi constant: 'DT_SINGLELINE'))).
+                WinApi selectObject: hdc object: old ].
+
+        "3. The accent underline, and ONLY under the active view. Three DIPs of
+            the system's own accent colour: the whole of how a Windows app says
+            'you are here' since Windows 10, and the reason this bar needs no
+            selection frame, no sunken border and no second colour."
+        (isActive and: [ self isViewButton: c name ]) ifTrue: [
+            | uh |
+            uh := 3 * (Dpi isNil ifTrue: [ 96 ] ifFalse: [ Dpi ]) // 96.
+            self setRect: rect x: x + (w // 4) y: y + h - uh w: w // 2 h: uh.
+            brush := WinApi createSolidBrush: self accentColorRef.
+            WinApi fillRect: hdc rect: rect brush: brush.
+            WinApi deleteObject: brush ].
+        ^1
+    ]
+
+    "── the small helpers the handler leans on ───────────────────────────"
+
+    WinShell class >> drawRectScratch ^ <Integer> [
+        "One RECT, reused for every cell of every repaint. A fresh allocation
+         per paint would be an allocation per frame, and the arena is exactly
+         the tool that makes not doing that easy."
+        DrawRect isNil ifTrue: [ DrawRect := WinArena alloc: (WinApi sizeOf: 'RECT') ].
+        ^DrawRect
+    ]
+
+    WinShell class >> setRect: ptr <Integer> x: x <Integer> y: y <Integer> w: w <Integer> h: h <Integer> [
+        WinArena u32At: ptr + (WinApi offsetOf: 'RECT' field: 'left') put: x.
+        WinArena u32At: ptr + (WinApi offsetOf: 'RECT' field: 'top') put: y.
+        WinArena u32At: ptr + (WinApi offsetOf: 'RECT' field: 'right') put: x + w.
+        WinArena u32At: ptr + (WinApi offsetOf: 'RECT' field: 'bottom') put: y + h.
+        ^self
+    ]
+
+    WinShell class >> isViewButton: aName <Symbol> ^ <Boolean> [
+        ^self views anySatisfy: [ :v | (self viewButtonNameFor: (v at: 1)) == aName ]
+    ]
+
+    WinShell class >> viewSymbolForButton: aName <Symbol> ^ <Symbol> [
+        self views do: [ :v |
+            (self viewButtonNameFor: (v at: 1)) == aName ifTrue: [ ^v at: 1 ] ].
+        ^aName
+    ]
+
+    WinShell class >> invalidateBar [
+        "Ask Windows to repaint every owner-drawn cell, LATER. Called at the end
+         of a layout pass and after a view switch — the two moments the strip's
+         picture goes stale — and safe to call from inside the drain precisely
+         because it queues rather than sends."
+        self controls do: [ :c |
+            (self isBarControl: c name) ifTrue: [
+                WinApi invalidateRect: c handle rect: 0 erase: 1 ] ].
+        ^self
+    ]
+
+    WinShell class >> isBarControl: aName <Symbol> ^ <Boolean> [
+        ^(self isViewButton: aName) or: [ aName == #doit or: [ aName == #printit ] ]
+    ]
+
+    WinShell class >> activeViewButtonName ^ <Object> [
+        ActiveView isNil ifTrue: [ ^nil ].
+        ^self viewButtonNameFor: ActiveView
+    ]
+]
+
+"── WinControl: the label it draws with, and whether it is enabled ───────"
+Object subclass: WinControl [
+    barLabel ^ <String> [
+        "The text the control was created with — asked of Win32 rather than
+         remembered, so a label changed by anything else still draws right."
+        ^self text
+    ]
+
+    isEnabled ^ <Boolean> [
+        ^WinApi asBool: (WinApi isWindowEnabled: handle)
+    ]
+]
+
+Object subclass: WinApi [
+    WinApi class >> invalidateRect: hwnd <Integer> rect: rectPtr <Integer> erase: bErase <Integer> ^ <Integer> [
+        "ASYNCHRONOUS, and that asymmetry with `SendMessageW` is the whole
+         reason this call is the answer to WG4 D3's real problem.
+
+         An owner-drawn control is painted by `WM_DRAWITEM` sent to its parent
+         — and every moment the shell would naturally provoke one (creating the
+         control, `SetWindowPos` from the layout) happens INSIDE a VM entry
+         holding the busy guard, so the door correctly declines it and the cell
+         stays blank. Measured exactly that way: `drawCalls` 0 with `busy` 16.
+
+         `InvalidateRect` does not send anything. It marks the control dirty and
+         RETURNS; Windows delivers the paint later, from the queue, through the
+         pump — by which time the drain has released the guard and the VM is
+         idle. So the paint arrives at a door that will let it in, with no
+         exemption from the busy guard, no nested entry, and no re-entrancy for
+         the depth guard to have to make safe."
+        <primitive: FFI function: #InvalidateRect ret: #g args: #(g g g)>
+        ^self primitiveFailed: 'InvalidateRect'
+    ]
+
+    WinApi class >> isWindowEnabled: hwnd <Integer> ^ <Integer> [
+        <primitive: FFI function: #IsWindowEnabled ret: #g args: #(g)>
+        ^self primitiveFailed: 'IsWindowEnabled'
+    ]
+]

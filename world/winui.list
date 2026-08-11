@@ -36,3 +36,6 @@
 # WINARM (WG4, docs/ROADMAP.md WG4 row): the shell — view bar, lazy view
 # switching, docked transcript, live metrics. Overrides 92's hooks in turn.
 93_winui_shell.mst
+# WINARM (WG4 D3): the custom-drawn command bar — Fluent glyphs, 9pt labels
+# beneath, and the system accent underline on the active view.
+94_winui_drawing.mst

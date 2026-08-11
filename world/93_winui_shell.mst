@@ -184,7 +184,7 @@ Object subclass: WinApi [
 Object subclass: WinShell [
     <classVars: Wg4Enabled Views ActiveView ViewSwitchCount ViewBuildCount
                 TranscriptCollapsed TranscriptLines MetricsText MetricsUpdates
-                CommandsEnabled>
+                CommandsEnabled AccentColor LabelFont GlyphFont DrawRect DrawCalls DrawMisses DrawError>
 
     WinShell class >> wg4Enabled ^ <Boolean> [
         "`MACVM_WINUI_WG4=off` restores WG3's window exactly — the same shape
@@ -251,6 +251,8 @@ Object subclass: WinShell [
             c isNil ifFalse: [ c show: (v at: 1) == aSymbol ] ].
         ActiveView := aSymbol.
         ViewSwitchCount := (ViewSwitchCount isNil ifTrue: [ 0 ] ifFalse: [ ViewSwitchCount ]) + 1.
+        "The underline moved, so the old cell and the new one are both stale."
+        self invalidateBar.
         self syncCommandEnablement.
         self requestLayout.
         ^true
@@ -454,7 +456,7 @@ Object subclass: WinShell [
                 style: (((WinApi constant: 'WS_CHILD')
                     bitOr: (WinApi constant: 'WS_VISIBLE'))
                     bitOr: ((WinApi constant: 'WS_TABSTOP')
-                        bitOr: (WinApi constant: 'BS_PUSHBUTTON')))
+                        bitOr: (WinApi constant: 'BS_OWNERDRAW')))
                 exStyle: 0 ].
         #(#doit 'Do It' #printit 'Print It') pairsDo: [ :sym :label |
             self
@@ -464,7 +466,7 @@ Object subclass: WinShell [
                 style: (((WinApi constant: 'WS_CHILD')
                     bitOr: (WinApi constant: 'WS_VISIBLE'))
                     bitOr: ((WinApi constant: 'WS_TABSTOP')
-                        bitOr: (WinApi constant: 'BS_PUSHBUTTON')))
+                        bitOr: (WinApi constant: 'BS_OWNERDRAW')))
                 exStyle: 0 ].
 
         "The metrics readout: right-anchored, static, monospaced digits by
@@ -552,6 +554,11 @@ Object subclass: WinShell [
             self transcriptCollapsed
                 ifFalse: [ (c moveTo: (rects at: #transcript)) ifTrue: [ moved := moved + 1 ] ] ].
 
+        "WG4 D3: the strip's cells are owner-drawn, and every SetWindowPos above
+         happened inside this VM entry — so any paint they provoked was declined
+         at the door as busy. Queue a repaint instead; it arrives through the
+         pump once this pass has released the guard."
+        self invalidateBar.
         ^moved
     ]
 
