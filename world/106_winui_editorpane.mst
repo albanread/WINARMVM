@@ -75,6 +75,16 @@ Object subclass: WinApi [
     "WG6c-2c: a DC to measure in, with no window and no paint. `GetDC(NULL)`
      answers one for the whole screen — the conventional way to ask GDI about
      a font's metrics when you are not drawing — and it must be released."
+    WinApi class >> getTextExtentPoint32: hdc <Integer> text: str <Integer>
+                    count: n <Integer> into: sizePtr <Integer> ^ <Integer> [
+        "The font's OWN width for a string — what GDI would lay it out as if
+         nobody handed it a grid. Present so the drift between that and
+         `units * charWidth` is a MEASURED NUMBER rather than an assumption;
+         see `editorGlyphDrift`."
+        <primitive: FFI function: #GetTextExtentPoint32W ret: #g args: #(g g g g)>
+        ^self primitiveFailed: 'GetTextExtentPoint32W'
+    ]
+
     WinApi class >> getDC: hwnd <Integer> ^ <Integer> [
         <primitive: FFI function: #GetDC ret: #g args: #(g)>
         ^self primitiveFailed: 'GetDC'
@@ -86,7 +96,7 @@ Object subclass: WinApi [
 ]
 
 Object subclass: WinShell [
-    <classVars: EditorPaneHwnd EditorCharW EditorLineH PaintCalls PaintError CaretOwned MetricsError PaintOriginX PaintOriginY LastPaintRect SegDraws EditorDx EditorDxWidth>
+    <classVars: EditorPaneHwnd EditorCharW EditorLineH PaintCalls PaintError CaretOwned MetricsError PaintOriginX PaintOriginY LastPaintRect SegDraws EditorDx EditorDxWidth SizeScratch MetricsDpi>
 
     WinShell class >> editorPaneName ^ <Symbol> [ ^#editorPane ]
 
@@ -141,9 +151,25 @@ Object subclass: WinShell [
          against `editorCharWidth` rather than against 8 — so a world with no
          metrics still computes consistently, it just computes in units of a
          font it could not ask about."
-        | dc |
-        EditorCharW isNil ifFalse: [ ^self ].
-        [ dc := WinApi getDC: 0.
+        | dc target |
+        (EditorCharW isNil not and: [ MetricsDpi = self editorMetricsDpi ])
+            ifTrue: [ ^self ].
+        "THE PANE'S OWN DC when there is a pane, so the measurement happens in
+         the same device context the drawing will. `GetDC(NULL)` is the
+         fallback for the window-less case (a test, a headless load) and is
+         the PRIMARY monitor's context — which is the right answer only while
+         there is one monitor at one scale.
+
+         That distinction is the whole of this defect's remaining risk. The
+         glyphs are placed `charWidth` apart by the dx grid, so a charWidth
+         measured against a DIFFERENT font size than the one selected when
+         drawing does not merely misalign — it makes the glyphs OVERLAP, which
+         reads as smeared, doubled letters. Measuring the same font object in
+         the same DC makes that impossible rather than unlikely, and keying the
+         cache on DPI means moving the window to a differently-scaled monitor
+         re-measures instead of keeping a stale number."
+        target := self editorPaneHwnd.
+        [ dc := WinApi getDC: target.
           dc = 0 ifFalse: [
               [ | old rect |
                 old := WinApi selectObject: dc object: self monoFont.
@@ -156,13 +182,57 @@ Object subclass: WinShell [
                         bitOr: ((WinApi constant: 'DT_LEFT') bitOr: (WinApi constant: 'DT_SINGLELINE'))).
                 EditorCharW := ((WinArena rectAt: rect) at: 3) max: 1.
                 EditorLineH := ((WinArena rectAt: rect) at: 4) max: 1.
-                WinApi selectObject: dc object: old
-              ] ensure: [ WinApi releaseDC: 0 dc: dc ] ]
+                WinApi selectObject: dc object: old.
+                MetricsDpi := self editorMetricsDpi
+              ] ensure: [ WinApi releaseDC: target dc: dc ] ]
         ] on: Error do: [ :e | MetricsError := e messageText ].
         ^self
     ]
 
+    WinShell class >> editorMetricsDpi ^ <Integer> [
+        "The DPI the metrics were taken at. `Dpi` is nil until the window
+         opens, and `monoFont` bakes it in at creation — so a metric taken
+         before the window exists describes a different font from the one that
+         will be drawn with. Keying on it turns that from a silent mismatch
+         into a re-measurement."
+        ^self dpi isNil ifTrue: [ 96 ] ifFalse: [ self dpi ]
+    ]
+
+    WinShell class >> editorMetrics ^ <Array> [
+        "Everything a reader needs to tell a good metric from a stale one:
+         #(dpi charWidth lineHeight naturalWidthOfTenChars drift). Reported by
+         the gate, and the first thing to ask for when the pane looks smeared."
+        ^Array
+            with: self editorMetricsDpi
+            with: self editorCharWidth
+            with: self editorLineHeight
+            with: (self naturalWidthOf: 'MMMMMMMMMM')
+            with: (self editorGlyphDrift: 'MMMMMMMMMM')
+    ]
+
     WinShell class >> editorMaxCells ^ <Integer> [ ^2048 ]
+
+    WinShell class >> utf16UnitsOf: aString <String> ^ <Integer> [
+        "UTF-16 CODE UNITS, which is what `ExtTextOutW` counts — and NOT the
+         same number as `aString size`. A guest String is UTF-8 in this
+         dialect, so its size is a BYTE count; the two agree for ASCII and
+         part company at the first accented character. `caf` + U+00E9 is five
+         bytes and four units.
+
+         This matters because `ExtTextOutW` takes an explicit count where
+         `DrawText` took -1 and found its own terminator. Handing it the byte
+         count made it read PAST the NUL — one glyph of whatever followed the
+         string in the arena. Found by measuring the two numbers rather than
+         by reasoning about them, which is the only way this kind of thing
+         gets found.
+
+         The COLUMN arithmetic elsewhere in this file still counts in the
+         guest String's own units, which is the boundary rule WG5a and WG5c D4
+         both record and which this release scopes out with CJK. A non-ASCII
+         character therefore still advances the column by more cells than it
+         occupies; that is a known, named gap, not a new one."
+        ^(aString asUtf16Alien size // 2) - 1
+    ]
 
     WinShell class >> editorDxBuffer ^ <Integer> [
         "ONE ADVANCE PER CELL, all of them identical — the grid, as a block of
@@ -185,6 +255,61 @@ Object subclass: WinShell [
                 WinArena u32At: EditorDx + (i * 4) put: w ].
             EditorDxWidth := w ].
         ^EditorDx
+    ]
+
+    WinShell class >> naturalWidthOf: aString <String> ^ <Integer> [
+        "What GDI would make this string, laying it out its own way. Measured
+         in a screen DC with the code font selected — the same DC
+         `ensureEditorMetrics` uses and for the same reason: no window, no
+         paint, no dependency on when the first repaint happened.
+
+         Answers 0 when it cannot measure (off Windows, no GDI), which callers
+         read as `no drift information` rather than as `no drift`."
+        | dc out |
+        out := 0.
+        [ dc := WinApi getDC: 0.
+          dc = 0 ifFalse: [
+              [ | old sz |
+                old := WinApi selectObject: dc object: self monoFont.
+                sz := self sizeScratch.
+                WinApi getTextExtentPoint32: dc
+                    text: (WinArena scratchUtf16: aString)
+                    count: (self utf16UnitsOf: aString)
+                    into: sz.
+                out := WinArena i32At: sz.
+                WinApi selectObject: dc object: old
+              ] ensure: [ WinApi releaseDC: 0 dc: dc ] ]
+        ] on: Error do: [ :e | out := 0 ].
+        ^out
+    ]
+
+    WinShell class >> sizeScratch ^ <Integer> [
+        "Eight bytes: a SIZE is two LONGs. Allocated once and reused, like
+         every other scratch block in this layer."
+        SizeScratch isNil ifTrue: [ SizeScratch := WinArena alloc: 8 ].
+        ^SizeScratch
+    ]
+
+    WinShell class >> editorGlyphDrift: aString <String> ^ <Integer> [
+        "HOW FAR THE FONT AND THE GRID DISAGREE over one string, in pixels.
+
+         This is the bug that shipped, as a number. The pane positions each
+         syntax run at `column * charWidth` but used to hand the run's TEXT to
+         `DrawText`, which lays it out using the font's own per-glyph advances.
+         Non-zero drift means the glyphs inside a run walk away from the grid
+         and the next run snaps back — which on screen is doubled letters every
+         few characters, and was reported as exactly that.
+
+         `ExtTextOutW` with an explicit advance array makes the drift
+         IRRELEVANT rather than zero, which is why this is reported rather than
+         asserted to be zero: the number is expected to be non-zero, and its
+         being non-zero is precisely why the dx array is load-bearing. A future
+         change back to `DrawText` would be reintroducing this defect, and this
+         is here so that is visible instead of subtle."
+        | natural |
+        natural := self naturalWidthOf: aString.
+        natural = 0 ifTrue: [ ^0 ].
+        ^natural - ((self utf16UnitsOf: aString) * self editorCharWidth)
     ]
 
     WinShell class >> metricsError ^ <String> [
@@ -305,19 +430,16 @@ Object subclass: WinShell [
                     seg := text copyFrom: i to: j - 1.
                     WinApi setTextColor: hdc color: (WinSyntax colorFor: (r at: 3)).
                     SegDraws := SegDraws + 1.
-                    "ExtTextOutW with the dx grid, NOT DrawText. Every glyph is
-                     pinned to its own cell; the count is in characters, which
-                     for the ASCII this dialect's sources are is the String's
-                     own size (the UTF-16 boundary rule WG5a records applies
-                     the moment that stops being true, and CJK is out of scope
-                     for this release by the sprint's own decision)."
+                    "ExtTextOutW with the dx grid, NOT DrawText — every glyph
+                     pinned to its own cell. The count is in UTF-16 UNITS; see
+                     `utf16UnitsOf:` for why that is not the String's size."
                     WinApi extTextOut: hdc
                         x: PaintOriginX + ((i - lineStart) * charW)
                         y: PaintOriginY + (lineIndex * lineH)
                         options: 0
                         rect: 0
                         text: (WinArena scratchUtf16: seg)
-                        count: (seg size min: self editorMaxCells)
+                        count: ((self utf16UnitsOf: seg) min: self editorMaxCells)
                         dx: self editorDxBuffer ].
                 (j <= e and: [ (text at: j) = Character nl ]) ifTrue: [
                     lineIndex := lineIndex + 1.

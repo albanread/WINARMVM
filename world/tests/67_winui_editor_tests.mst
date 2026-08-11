@@ -40,7 +40,9 @@ TestCase subclass: WinUiEditorWg6cTests [
         self runTest: #testCopyingNothingLeavesTheClipboardAlone
              do: [ self testCopyingNothingLeavesTheClipboardAlone ].
         self runTest: #testTheEditorViewTilesItsContentRect
-             do: [ self testTheEditorViewTilesItsContentRect ]
+             do: [ self testTheEditorViewTilesItsContentRect ].
+        self runTest: #testUtf16UnitsAreNotByteCounts
+             do: [ self testUtf16UnitsAreNotByteCounts ]
     ]
 
     threeLines [ ^'one', (String with: Character nl), 'two', (String with: Character nl), 'three' ]
@@ -304,5 +306,32 @@ TestCase subclass: WinUiEditorWg6cTests [
         pane := r at: WinShell editorPaneName.
         self assert: (pane at: 3) >= 0
             description: 'a narrow window still gives the buffer a non-negative width'
+    ]
+
+    testUtf16UnitsAreNotByteCounts [
+        "`ExtTextOutW` takes an explicit COUNT, where `DrawText` took -1 and
+         found its own terminator. A guest String is UTF-8 here, so its `size`
+         is a BYTE count — and handing that to ExtTextOut makes it read PAST
+         the NUL, drawing one glyph of whatever followed the string in the
+         arena.
+
+         Pinned as an INEQUALITY on a non-ASCII string, because the two
+         numbers agree for every ASCII case and a test written over ASCII
+         alone would pass with the bug still in. `caf` + U+00E9 is the
+         smallest string that tells them apart: five bytes, four units."
+        | ascii accented |
+        ascii := 'abc'.
+        accented := 'caf' , (String with: (Character value: 195) with: (Character value: 169)).
+        self assert: (WinShell utf16UnitsOf: ascii) = 3
+            description: 'ASCII units equal its size, but got '
+                , (WinShell utf16UnitsOf: ascii) printString.
+        self assert: accented size = 5
+            description: 'the accented string is five UTF-8 BYTES'.
+        self assert: (WinShell utf16UnitsOf: accented) = 4
+            description: 'and four UTF-16 UNITS, but got '
+                , (WinShell utf16UnitsOf: accented) printString.
+        self assert: (WinShell utf16UnitsOf: accented) < accented size
+            description: 'the count handed to ExtTextOut must be the SMALLER of '
+                , 'the two, or it reads past the terminator'
     ]
 ]
