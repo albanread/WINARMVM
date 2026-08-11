@@ -1,0 +1,261 @@
+"── 106_winui_editorpane.mst — WG6c-1: the pane paints ───────────────────
+ docs/sprints/sprint_wg6c_detail.md WG6c-1. A code pane we draw ourselves,
+ over the rope that already exists.
+
+ WHY OURS RATHER THAN RICHEDIT: the model half was already built and tested
+ (`world/60_editor.mst` — a persistent rope with a newline index and free
+ undo, pinned against a String oracle) and so was the highlighter (WG5c
+ D1/D2, deliberately control-agnostic). What was missing was the view. The
+ sprint records the full reasoning; the short version is that building the
+ Editor on RichEdit and then replacing it would be writing it twice.
+
+ WHY A CHILD OF OUR OWN WINDOW CLASS: an SS_OWNERDRAW STATIC would paint
+ through the WM_DRAWITEM path WG4 D3 already built, and it can even hold
+ focus (measured: SetFocus on a STATIC works and GetFocus answers it) — but
+ a STATIC's WndProc is the SYSTEM's, and only WM_COMMAND/WM_NOTIFY/
+ WM_DRAWITEM are forwarded to a parent. WM_KEYDOWN and WM_CHAR are not, so
+ the pane would be focusable and mute. A child of `WinShell className` has
+ the DOOR as its WndProc, and both key messages are already allowlisted.
+
+ THE VIEW OWNS NO TEXT. `EditorSession` holds the document and answers the
+ whole buffer plus a caret offset on every change; this file paints what it
+ is given. 60's own note records that the earlier incremental line-damage
+ protocol DID drift, and that blasting the whole buffer replaced it — so
+ there is no line bookkeeping here to fall out of sync, by construction.
+
+ MONOSPACED, WHICH IS WHY THE ARITHMETIC IS EASY: with a fixed advance,
+ column N is at `N * charWidth` and line M at `M * lineHeight`. No per-run
+ measurement, no cumulative rounding, and hit-testing (WG6c-2) is a
+ division."
+
+Object subclass: WinApi [
+
+    WinApi class >> createCaret: hwnd <Integer> bitmap: hbm <Integer> width: w <Integer> height: h <Integer> ^ <Integer> [
+        <primitive: FFI function: #CreateCaret ret: #g args: #(g g g g)>
+        ^self primitiveFailed: 'CreateCaret'
+    ]
+    WinApi class >> setCaretPos: x <Integer> y: y <Integer> ^ <Integer> [
+        <primitive: FFI function: #SetCaretPos ret: #g args: #(g g)>
+        ^self primitiveFailed: 'SetCaretPos'
+    ]
+    WinApi class >> showCaret: hwnd <Integer> ^ <Integer> [
+        <primitive: FFI function: #ShowCaret ret: #g args: #(g)>
+        ^self primitiveFailed: 'ShowCaret'
+    ]
+    WinApi class >> hideCaret: hwnd <Integer> ^ <Integer> [
+        <primitive: FFI function: #HideCaret ret: #g args: #(g)>
+        ^self primitiveFailed: 'HideCaret'
+    ]
+    WinApi class >> destroyCaret ^ <Integer> [
+        <primitive: FFI function: #DestroyCaret ret: #g args: #()>
+        ^self primitiveFailed: 'DestroyCaret'
+    ]
+]
+
+Object subclass: WinShell [
+    <classVars: EditorPaneHwnd EditorCharW EditorLineH PaintCalls PaintError CaretOwned>
+
+    WinShell class >> editorPaneName ^ <Symbol> [ ^#editorPane ]
+
+    "── The pane ─────────────────────────────────────────────────────────"
+
+    WinShell class >> buildEditorPane [
+        "Created with OUR class name, which is what puts the door in front of
+         its keystrokes. Every other control in this shell is a stock class
+         and paints itself; this one is ours and does not."
+        | c |
+        (self controlNamed: self editorPaneName) ifNotNil: [ :x | ^self ].
+        c := self
+            addControl: self editorPaneName
+            class: self className
+            text: ''
+            style: (((WinApi constant: 'WS_CHILD')
+                bitOr: (WinApi constant: 'WS_BORDER'))
+                bitOr: (WinApi constant: 'WS_CLIPSIBLINGS'))
+            exStyle: 0.
+        c ifNotNil: [ :x | EditorPaneHwnd := x handle ].
+        ^self
+    ]
+
+    WinShell class >> editorPaneHwnd ^ <Integer> [
+        ^EditorPaneHwnd isNil ifTrue: [ 0 ] ifFalse: [ EditorPaneHwnd ] ]
+
+    "── Metrics, measured once ───────────────────────────────────────────"
+
+    WinShell class >> measureEditorFontIn: hdc <Integer> [
+        "One character of a MONOSPACED face, so the advance is the same for
+         every glyph and all the layout arithmetic below is multiplication.
+         DT_CALCRECT measures without drawing, which is the same facility
+         WG6a used to decide whether a bar label fits."
+        | rect |
+        EditorCharW isNil ifFalse: [ ^self ].
+        rect := self drawRectScratch.
+        self setRect: rect x: 0 y: 0 w: 4096 h: 256.
+        WinApi drawText: hdc
+            text: (WinArena scratchUtf16: 'M') count: 0 - 1
+            rect: rect
+            format: ((WinApi constant: 'DT_CALCRECT')
+                bitOr: ((WinApi constant: 'DT_LEFT') bitOr: (WinApi constant: 'DT_SINGLELINE'))).
+        EditorCharW := ((WinArena rectAt: rect) at: 3) max: 1.
+        EditorLineH := ((WinArena rectAt: rect) at: 4) max: 1.
+        ^self
+    ]
+
+    WinShell class >> editorCharWidth ^ <Integer> [
+        ^EditorCharW isNil ifTrue: [ 8 ] ifFalse: [ EditorCharW ] ]
+    WinShell class >> editorLineHeight ^ <Integer> [
+        ^EditorLineH isNil ifTrue: [ 16 ] ifFalse: [ EditorLineH ] ]
+
+    "── The paint, called SYNCHRONOUSLY from the door ────────────────────"
+
+    WinShell class >> paintWindow: hwnd <Integer> dc: hdc <Integer>
+                      x: x <Integer> y: y <Integer> w: w <Integer> h: h <Integer> ^ <Integer> [
+        "WM_PAINT, between the door's BeginPaint and EndPaint. Answers 1 when
+         it painted and 0 to let DefWindowProcW have it.
+
+         A RAISE IN HERE IS INVISIBLE BY NATURE — the pane simply stays blank
+         and nothing says why — so it is captured into `PaintError` rather
+         than propagated, exactly as WG4 D3's own drawing handler does. The
+         door's EndPaint runs either way; that is deliberately not this
+         method's responsibility."
+        PaintCalls := (PaintCalls isNil ifTrue: [ 0 ] ifFalse: [ PaintCalls ]) + 1.
+        hwnd = self editorPaneHwnd ifFalse: [ ^0 ].
+        ^[ self paintEditorIn: hdc x: x y: y w: w h: h ]
+            on: Error do: [ :e | PaintError := e messageText. 0 ]
+    ]
+
+    WinShell class >> paintCalls ^ <Integer> [
+        ^PaintCalls isNil ifTrue: [ 0 ] ifFalse: [ PaintCalls ] ]
+    WinShell class >> paintError ^ <String> [
+        ^PaintError isNil ifTrue: [ '' ] ifFalse: [ PaintError ] ]
+
+    WinShell class >> editorText ^ <String> [
+        "Whatever the session holds, or an empty document. The view asks; it
+         never keeps a copy — which is the property that makes it impossible
+         for the two to disagree."
+        ^EditorSession current
+            ifNil: [ '' ]
+            ifNotNil: [ :s | s documentString ]
+    ]
+
+    WinShell class >> paintEditorIn: hdc <Integer> x: x <Integer> y: y <Integer>
+                      w: w <Integer> h: h <Integer> ^ <Integer> [
+        | rect brush old text runs lineH charW lineIndex lineStart |
+        rect := self drawRectScratch.
+        self setRect: rect x: x y: y w: w h: h.
+        brush := WinApi createSolidBrush: 16rFFFFFF.
+        WinApi fillRect: hdc rect: rect brush: brush.
+        WinApi deleteObject: brush.
+        old := WinApi selectObject: hdc object: self monoFont.
+        self measureEditorFontIn: hdc.
+        WinApi setBkMode: hdc mode: (WinApi constant: 'TRANSPARENT').
+        text := self editorText.
+        text isEmpty ifTrue: [
+            WinApi selectObject: hdc object: old.
+            ^1 ].
+        runs := WinSyntax runsFor: text.
+        lineH := self editorLineHeight.
+        charW := self editorCharWidth.
+        lineIndex := 0.
+        lineStart := 1.
+        "One pass over the tiling runs, splitting each at newlines. The runs
+         TILE the source (66's backbone property), so walking them walks every
+         character exactly once and the column counter cannot drift."
+        runs do: [ :r |
+            | s e i seg |
+            s := r at: 1.
+            e := s + (r at: 2) - 1.
+            i := s.
+            [ i <= e ] whileTrue: [
+                | j |
+                j := i.
+                [ j <= e and: [ (text at: j) ~= Character nl ] ] whileTrue: [ j := j + 1 ].
+                j > i ifTrue: [
+                    seg := text copyFrom: i to: j - 1.
+                    WinApi setTextColor: hdc color: (WinSyntax colorFor: (r at: 3)).
+                    self setRect: rect
+                        x: x + ((i - lineStart) * charW)
+                        y: y + (lineIndex * lineH)
+                        w: (seg size * charW) + charW
+                        h: lineH.
+                    WinApi drawText: hdc
+                        text: (WinArena scratchUtf16: seg) count: 0 - 1
+                        rect: rect
+                        format: (((WinApi constant: 'DT_LEFT')
+                            bitOr: (WinApi constant: 'DT_TOP'))
+                            bitOr: ((WinApi constant: 'DT_SINGLELINE')
+                                bitOr: (WinApi constant: 'DT_NOCLIP'))) ].
+                (j <= e and: [ (text at: j) = Character nl ]) ifTrue: [
+                    lineIndex := lineIndex + 1.
+                    lineStart := j + 1 ].
+                i := j + 1 ] ].
+        WinApi selectObject: hdc object: old.
+        ^1
+    ]
+
+    "── The caret ────────────────────────────────────────────────────────"
+
+    WinShell class >> caretPointFor: offset <Integer> ^ <Array> [
+        "Offset (1-based, as the rope counts) to a pixel position. PURE over
+         the text, so the arithmetic that puts the cursor in the right place
+         is checkable without a window — and it is the same arithmetic
+         WG6c-2's hit-testing will invert."
+        | text line col i |
+        text := self editorText.
+        line := 0.
+        col := 0.
+        i := 1.
+        [ i < offset and: [ i <= text size ] ] whileTrue: [
+            (text at: i) = Character nl
+                ifTrue: [ line := line + 1. col := 0 ]
+                ifFalse: [ col := col + 1 ].
+            i := i + 1 ].
+        ^Array with: col * self editorCharWidth with: line * self editorLineHeight
+    ]
+
+    WinShell class >> syncEditorCaret [
+        "Created on focus, destroyed on losing it. The caret is a THREAD-wide
+         resource in Win32, not a per-window one: CreateCaret replaces
+         whatever caret exists anywhere, so a pane that made one and never
+         destroyed it leaves a cursor blinking in a window that does not have
+         focus — which reads as two cursors and is a classic."
+        | hwnd p |
+        hwnd := self editorPaneHwnd.
+        hwnd = 0 ifTrue: [ ^self ].
+        WinApi getFocus = hwnd
+            ifFalse: [
+                CaretOwned == true ifTrue: [ WinApi destroyCaret. CaretOwned := false ].
+                ^self ].
+        CaretOwned == true ifFalse: [
+            WinApi createCaret: hwnd bitmap: 0 width: 2 height: self editorLineHeight.
+            WinApi showCaret: hwnd.
+            CaretOwned := true ].
+        p := self caretPointFor: (EditorSession current
+            ifNil: [ 1 ] ifNotNil: [ :s | s cursorOffset ]).
+        WinApi setCaretPos: (p at: 1) + 2 y: (p at: 2) + 2.
+        ^self
+    ]
+
+    "── Layout and refresh ───────────────────────────────────────────────"
+
+    WinShell class >> layoutEditorPane: content <Array> [
+        (self controlNamed: self editorPaneName) ifNotNil: [ :c | c moveTo: content ].
+        ^self
+    ]
+
+    WinShell class >> refreshEditorPane [
+        "InvalidateRect rather than a direct draw, for WG4 D3's own reason: a
+         caller is usually inside a VM entry holding the busy guard, and a
+         paint provoked synchronously from there would be declined at the
+         door. Invalidation is asynchronous and arrives through the pump."
+        self editorPaneHwnd = 0 ifTrue: [ ^self ].
+        WinApi invalidateRect: self editorPaneHwnd rect: 0 erase: 0.
+        ^self
+    ]
+
+    WinShell class >> openEditorOn: aString <String> [
+        EditorSession openOn: aString.
+        self refreshEditorPane.
+        ^self
+    ]
+]

@@ -1601,6 +1601,12 @@ Object subclass: WinShell [
     WinShell class >> outlinerName [ ^#outlinerTree ]
     WinShell class >> rebuildOutlinerIfBuilt [ ^self ]
     WinShell class >> populateSelectedClass [ ^false ]
+    "WG6c-1's editor pane; 106 overrides. `paintWindow:` MUST exist here as a
+     no-op: WM_PAINT is on the door's allowlist from WG6c-1, so it is sent the
+     moment a window of our class appears — including before 106 has loaded."
+    WinShell class >> paintWindow: hwnd dc: hdc x: x y: y w: w h: h [ ^0 ]
+    WinShell class >> layoutEditorPane: content [ ^self ]
+    WinShell class >> syncEditorCaret [ ^self ]
     "WG6b's Find view; 105 overrides."
     WinShell class >> showFindPanes: aBool [ ^self ]
     WinShell class >> layoutFindPanes: content [ ^self ]

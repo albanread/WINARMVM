@@ -86,3 +86,8 @@
 # selection helpers. Loads after 99 (WinHost) and after 98 (the Browser's
 # selection helpers it drives).
 105_winui_find.mst
+# WINARM (WG6c-1): the editor pane — a child of OUR window class, so the door
+# is its WndProc and WM_PAINT/WM_KEYDOWN/WM_CHAR all reach Smalltalk. Paints
+# `EditorSession`'s rope with WG5c's tokenizer and palette. Loads after 100
+# (the tokenizer it names) and after 94 (the drawing helpers it reuses).
+106_winui_editorpane.mst
