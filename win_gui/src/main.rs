@@ -108,6 +108,13 @@ fn main() {
     std::process::exit(1);
 }
 
+// WG4 D1: the two-VM handshake (docs/sprints/sprint_wg4_detail.md). A local
+// module, not a `#[path]` include: the Cocoa twin it mirrors is close but not
+// identical (the wake is a `PostMessageW`, not a run-loop hop), and a shared
+// copy would have to grow a platform switch inside it.
+#[cfg(windows)]
+mod boot;
+
 #[cfg(windows)]
 #[path = "../../gui/src/control.rs"]
 mod control;
@@ -131,9 +138,9 @@ mod app {
     use windows::Win32::System::Threading::GetCurrentThreadId;
     use windows::Win32::UI::WindowsAndMessaging::{
         DispatchMessageW, GetDlgItem, GetMessageW, GetWindowThreadProcessId, IsWindow,
-        PeekMessageW, PostQuitMessage, PostThreadMessageW, SendMessageW, SetWindowPos,
-        TranslateMessage, HWND_TOP, MSG, PM_NOREMOVE, PM_REMOVE, SWP_NOMOVE, SWP_NOZORDER, WM_APP,
-        WM_QUIT,
+        PeekMessageW, PostMessageW, PostQuitMessage, PostThreadMessageW, SendMessageW,
+        SetWindowPos, TranslateMessage, HWND_TOP, MSG, PM_NOREMOVE, PM_REMOVE, SWP_NOMOVE,
+        SWP_NOZORDER, WM_APP, WM_QUIT,
     };
 
     use crate::control::CtlReq;
@@ -220,6 +227,84 @@ mod app {
         vm.exec(src)
     }
 
+    /// The UI window's HWND, cached for ONE purpose: the primary's wake.
+    ///
+    /// `shell_hwnd` deliberately never caches — `WinShell` is the authority and
+    /// a Rust copy goes stale the moment a doit closes the window. This is the
+    /// one exception, and it is safe for the same reason it is necessary: the
+    /// wake fires on the PRIMARY's thread, which may not touch the UI VM at
+    /// all, so it cannot ask. A stale handle costs nothing — `PostMessageW`
+    /// fails and answers 0, and the heartbeat still runs — whereas asking
+    /// across the seam would be exactly the shared-state coupling §2.2 forbids.
+    static UI_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+    /// Publish (or clear) the HWND the primary's wake posts to. Called from the
+    /// UI thread only.
+    fn publish_ui_hwnd(h: isize) {
+        UI_HWND.store(h, std::sync::atomic::Ordering::Release);
+    }
+
+    /// The primary's `InboxWakeFn`: get the UI thread to LOOK AT ITS INBOX.
+    ///
+    /// Runs on the primary's thread, so it does exactly one thing and that
+    /// thing is thread-safe by design: post `WM_APP_DRAIN`. The reply pump is
+    /// then an ordinary drain callee, which is what keeps §2.4a intact with a
+    /// second VM in the picture — the wake RECORDS that there is work; the
+    /// drain does it.
+    ///
+    /// It cannot call `win_wndproc::request_drain`: that reads and writes the
+    /// UI thread's own thread-locals (the requested flag and the posted latch),
+    /// and setting them from here would mark the wrong thread. The cost is that
+    /// a chatty primary posts more than the latch would allow; the WORK still
+    /// coalesces in the drain, which is the property that matters.
+    fn wake_ui_thread() {
+        let h = UI_HWND.load(std::sync::atomic::Ordering::Acquire);
+        if h == 0 {
+            return; // no window yet — the heartbeat will find the work
+        }
+        unsafe {
+            let _ = PostMessageW(
+                Some(HWND(h as *mut core::ffi::c_void)),
+                macvm::runtime::win_wndproc::WM_APP_DRAIN,
+                WPARAM(0),
+                LPARAM(0),
+            );
+        }
+    }
+
+    /// The two per-sprint escape hatches, applied to a UI VM that has already
+    /// loaded `winui.list`. Shared by both boot paths, because a hatch that
+    /// only worked on one of them would silently stop bisecting the moment the
+    /// default path changed — which is exactly what the hatches exist to
+    /// prevent.
+    fn apply_layer_hatches(vm: &mut VmHandle) {
+        // WG3: `tests_wg3.md` item 1 wants WG2's whole gate re-run "with the
+        // drain installed and NO CONTROL CREATED" — a themed list view
+        // repaints, a repaint sends `NM_CUSTOMDRAW`, and WG2's gate counts
+        // every message that crossed the door; controls also put white
+        // list-view pixels exactly where WG1's and WG2's gates read the
+        // window's background fill.
+        if matches!(
+            std::env::var("MACVM_WINUI_CONTROLS").as_deref(),
+            Ok("off") | Ok("0") | Ok("false")
+        ) {
+            if let Err(e) = guarded_exec(vm, "WinShell controlsEnabled: false.") {
+                eprintln!("macvm-winui: MACVM_WINUI_CONTROLS=off: {e}");
+            }
+        }
+        // WG4: the same hatch one sprint on. `gate-wg3` runs with the shell
+        // off, because its assertions are about WG3's three controls in WG3's
+        // three bands.
+        if matches!(
+            std::env::var("MACVM_WINUI_WG4").as_deref(),
+            Ok("off") | Ok("0") | Ok("false")
+        ) {
+            if let Err(e) = guarded_exec(vm, "WinShell wg4Enabled: false.") {
+                eprintln!("macvm-winui: MACVM_WINUI_WG4=off: {e}");
+            }
+        }
+    }
+
     /// Boot the UI VM **on the current thread**, then layer `winui.list`.
     fn boot_ui_vm() -> Result<VmHandle, String> {
         let world = world_dir();
@@ -242,25 +327,7 @@ mod app {
         // fill. So the older gates set this and go on testing the
         // configuration they were written against. Default is ON: this is the
         // sprint that adds controls.
-        if matches!(
-            std::env::var("MACVM_WINUI_CONTROLS").as_deref(),
-            Ok("off") | Ok("0") | Ok("false")
-        ) {
-            guarded_exec(&mut vm, "WinShell controlsEnabled: false.")
-                .map_err(|e| format!("MACVM_WINUI_CONTROLS=off: {e}"))?;
-        }
-        // WINARM (WG4): the same escape hatch one sprint on. `gate-wg3` runs
-        // with the shell OFF, because its assertions are about WG3's own
-        // three controls in WG3's own three bands — a gate that could only
-        // ever run the newest layer could not bisect a regression to a
-        // sprint. Default is ON: this is the sprint that adds the shell.
-        if matches!(
-            std::env::var("MACVM_WINUI_WG4").as_deref(),
-            Ok("off") | Ok("0") | Ok("false")
-        ) {
-            guarded_exec(&mut vm, "WinShell wg4Enabled: false.")
-                .map_err(|e| format!("MACVM_WINUI_WG4=off: {e}"))?;
-        }
+        apply_layer_hatches(&mut vm);
         Ok(vm)
     }
 
@@ -688,7 +755,15 @@ mod app {
     /// paths print different lines and `just gate-wg2` asserts it saw the
     /// Smalltalk one and did NOT see this one. Safety and provability, rather
     /// than a choice between them.
-    pub fn pump(vmp: *mut VmHandle, rx: Option<&Receiver<CtlReq>>, window: HWND) -> i32 {
+    /// `inbox`: the primary -> UI channel, when the two-VM split is on (WG4
+    /// D1). `None` on the single-VM path, where there is no primary to hear
+    /// from — the older gates' configuration.
+    pub fn pump(
+        vmp: *mut VmHandle,
+        rx: Option<&Receiver<CtlReq>>,
+        window: HWND,
+        inbox: Option<&macvm::runtime::workers::HostedInbox>,
+    ) -> i32 {
         let mut msg = MSG::default();
         let mut had_window = !window.0.is_null();
         loop {
@@ -716,6 +791,35 @@ mod app {
                         // thread that dispatches), so this `&mut` is unique.
                         let vm: &mut VmHandle = unsafe { &mut *vmp };
                         drain_control_requests(vm, rx);
+                    }
+                    // WG4 D1: the primary -> UI inbox, pumped HERE and nowhere
+                    // else. This is the Windows twin of the Mac's
+                    // `drain_perform` envelope loop, and the placement is the
+                    // whole of §2.4a's rule with a second VM in the picture:
+                    // `DispatchMessageW` has RETURNED, so the VM is quiescent
+                    // and provably not inside a callback. An envelope
+                    // dispatched from the door would be a nested VM entry —
+                    // the exact failure the drain exists to prevent.
+                    if let Some(inbox) = inbox {
+                        // SAFETY: as above — between dispatches, on the one
+                        // thread that dispatches, no door running.
+                        let vm: &mut VmHandle = unsafe { &mut *vmp };
+                        while let Some(env) = inbox.poll() {
+                            // A payload-less envelope is a BARE NUDGE — the
+                            // primary's boot poke is exactly one, and its only
+                            // job is to make the wake fire so this loop runs.
+                            // Handing empty bytes to the unpickler raises `bad
+                            // pickle bytes` in the guest, and that recovered
+                            // error unwinds the dispatch and leaves the reply
+                            // routing broken for every LATER envelope — which
+                            // is how a working round trip silently stopped
+                            // working after the first one. Measured, then
+                            // fixed here.
+                            if env.bytes.is_empty() {
+                                continue;
+                            }
+                            let _ = vm.dispatch_hosted_envelope(env);
+                        }
                     }
                     if had_window && !unsafe { IsWindow(Some(window)) }.as_bool() {
                         // WG1's Δ 2 rule, still: a remembered HWND is not a
@@ -800,15 +904,61 @@ mod app {
     }
 
     /// The default mode: open the window and pump until it goes away.
+    /// Is the two-VM split on? Default YES — it is §2.2's commitment 2 and the
+    /// reason the UI does not block. `MACVM_WINUI_PRIMARY=off` boots the single
+    /// VM WG1..WG3 were written against: those gates count MESSAGES, and the
+    /// primary's boot poke is one more `WM_APP_DRAIN` than their arithmetic
+    /// expects. Same shape of hatch, same reason, as `MACVM_WINUI_WG4`.
+    fn primary_enabled() -> bool {
+        !matches!(
+            std::env::var("MACVM_WINUI_PRIMARY").as_deref(),
+            Ok("off") | Ok("0") | Ok("false")
+        )
+    }
+
     pub fn run() -> i32 {
         ensure_message_queue();
-        let mut vm = match boot_ui_vm() {
-            Ok(vm) => Box::new(vm),
-            Err(e) => {
-                eprintln!("macvm-winui: {e}");
-                return 2;
+        // WG4 D1: the primary VM on a background thread, the UI VM in place on
+        // THIS one. The handshake parks until the primary is up and has
+        // registered us as its hosted peer, so by the time this returns the
+        // seam is live in both directions.
+        let (mut vm, wired) = if primary_enabled() {
+            match crate::boot::handshake_wire_vms(
+                world_dir(),
+                world_dir().join("winui.list"),
+                FatalMode::ExitProcess,
+                std::sync::Arc::new(wake_ui_thread),
+            ) {
+                Ok(w) => {
+                    let boxed = Box::new(w.ui_worker);
+                    println!(
+                        "macvm-winui: two VMs wired — primary on {:?}, UI worker id {} on main",
+                        w.primary_thread.thread().name().unwrap_or("?"),
+                        w.hosted_id,
+                    );
+                    (boxed, Some((w.hosted_id, w.hosted_inbox, w.primary_thread)))
+                }
+                Err(e) => {
+                    eprintln!("macvm-winui: {}", e.msg);
+                    return 2;
+                }
+            }
+        } else {
+            match boot_ui_vm() {
+                Ok(vm) => (Box::new(vm), None),
+                Err(e) => {
+                    eprintln!("macvm-winui: {e}");
+                    return 2;
+                }
             }
         };
+        // The handshake loads `winui.list` itself, but the two env hatches
+        // WG3 and WG4 own are applied by `boot_ui_vm` — so apply them here too
+        // on the two-VM path, before anything opens a window.
+        if wired.is_some() {
+            apply_layer_hatches(&mut vm);
+        }
+        let _wired = wired;
         // WG2: the door's half of the arrangement. `publish_ui_vm` is the CG3
         // mechanism — a thread-local `*mut VmHandle` a trampoline can read with
         // no Rust lifetime to borrow against — and it is NOT
@@ -823,7 +973,7 @@ mod app {
         //
         // Published BEFORE `openMain`, because `CreateWindowExW` calls the door
         // before it returns the HWND.
-        let vmp: *mut VmHandle = &mut *vm;
+        let vmp: *mut VmHandle = &mut **&mut vm;
         publish_ui_vm(vmp);
         println!(
             "macvm-winui: WndProc door published at 16r{:X} (allowlist {} messages, enabled={})",
@@ -866,6 +1016,12 @@ mod app {
         // state, so the door starts counting from a live, shown window.
         win_wndproc::reset_stats();
         let window = shell_hwnd(&mut vm);
+        // WG4 D1: publish the handle the PRIMARY's wake posts to. Until this
+        // runs the wake is a no-op and a reply only gets noticed when some
+        // other message happens to wake the pump — which works, and hides a
+        // latency bug behind whatever else the window was doing. Published
+        // once the window is real, cleared when it goes (below).
+        publish_ui_hwnd(window.0 as isize);
         // A window owned by another thread would never receive a dispatched
         // message and the app would look hung with nothing in any log, so
         // this is a refusal to start rather than a warning. No window at all
@@ -877,7 +1033,12 @@ mod app {
             return 3;
         }
 
-        let code = pump(vmp, rx.as_ref(), window);
+        let code = pump(
+            vmp,
+            rx.as_ref(),
+            window,
+            _wired.as_ref().map(|(_, ib, _)| ib),
+        );
         println!("macvm-winui: {}", win_wndproc::stats_line());
         println!("macvm-winui: message loop ended, exit {code}");
         // The door outlives nothing: unpublish before the box drops, so a late
