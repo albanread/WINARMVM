@@ -20,6 +20,12 @@ edition = "2021"
 name = "winui_render"
 crate-type = ["cdylib"]
 
+# `DrawGlyphRun` takes a `windows_numerics::Vector2` for the baseline origin,
+# and `windows` does not re-export the crate — so it is named here at the same
+# 0.3 the 0.62 `windows` itself depends on, sharing one copy.
+[target.'cfg(windows)'.dependencies.windows-numerics]
+version = "0.3"
+
 [target.'cfg(windows)'.dependencies.windows]
 # The same 0.62 `gui` and `win_gui` pin, so a workspace build shares one copy.
 version = "0.62"
@@ -33,4 +39,6 @@ features = [
     "Win32_Graphics_Direct3D",
     "Win32_Graphics_Direct3D11",
     "Win32_Graphics_Imaging",
+    "Win32_System_Com",
+    "Win32_UI_WindowsAndMessaging",
 ]

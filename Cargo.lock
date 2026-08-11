@@ -417,6 +417,7 @@ name = "winui_render"
 version = "1.0.0"
 dependencies = [
  "windows",
+ "windows-numerics",
 ]
 
 [[package]]
