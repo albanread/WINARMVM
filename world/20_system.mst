@@ -41,7 +41,7 @@ Object subclass: SystemDictionary [
          millisecondClock above, which is monotonic since VM start and must
          stay that way (a duration must never see an NTP or DST adjustment
          as elapsed time). WINARM P0, prim 267."
-        <primitive: 267>
+        <primitive: 301>
     ]
     platformName ^ <Symbol> [
         "The host operating system, as a Symbol: #macos, #windows, or
@@ -51,7 +51,7 @@ Object subclass: SystemDictionary [
          instead of two forked ones. It names the OS only, never the
          architecture: every use so far is 'does this OS have that
          syscall', and both supported hosts are AArch64 regardless."
-        <primitive: 266>
+        <primitive: 300>
     ]
     microsecondClock ^ <Integer> [
         "Monotonic elapsed-since-VM-start clock in microseconds (same source

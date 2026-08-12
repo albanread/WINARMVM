@@ -686,37 +686,46 @@ in ten seconds, ~10.4 gen/s against the 15/s it asks for) with its 5x7 HUD;
 `45c_freecell.mst` deals 617 with real ranks, suits, free cells and
 foundations. Both are `git show upstream/main:` byte-for-byte. W0-W5 done.
 
-**BLOCKING DEFECT — the primitive numbers have COLLIDED.** WINARM
-independently allocated ids 266-276 for its own Windows primitives
-(`platformName` 266, `wallClockMilliseconds` 267, the WinProbe winkb block
-268-271, `primWndProcAddress` 272 ...). Upstream uses those SAME ids for
-GamePane shared memory (`overscan:` 266, `scrollTo:` 267, `openDirect:` 268,
-`screenMemory` 269, `screenStride` 270, `textMemory` 271, `textCols`/`textRows`
-272/273, Alien `replaceFrom:` 274, `paletteMemory`/`paletteGlobalBase`
-275/276).
+**FIXED — the primitive numbers had COLLIDED.** WINARM independently allocated
+ids 266-272 for its own Windows primitives while upstream had allocated the SAME
+ids to GamePane shared memory. That broke the portability contract at its
+foundation: the same Smalltalk cannot run on two machines while a primitive
+number means two different things. WINARM's moved to 300-306 (upstream is the
+source of truth and cannot move; 300+ leaves it the whole 200-299 block it has
+been growing into):
 
-This is not a detail — **it breaks the portability contract at its
-foundation.** The same Smalltalk cannot run on both machines while a primitive
-number means two different things. Minesweeper is the proof: its 0-argument
-`textMemory` (271) reaches WINARM'''s 1-argument `primWinkbStructSize:`, reads
-`args[1]` off the end of a 1-element slice, and PANICS the primary —
-`index out of bounds: the len is 1 but the index is 1`, and the user'''s image
-is gone.
+| was | now | WINARM primitive | upstream wanted the old number for |
+|---|---|---|---|
+| 266 | 300 |  |  |
+| 267 | 301 |  |  |
+| 268 | 302 |  |  |
+| 269 | 303 |  |  |
+| 270 | 304 |  |  |
+| 271 | 305 |  |  |
+| 272 | 306 |  |  |
 
-The fix is to renumber WINARM'''s Windows-specific primitives OUT of upstream'''s
-range (upstream is the source of truth and cannot move), touching the
-`PRIMITIVES` table, the id->name registry, and every `<primitive: N>` in
-`world/`. Nothing in W7-W9 should be built until that is done, or it will be
-built on top of a collision.
+**Arity guards were not enough, and the reason is worth keeping.** They were
+added first and they are correct —  and  now
+fail a primitive whose declared arity does not match the method's, instead of
+indexing past the end of the argument slice. But 272 was  upstream and
+ here, BOTH taking no arguments: identical arity, so no
+guard can see the difference and the wrong primitive simply runs, answering a
+window-proc address as a column count. Only distinct numbers fix that.
 
-**Partly hardened, NOT closed.** A guest must never be able to panic the VM by
-declaring a primitive with the wrong arity, whatever the number means. Arity
-guards now sit in both primitive call paths — `interpreter/send.rs`'''s
-`try_primitive` and `codecache/stubs.rs`'''s `rt_call_primitive` — failing the
-primitive (so the method'''s own `^nil` body runs) instead of indexing past the
-end. Both suites stay green. **But Minesweeper still panics**, so there is a
-THIRD path into `prim_by_id` that is not yet guarded; find it before renumbering
-so the guard can be tested by the same reproducer.
+**And an unimplemented primitive is now a FALLTHROUGH, not a crash.** A method
+may declare any number; whether this VM implements it is not the guest's
+business, and Smalltalk already has an exact contract for a primitive that does
+not happen — the method's own body runs. That is precisely what upstream's
+GamePane wrappers rely on ( answers ,  answers
+), which is how its games LOAD and degrade on a build that has not
+implemented them. It used to , so opening Minesweeper killed the primary
+and took the user'''s image with it — from a build whose only sin was not having
+written that primitive yet.
+
+Minesweeper now draws its tile grid and the shell survives. It is still WRONG —
+sheared, because / are no-ops and the world buffer is
+bigger than the viewport, and its HUD is missing because there is no text plane.
+That is W8/W9, and it is now a missing feature rather than a crash.
 
 **WG11 — GamePane parity (settled 2026-08-12).** Not just `shader:` — the
 whole of upstream's guest-facing games surface, implemented on the D3D11 pipe,

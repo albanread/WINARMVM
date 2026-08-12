@@ -1478,7 +1478,7 @@ pub static PRIMITIVES: &[PrimDesc] = &[
     },
     // WINARM (P0 D5). See `prim_platform_name` for why the world needs this.
     PrimDesc {
-        id: 266,
+        id: 300,
         name: "platformName",
         f: prim_platform_name,
         argc: 0,
@@ -1486,7 +1486,7 @@ pub static PRIMITIVES: &[PrimDesc] = &[
         can_fail: false,
     },
     PrimDesc {
-        id: 267,
+        id: 301,
         name: "wallClockMilliseconds",
         f: prim_wall_clock_milliseconds,
         argc: 0,
@@ -1501,7 +1501,7 @@ pub static PRIMITIVES: &[PrimDesc] = &[
     // three, and `docs/sprints/sprint_wg0_detail.md` D2 for the rule they
     // exist to keep ("the database is present, use it" — never transcribe).
     PrimDesc {
-        id: 268,
+        id: 302,
         name: "WinProbe class>>primWinkbAvailable",
         f: prim_winkb_available,
         argc: 0,
@@ -1509,7 +1509,7 @@ pub static PRIMITIVES: &[PrimDesc] = &[
         can_fail: false,
     },
     PrimDesc {
-        id: 269,
+        id: 303,
         name: "WinProbe class>>primWinkbConstant:",
         f: prim_winkb_constant,
         argc: 1,
@@ -1517,7 +1517,7 @@ pub static PRIMITIVES: &[PrimDesc] = &[
         can_fail: true,
     },
     PrimDesc {
-        id: 270,
+        id: 304,
         name: "WinProbe class>>primWinkbStructField:field:",
         f: prim_winkb_struct_field,
         argc: 2,
@@ -1525,7 +1525,7 @@ pub static PRIMITIVES: &[PrimDesc] = &[
         can_fail: true,
     },
     PrimDesc {
-        id: 271,
+        id: 305,
         name: "WinProbe class>>primWinkbStructSize:",
         f: prim_winkb_struct_size,
         argc: 1,
@@ -1539,7 +1539,7 @@ pub static PRIMITIVES: &[PrimDesc] = &[
     // as the four winkb rows above it: it answers an address and knows nothing
     // about windows.
     PrimDesc {
-        id: 272,
+        id: 306,
         name: "WinApi class>>primWndProcAddress",
         f: prim_wndproc_address,
         argc: 0,
@@ -5626,18 +5626,18 @@ mod tests {
             (263, "Sound class>>playEffect:"),
             (264, "Worker class>>primEvalDoitQuiet:"),
             (265, "instVarAt:put:"),
-            (266, "platformName"),
-            (267, "wallClockMilliseconds"),
+            (300, "platformName"),
+            (301, "wallClockMilliseconds"),
             // WINARM (WG0): winkb's data half (constants + struct offsets),
             // the one thing P5's resolver-only wiring left unreachable from
             // Smalltalk. See `prim_winkb_available`'s doc for the finding.
-            (268, "WinProbe class>>primWinkbAvailable"),
-            (269, "WinProbe class>>primWinkbConstant:"),
-            (270, "WinProbe class>>primWinkbStructField:field:"),
-            (271, "WinProbe class>>primWinkbStructSize:"),
+            (302, "WinProbe class>>primWinkbAvailable"),
+            (303, "WinProbe class>>primWinkbConstant:"),
+            (304, "WinProbe class>>primWinkbStructField:field:"),
+            (305, "WinProbe class>>primWinkbStructSize:"),
             // WINARM (WG2): the WndProc door's address — WG0 Δ 8's missing
             // channel, so a Smalltalk-built WNDCLASSW can name a Rust function.
-            (272, "WinApi class>>primWndProcAddress"),
+            (306, "WinApi class>>primWndProcAddress"),
         ];
         assert_eq!(
             PRIMITIVES.len(),

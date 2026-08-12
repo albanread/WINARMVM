@@ -2332,9 +2332,13 @@ pub unsafe extern "C" fn rt_call_primitive(
         vm.reg_block.last_compiled_fp, 0,
         "rt_call_primitive: anchor must be set by stub_call_primitive's prologue before this call"
     );
-    let desc = crate::runtime::primitives::prim_by_id(prim_id as u16).unwrap_or_else(|| {
-        panic!("rt_call_primitive: unknown primitive id {prim_id} -- driver.rs baked a bad literal")
-    });
+    // The compiled twin of try_primitive's: an unimplemented primitive falls
+    // through to the method body rather than panicking. Upstream's GamePane
+    // wrappers are written to rely on exactly that ( / ), which is
+    // how its games load on a build that has not implemented them yet.
+    let Some(desc) = crate::runtime::primitives::prim_by_id(prim_id as u16) else {
+        return crate::oops::layout::PRIM_FAIL_SENTINEL;
+    };
     let fp = vm.reg_block.last_compiled_fp;
     let rootspill_base = fp - crate::oops::layout::ROOTSPILL_BYTES as u64;
     let n = argc_plus_recv as usize;

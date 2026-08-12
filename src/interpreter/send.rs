@@ -94,8 +94,23 @@ pub(crate) fn try_primitive(vm: &mut VmState, m: MethodOop, argc: u8) -> Primiti
     let scope = crate::memory::handles::HandleScope::enter(vm);
     let m_h = scope.handle(vm, m);
 
-    let desc = crate::runtime::primitives::prim_by_id(prim_id as u16)
-        .unwrap_or_else(|| panic!("try_primitive: unknown primitive id {prim_id}"));
+    // AN UNIMPLEMENTED PRIMITIVE IS A FALLTHROUGH, NOT A CRASH.
+    //
+    // A method may declare any number; whether this VM implements it is not the
+    // guest's business, and the Smalltalk contract for a primitive that does not
+    // happen is already exact — the method's own body runs. That is precisely
+    // what upstream's GamePane wrappers are written to rely on: `overscan:`
+    // (266) answers `^self` and `screenMemory` (269) answers `^nil` on a build
+    // that has not implemented them, so the games LOAD and degrade rather than
+    // fail to compile.
+    //
+    // It used to panic. Opening upstream's Minesweeper — which calls `overscan:`
+    // before anything else — killed the primary outright and took the user's
+    // image with it, from a build whose only sin was not having written that
+    // primitive yet.
+    let Some(desc) = crate::runtime::primitives::prim_by_id(prim_id as u16) else {
+        return PrimitiveOutcome::Fallthrough;
+    };
     let argc_usize = argc as usize;
     // ARITY GUARD. The slice below is sized from the METHOD's declared argc,
     // but the primitive indexes it by its OWN — so a method that declares

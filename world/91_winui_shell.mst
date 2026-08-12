@@ -327,19 +327,19 @@ Object subclass: WinApi [
     "── the winkb data channel (WG0's primitives 268-271) ────────────────"
 
     WinApi class >> primWinkbAvailable ^ <Boolean> [
-        <primitive: 268>
+        <primitive: 302>
         ^false
     ]
     WinApi class >> primWinkbConstant: aName <String> ^ <Object> [
-        <primitive: 269>
+        <primitive: 303>
         ^nil
     ]
     WinApi class >> primWinkbStructField: aStruct <String> field: aField <String> ^ <Object> [
-        <primitive: 270>
+        <primitive: 304>
         ^nil
     ]
     WinApi class >> primWinkbStructSize: aStruct <String> ^ <Object> [
-        <primitive: 271>
+        <primitive: 305>
         ^nil
     ]
 
@@ -352,7 +352,7 @@ Object subclass: WinApi [
          the door owed itself this one primitive. It is as policy-free as the
          four winkb rows above it: it answers an address and knows nothing
          about windows. nil off Windows."
-        <primitive: 272>
+        <primitive: 306>
         ^nil
     ]
 
