@@ -503,11 +503,55 @@ pub extern "C" fn MacvmRenderPalette(hwnd: i64) -> i64 {
 }
 
 /// How many slots that palette has. Answered, never assumed — same discipline
-/// as `MacvmRenderPixelStride`, and the reason a guest cannot write an index
-/// that reads off the end.
+/// as `MacvmRenderPixelStride`, and now load-bearing rather than merely tidy:
+/// a COPPER plane's table is `h * 16 + 240` entries, a function of its height,
+/// so a caller that hard-coded 256 would write its globals into scanline 16's
+/// per-line colours.
 #[no_mangle]
-pub extern "C" fn MacvmRenderPaletteLen(_hwnd: i64) -> i64 {
-    crate::PALETTE_LEN as i64
+pub extern "C" fn MacvmRenderPaletteLen(hwnd: i64) -> i64 {
+    with_pane(hwnd, crate::PALETTE_LEN as i64, |r| {
+        r.plane
+            .as_ref()
+            .map(|p| p.palette_len() as i64)
+            .unwrap_or(crate::PALETTE_LEN as i64)
+    })
+}
+
+/// **WG11-W2.** Switch this pane's plane to upstream's COPPER palette layout —
+/// index 0 transparent, 1..15 per-scanline, 16..255 global — and answer its
+/// palette length, or 0 if the pane has no plane.
+///
+/// A second call on an already-copper plane is a no-op, so a host may call it
+/// every frame without reallocating the table.
+#[no_mangle]
+pub extern "C" fn MacvmRenderMakeCopper(hwnd: i64) -> i64 {
+    let got = with_pane(hwnd, 0i64, |r| match r.plane.as_mut() {
+        Some(p) => {
+            p.make_copper();
+            p.palette_len() as i64
+        }
+        None => 0,
+    });
+    if got == 0 {
+        set_error("that window has no pixel plane to make copper");
+    } else {
+        set_error("");
+    }
+    got
+}
+
+/// Pan the viewport within an overscanned world buffer (`scrollTo:`). The
+/// COPPER stays put: the per-scanline palette keys off the SCREEN row, so
+/// raster bars are locked to the display while the world moves under them.
+#[no_mangle]
+pub extern "C" fn MacvmRenderScroll(hwnd: i64, x: i64, y: i64) -> i64 {
+    with_pane(hwnd, OK, |r| {
+        if let Some(p) = r.plane.as_mut() {
+            p.scroll_x = x.max(0) as u32;
+            p.scroll_y = y.max(0) as u32;
+        }
+        OK
+    })
 }
 
 /// **The SOC fact, reported.** 1 when the device runs unified memory — one

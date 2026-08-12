@@ -616,9 +616,60 @@ pub struct PixelPlane {
     /// and one it cannot.
     pub indexed: bool,
     pub indices: Vec<u8>,
-    /// Fixed 256 BGRA words. `PALETTE_LEN` is handed to the guest rather than
-    /// assumed by it, for the same reason `stride` is.
+    /// BGRA words. **Two layouts**, and `copper` says which.
+    ///
+    /// FLAT (`copper == false`): 256 entries, index 0 is an ordinary colour.
+    /// This is WG8/SM4's own model and what `WinPixels` writes.
+    ///
+    /// COPPER (`copper == true`): upstream's model, `h * 16 + 240` entries —
+    /// `h` groups of 16 PER-SCANLINE colours first, then 240 globals. Index 0
+    /// is TRANSPARENT and never assignable; 1..15 are per-line; 16..255 are
+    /// global. That is what lets `45f_copper.mst` fill the screen once and
+    /// then change only what colour index 1 MEANS on each of 240 scanlines.
     pub palette: Vec<u32>,
+    /// Upstream's per-scanline palette semantics, and index 0 as a hole.
+    pub copper: bool,
+    /// Viewport pan within a world buffer bigger than the viewport
+    /// (`overscan:`/`scrollTo:`). Zero for a plane the size of its viewport.
+    pub scroll_x: u32,
+    pub scroll_y: u32,
+}
+
+impl PixelPlane {
+    /// The palette length this plane's layout implies. Answered to the guest
+    /// rather than assumed by it, exactly as `stride` is — a copper plane's
+    /// table is a function of its HEIGHT, so a guest that hard-coded 256 would
+    /// write globals into scanline 16's per-line entries.
+    pub fn palette_len(&self) -> usize {
+        if self.copper {
+            self.h as usize * 16 + 240
+        } else {
+            PALETTE_LEN as usize
+        }
+    }
+
+    /// Switch this plane to upstream's copper layout, resizing the table.
+    pub fn make_copper(&mut self) {
+        if self.copper {
+            return;
+        }
+        self.copper = true;
+        self.palette = vec![0xFF00_0000; self.palette_len()];
+    }
+
+    /// The table index a `(screen_row, colour_index)` pair resolves to — the
+    /// shader's arithmetic, in Rust, so a host writing the table and a shader
+    /// reading it cannot disagree about where a colour lives.
+    pub fn palette_slot(&self, screen_row: u32, index: u8) -> usize {
+        if !self.copper {
+            return index as usize;
+        }
+        if index < 16 {
+            screen_row as usize * 16 + index as usize
+        } else {
+            self.h as usize * 16 + (index as usize - 16)
+        }
+    }
 }
 
 /// Slots in a plane's palette. Answered to the guest, never assumed by it.
@@ -634,6 +685,9 @@ impl PixelPlane {
             bytes: vec![0u8; (stride as usize) * (h as usize)],
             indexed: false,
             indices: Vec::new(),
+            copper: false,
+            scroll_x: 0,
+            scroll_y: 0,
             // A palette that starts BLACK, not undefined. An indexed plane
             // whose palette was never written should be a black rectangle —
             // visibly empty — rather than whatever the allocator left behind.

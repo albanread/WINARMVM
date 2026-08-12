@@ -79,8 +79,10 @@ cbuffer C : register(b0) {
     uint bgTrans;     // the BG_TRANSPARENT sentinel
     int caretCol;     // caret cell, -1 when hidden
     int caretRow;
-    uint pad0;
-    uint pad1;
+    uint copper;      // 1 = upstream's per-scanline palette layout
+    uint planeH;      // the plane's height, which sizes the copper table
+    float2 scroll;    // viewport pan within an overscanned world buffer
+    float2 pad1;
 };
 
 struct VOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
@@ -114,9 +116,24 @@ Texture2D<float4> palTex : register(t1);
 float4 ps_indexed(VOut i) : SV_Target {
     uint w, h;
     idxTex.GetDimensions(w, h);
-    uint2 p = uint2(i.uv * float2(w, h));
-    uint ci = idxTex.Load(int3(min(p.x, w - 1), min(p.y, h - 1), 0));
-    return float4(palTex.Load(int3(ci, 0, 0)).rgb, 1.0);
+    // The SCREEN row is what the copper keys off — deliberately not the world
+    // row, so raster bars stay locked to the display while the world scrolls
+    // underneath them. `shaders.hlsl:113` says the same in one line.
+    uint2 screen = uint2(i.uv * float2(w, h));
+    uint2 p = uint2(min(screen.x + (uint)scroll.x, w - 1),
+                    min(screen.y + (uint)scroll.y, h - 1));
+    uint ci = idxTex.Load(int3(p, 0));
+    if (copper == 0u) {
+        return float4(palTex.Load(int3(ci, 0, 0)).rgb, 1.0);
+    }
+    // INDEX 0 IS A HOLE, not a colour. Discarding is what lets the planes
+    // compose — it is how upstream's games put a pane over a shader layer.
+    if (ci == 0u) { discard; }
+    uint k = (ci < 16u) ? (screen.y * 16u + ci) : (planeH * 16u + (ci - 16u));
+    // The table is a 1-D run laid out across a 2-D texture (a palette of
+    // h*16+240 entries overruns a 16384-wide texture at h > 1024), so the
+    // slot is unpacked back into (x, y) by the same width the host uploads at.
+    return float4(palTex.Load(int3(k % 256u, k / 256u, 0)).rgb, 1.0);
 }
 
 // ── pass 2: the TEXT plane ──────────────────────────────────────────────
@@ -175,8 +192,10 @@ struct Uniforms {
     bg_trans: u32,
     caret_col: i32,
     caret_row: i32,
-    pad0: u32,
-    pad1: u32,
+    copper: u32,
+    plane_h: u32,
+    scroll: [f32; 2],
+    pad1: [f32; 2],
 }
 
 /// Atlas geometry: 32 slots per row, grown DOWN as glyphs arrive. 2048 slots
@@ -627,8 +646,12 @@ impl Pipe {
                 bg_trans: BG_TRANSPARENT,
                 caret_col: caret.map(|c| c.0 as i32).unwrap_or(-1),
                 caret_row: caret.map(|c| c.1 as i32).unwrap_or(-1),
-                pad0: 0,
-                pad1: 0,
+                copper: plane.map(|p| p.copper as u32).unwrap_or(0),
+                plane_h: plane.map(|p| p.h).unwrap_or(0),
+                scroll: plane
+                    .map(|p| [p.scroll_x as f32, p.scroll_y as f32])
+                    .unwrap_or([0.0, 0.0]),
+                pad1: [0.0, 0.0],
             };
             let mut mapped = Default::default();
             self.dctx
@@ -654,19 +677,39 @@ impl Pipe {
                         let (t, s) = Self::dynamic_tex(&self.device, p.w, p.h, DXGI_FORMAT_R8_UINT)?;
                         self.idx_tex = Some((p.w, p.h, t, s));
                     }
-                    if self.pal_tex.is_none() {
-                        let (t, s) =
-                            Self::dynamic_tex(&self.device, 256, 1, DXGI_FORMAT_B8G8R8A8_UNORM)?;
+                    // 256 wide, as many ROWS as the layout needs — a copper
+                    // table is `h*16 + 240` entries and does not fit one row.
+                    let pal_rows = ((p.palette_len() + 255) / 256).max(1) as u32;
+                    let need_pal = match &self.pal_tex {
+                        Some((t, _)) => {
+                            let mut d = D3D11_TEXTURE2D_DESC::default();
+                            t.GetDesc(&mut d);
+                            d.Height != pal_rows
+                        }
+                        None => true,
+                    };
+                    if need_pal {
+                        let (t, s) = Self::dynamic_tex(
+                            &self.device,
+                            256,
+                            pal_rows,
+                            DXGI_FORMAT_B8G8R8A8_UNORM,
+                        )?;
                         self.pal_tex = Some((t, s));
                     }
                     let (_, _, idx_t, idx_s) = self.idx_tex.as_ref().unwrap();
                     let (pal_t, pal_s) = self.pal_tex.as_ref().unwrap();
                     self.upload(idx_t, &p.indices, p.w as usize, p.h as usize)?;
+                    // Padded to whole rows of 256 so every row of the upload
+                    // has the same stride the texture expects.
+                    let pal_rows = ((p.palette.len() + 255) / 256).max(1);
+                    let mut pal_pad = p.palette.clone();
+                    pal_pad.resize(pal_rows * 256, 0xFF00_0000);
                     let pal_bytes: &[u8] = std::slice::from_raw_parts(
-                        p.palette.as_ptr() as *const u8,
-                        p.palette.len() * 4,
+                        pal_pad.as_ptr() as *const u8,
+                        pal_pad.len() * 4,
                     );
-                    self.upload(pal_t, pal_bytes, p.palette.len() * 4, 1)?;
+                    self.upload(pal_t, pal_bytes, 256 * 4, pal_rows)?;
                     self.dctx.PSSetShader(&self.ps_indexed, None);
                     self.dctx
                         .PSSetShaderResources(0, Some(&[Some(idx_s.clone()), Some(pal_s.clone())]));
@@ -905,6 +948,79 @@ mod tests {
             px2[0] & 0xFF_FFFF,
             0x00_FF00,
             "the screen follows the palette"
+        );
+    }
+
+    /// WG11-W2: the COPPER contract, against the real pipeline.
+    ///
+    /// Three claims upstream's `ps_indexed` makes, none of which the flat
+    /// 256-entry model can express, all checked by reading back real pixels:
+    ///   * index 0 is a HOLE — it discards, so whatever is under the plane
+    ///     survives. (Here: the clear colour.)
+    ///   * indices 1..15 are PER-SCANLINE, keyed on the SCREEN row, so the
+    ///     same index is a different colour on different rows. That is the
+    ///     whole of `45f_copper.mst`.
+    ///   * indices 16..255 are GLOBAL, living after the per-line block at
+    ///     `h * 16`.
+    #[test]
+    fn the_copper_palette_is_per_scanline_and_index_zero_is_a_hole() {
+        let mut p = PixelPlane::new(4, 4);
+        p.make_indexed();
+        p.make_copper();
+        assert_eq!(
+            p.palette.len(),
+            4 * 16 + 240,
+            "a copper table is h*16 + 240, not 256"
+        );
+
+        // Row 0 uses index 1; row 1 uses index 1 TOO; row 2 uses a global.
+        // Row 3 is left as index 0 — the hole.
+        for x in 0..4 {
+            p.indices[x] = 1;
+            p.indices[4 + x] = 1;
+            p.indices[8 + x] = 16;
+        }
+        // Same index, different rows, DIFFERENT colours — the copper.
+        let slot_r0 = p.palette_slot(0, 1);
+        let slot_r1 = p.palette_slot(1, 1);
+        assert_ne!(slot_r0, slot_r1, "per-line slots must differ by row");
+        p.palette[slot_r0] = 0xFFFF_0000; // red on screen row 0
+        p.palette[slot_r1] = 0xFF00_FF00; // green on screen row 1
+        let slot_g = p.palette_slot(0, 16);
+        p.palette[slot_g] = 0xFF00_00FF; // blue, global
+        assert_eq!(
+            slot_g,
+            4 * 16,
+            "globals start after the per-line block"
+        );
+
+        // 4x4 plane into a 4x4 target: one screen pixel per plane pixel, so
+        // the screen row and the plane row coincide and the copper is
+        // checkable without any scaling arithmetic in the way.
+        let px = render_and_read(0, 0, Vec::new(), Some(p), 4, 4);
+        assert_eq!(px[0] & 0xFF_FFFF, 0xFF_0000, "row 0 index 1 is red");
+        assert_eq!(px[4] & 0xFF_FFFF, 0x00_FF00, "row 1, SAME index, is green");
+        assert_eq!(px[8] & 0xFF_FFFF, 0x00_00FF, "row 2 index 16 is global blue");
+        // Row 3 is index 0 -> discarded -> the render target's clear colour
+        // (white) shows through. A flat palette would have painted slot 0.
+        assert_eq!(px[12] & 0xFF_FFFF, 0xFF_FFFF, "index 0 discards");
+    }
+
+    /// A FLAT plane is untouched by any of that — WG8's own SM4 model still
+    /// resolves index 0 to a colour and keeps a 256-entry table.
+    #[test]
+    fn a_flat_plane_keeps_the_old_contract() {
+        let mut p = PixelPlane::new(4, 4);
+        p.make_indexed();
+        assert_eq!(p.palette.len(), 256);
+        assert_eq!(p.palette_slot(3, 7), 7, "flat: the slot IS the index");
+        p.indices.iter_mut().for_each(|i| *i = 0);
+        p.palette[0] = 0xFF12_3456;
+        let px = render_and_read(0, 0, Vec::new(), Some(p), 8, 8);
+        assert_eq!(
+            px[0] & 0xFF_FFFF,
+            0x12_3456,
+            "index 0 is an ordinary colour on a flat plane"
         );
     }
 
