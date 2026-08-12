@@ -122,6 +122,20 @@ pub fn rt_osr_request(vm: &mut VmState, fp: usize, target_bci: u16) -> OsrOutcom
         return OsrOutcome::Declined;
     }
 
+    // PERMANENTLY ineligible? Do not re-decide it every 10,000 back-edges.
+    // `compile_disabled` is set only by a `NoPermanent` verdict
+    // (driver.rs:786) — argc > 5, a send site with argc > 7, an unshimmable
+    // primitive, oversized bytecode — none of which a running method can grow
+    // out of. Without this the loop re-runs the full decode + eligibility scan
+    // on every trip, forever: measured on WINARM's own `juliaRow:` (argc 8),
+    // roughly twice a frame for the life of the process, each one bumping
+    // `osr_declined`. The call-path trigger has always consulted this bit
+    // (send.rs:205); OSR simply never did.
+    if method.compile_disabled() {
+        vm.stats.osr_declined += 1;
+        return OsrOutcome::Declined;
+    }
+
     let id: NmethodId = match vm.code_table.lookup_osr(k, sel, target_bci).filter(|&i| {
         vm.code_table
             .get(i)

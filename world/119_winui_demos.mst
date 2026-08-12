@@ -170,7 +170,7 @@ Object subclass: WinJulia [
 ]
 
 Object subclass: WinShell [
-    <classVars: LifeGrid LifeGeneration>
+    <classVars: LifeGrid LifeGeneration JuliaCx JuliaCy JuliaPal JuliaH>
 
     "── Life, on the indexed plane ──────────────────────────────────────"
 
@@ -226,29 +226,46 @@ Object subclass: WinShell [
 
     "── Julia, on the direct plane ──────────────────────────────────────"
 
-    "── THE ROW IS A METHOD, and this is the single most important fact about
-     performance in this whole layer.
+    "── THE ROW IS A METHOD, and WHY — corrected 2026-08-12 ──────────────
+     The first version of this note said `tier-up counts method entries, not
+     loop back-edges — there is no on-stack replacement`. That was WRONG on
+     both counts, and the correction is worth more than the original claim.
 
-     MEASURED: 460,000 Julia iterations, run as 19,200 calls to a method with a
-     24-iteration loop, take 11 ms. The IDENTICAL 460,000 iterations written as
-     one loop inside one method invocation take 119 ms. Eleven times slower for
-     the same arithmetic.
+     THE VM DOES OSR (`src/runtime/osr.rs`, live since 0ed9d65). The
+     interpreter counts BACK-EDGES (`src/interpreter/mod.rs:602`) and offers
+     the running frame for replacement every `LOOP_COUNTER_LIMIT` = 10,000 of
+     them. A loop in an INSTALLED method, entered once, enters compiled code
+     at back-edge 10,001. Measured, same loop, same arithmetic:
 
-     The reason is that tier-up counts method ENTRIES, not loop back-edges —
-     there is no on-stack replacement. A method invoked once per frame whose
-     body contains a 19,200-iteration loop is entered ten times in a session and
-     never gets compiled, so its loop runs interpreted forever no matter how hot
-     it is. The methods it CALLS tier up perfectly and are fast; the loop around
-     them is not.
+         installed class-side method   4 ms   osrEntries +1, osrDeclined  0
+         identical loop in a block   146 ms   osrEntries  0, osrDeclined +50
 
-     So every per-pixel loop here is split at the ROW: the frame method calls a
-     row method h times, the row method is entered 120 times a frame, it tiers
-     up after the first frame, and its inner loop is compiled. Nothing about the
-     arithmetic changed — this is entirely about where the loop lives.
+     THE REAL BOUNDARY IS INSTALLED vs ANONYMOUS. `rt_osr_request` declines
+     any frame whose method dynamic lookup cannot re-find
+     (`src/runtime/osr.rs:102`) — the guard exists so an OSR nmethod is never
+     installed under a (klass, selector) key that dispatch would resolve to a
+     different method. A workspace doit is an anonymous, never-installed
+     `#doIt` run on nil; every BLOCK runs under the placeholder selector
+     `#aBlock` (`src/bytecode/builder.rs:620`). Neither can ever pass. So a
+     loop typed at doit top level, or timed inside
+     `Time millisecondsToRun: [ ... ]`, is declined every 10,000 back-edges
+     forever and runs interpreted end to end.
 
-     The general rule, worth carrying anywhere in this world: a hot loop must
-     live in a method that is ENTERED often. A loop counted in tens of thousands
-     inside a method entered once is interpreted code."
+     WHICH IS WHAT THE ORIGINAL MEASUREMENT MEASURED. The 119 ms figure was a
+     loop inside a timing BLOCK; the 11 ms figure was 19,200 calls to an
+     installed method, tiering on the invocation counter at call #20. The
+     conclusion drawn from it — that this VM has no OSR — was an artefact of
+     the harness, not a fact about the compiler.
+
+     AND THE COMPILER HAS AN ARITY ENVELOPE, which this file tripped: argc > 5
+     is `NoPermanent`, and so is any SEND SITE with argc > 7
+     (`src/compiler/driver.rs:234-281`). `juliaRow:` was written with EIGHT
+     keywords, so it could never compile by either path — and its own comment
+     claimed it did. Now four, with the per-frame constants in class vars.
+
+     THE TWO DURABLE RULES, then. A hot loop belongs in an INSTALLED method
+     with argc <= 5. Anything timed from a workspace measures the interpreter,
+     so a benchmark must call an installed method and time the CALL."
 
     WinShell class >> drawJuliaOn: hwnd <Integer> width: w <Integer> height: h <Integer> ^ <Boolean> [
         "c moves with the phase, so the set BREATHES — a still Julia and a
@@ -267,21 +284,34 @@ Object subclass: WinShell [
          values and 19,200 pixels, so computing colours in the pixel loop did
          the same 25 sums 768 times each."
         pal := WinJulia paletteFor: ph.
+        "THE PER-FRAME CONSTANTS GO IN CLASS VARS, and it is an arity fix, not
+         a style choice: passing them made `juliaRow:` an 8-keyword method
+         (argc 8 > 5 => NoPermanent) AND made this method's send site argc 8 > 7
+         => NoPermanent too, so neither could ever compile. Set once a frame,
+         read h*w times; the row method is now argc 4 and inside the envelope."
+        JuliaCx := cx. JuliaCy := cy. JuliaPal := pal. JuliaH := h.
         0 to: h - 1 do: [ :y |
-            self juliaRow: y base: base stride: stride width: w height: h
-                cx: cx cy: cy palette: pal ].
+            self juliaRow: y base: base stride: stride width: w ].
         PlasmaPhase := ph + 2.
         ^true
     ]
 
-    WinShell class >> juliaRow: y <Integer> base: base <Integer> stride: stride <Integer>
-                      width: w <Integer> height: h <Integer>
-                      cx: cx <Integer> cy: cy <Integer> palette: pal <Array> [
-        "One row. Entered h times a frame, so it tiers up and its loop is
-         compiled — see the note above."
-        | zy one half zx esc |
+    WinShell class >> juliaRow: y <Integer> base: base <Integer>
+                      stride: stride <Integer> width: w <Integer> [
+        "One row. ARGC 4, deliberately — five or fewer is the compiler's
+         envelope (`src/compiler/driver.rs:236`), and the eight-keyword version
+         this replaces could never compile while claiming in its own comment
+         that it did. The per-frame constants come from class vars set once by
+         `drawJuliaOn:`.
+
+         Entered h times a frame, so it tiers up on the INVOCATION counter
+         after the first frame — and its own 320-iteration inner loop would
+         OSR anyway at back-edge 10,001, because this is an installed method.
+         Both paths are open to it now; neither was before."
+        | zy one half zx esc cx cy pal |
         one := WinJulia one.
-        half := h // 2.
+        cx := JuliaCx. cy := JuliaCy. pal := JuliaPal.
+        half := JuliaH // 2.
         zy := (y - half) * one // half * 3 // 2.
         half := w // 2.
         0 to: w - 1 do: [ :x |

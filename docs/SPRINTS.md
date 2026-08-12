@@ -555,11 +555,11 @@ one, `world/119_winui_demos.mst`) did their job in the way the review predicted
 — **they were the reason to build SM0, and they broke the renderer into being
 built properly.** Running them surfaced, in order:
 
-1. **Tier-up counts method entries, not loop back-edges** — no OSR. 460k Julia
-   iterations as 19,200 method calls: 11 ms. The identical iterations as one
-   loop in one method entry: 119 ms. Every per-pixel loop now lives in a ROW
-   method entered `h` times a frame. The rule, worth carrying anywhere in this
-   world: *a hot loop must live in a method that is entered often.*
+1. ~~**Tier-up counts method entries, not loop back-edges** — no OSR.~~
+   **WRONG ON BOTH COUNTS — corrected below.** Kept struck through rather than
+   deleted, because the wrong version was committed and someone will find it.
+   The measurement was real (11 ms vs 119 ms); the conclusion drawn from it was
+   an artefact of the harness. See *The OSR correction* below.
 2. **A free-running animation loop saturates the UI thread** — 200 fps of
    frames the panel drops, a busy cursor, and eventually a starved control
    port. Frames are now *requested*: a dedicated ~16 ms timer, a due-check at
@@ -603,6 +603,62 @@ Measured after: plasma ~34 fps at the 30 fps target, Julia ~13 fps
 (CPU-bound in fixed point at 160×120 — its plane is smaller per mode because
 per-pixel *iteration* does not belong on the UI thread), and the control port
 answers instantly while both run.
+
+### The OSR correction (2026-08-12, same day)
+
+The author's response to the note above was one line: *"our compiler is designed
+to do OSR — investigate this issue."* It is, and it does. The note was wrong.
+
+**This VM performs on-stack replacement, and it counts back-edges, not method
+entries.** `OP_JUMP_BACK` (`src/interpreter/mod.rs:602`) bumps a per-method loop
+counter and offers the running frame for replacement every `LOOP_COUNTER_LIMIT`
+= 10,000 back-edges (`src/oops/layout.rs:334`); `rt_osr_request`
+(`src/runtime/osr.rs`) compiles with an OSR entry and replaces the frame in
+place. It has been live since `0ed9d65` (2026-07-05) — before the note claiming
+its absence was written. Measured on the same loop, same arithmetic:
+
+| shape | time | `osrEntries` | `osrDeclined` |
+|---|---|---|---|
+| installed class-side method, entered **once** | **4 ms** | **+1** | 0 |
+| identical loop inside a **block** | **146 ms** | 0 | **+50** |
+
+**The real boundary is INSTALLED vs ANONYMOUS.** `rt_osr_request`
+(`src/runtime/osr.rs:102`) declines any frame whose method dynamic lookup cannot
+re-find — the guard exists so an OSR nmethod is never installed under a
+(klass, selector) key that dispatch would resolve to a different method. A
+workspace doit is an anonymous, never-installed `#doIt` run on nil; every block
+runs under the placeholder selector `#aBlock`
+(`src/bytecode/builder.rs:620`). Neither can pass, ever. And the frontend
+*inlines* `to:do:`/`whileTrue:`/`timesRepeat:` into whatever unit textually
+contains them — so a loop typed at a workspace, or timed inside
+`Time millisecondsToRun: [ … ]`, puts its back edge in a unit that is
+structurally ineligible and is declined every 10,000 back-edges forever.
+
+**That is what the 119 ms measured**: a loop inside a timing block. The 11 ms
+figure was 19,200 calls to an installed method tiering on the invocation counter
+at call #20. Two different tiering paths, neither of them absent.
+
+**A second, real defect the investigation found**: the compiler's envelope
+refuses `argc > 5` and any send site with `argc > 7`
+(`src/compiler/driver.rs:234-281`). `juliaRow:`'s **eight** keywords put it
+permanently outside it — so the row method whose own comment claimed it "tiers
+up and its loop is compiled" could never compile by *either* path, and
+`drawJuliaOn:`'s 8-argument send site disqualified that method too. The row's
+speed came entirely from `escapeAtX:y:cx:cy:` (argc 4) compiling. Fixed: the
+per-frame constants moved to class variables, `juliaRow:` is argc 4, both
+methods are inside the envelope.
+
+**And one VM wart, fixed**: `rt_osr_request` never consulted `compile_disabled`,
+which only a `NoPermanent` verdict sets — so a permanently ineligible method
+re-ran the full decode + eligibility scan on every 10,000 back-edges, forever
+(≈ twice a frame for `juliaRow:`). The call-path trigger has always checked it
+(`src/interpreter/send.rs:205`); OSR now does too (`src/runtime/osr.rs`).
+
+**The two durable rules**, which is what the original note should have said:
+
+> A hot loop tiers only if its back edge lives in an **installed method** with
+> **argc ≤ 5**. Anything timed from a workspace or inside a block measures the
+> interpreter — so a benchmark must call an installed method and time the *call*.
 
 **WG11 — GamePane parity (settled 2026-08-12).** Not just `shader:` — the
 whole of upstream's guest-facing games surface, implemented on the D3D11 pipe,

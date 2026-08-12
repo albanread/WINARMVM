@@ -297,13 +297,29 @@ fn world_suite_at_sub_floor_threshold_survives_root_block_deopt() {
     vm.out = Box::new(buf.clone());
     world::load_world(&mut vm, &world_dir()).expect("load_world");
     load_tests_list(&mut vm);
-    let report_line = buf
-        .as_string()
+    let out = buf.as_string();
+    let report_line = out
         .lines()
         .find(|l| l.ends_with("failed"))
         .map(str::to_string)
         .unwrap_or_else(|| panic!("no '... failed' report line"));
-    assert!(report_line.ends_with(", 0 failed"), "{report_line}");
+    // NAME THE FAILURES, not just the count. `TestRunner report` prints one
+    // line per failure right after the count (world/85_sunit.mst), and this
+    // assertion used to throw all of them away — so a regression here said
+    // "2 failed" and nothing else, which is true and useless. The lines after
+    // the report are exactly that list.
+    let detail: Vec<&str> = out
+        .lines()
+        .skip_while(|l| !l.ends_with("failed"))
+        .skip(1)
+        .filter(|l| !l.trim().is_empty())
+        .take(20)
+        .collect();
+    assert!(
+        report_line.ends_with(", 0 failed"),
+        "{report_line}\n{}",
+        detail.join("\n")
+    );
 }
 
 /// Load-order torture: swapping files 12 (Dictionary, needs OrderedCollection

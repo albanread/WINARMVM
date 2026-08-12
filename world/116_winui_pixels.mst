@@ -357,11 +357,14 @@ Object subclass: WinShell [
         stride := WinPixels strideFor: hwnd.
         stride = 0 ifTrue: [ ^false ].
         ph := self plasmaPhase.
-        "ROW BY ROW, and the row is a METHOD. Tier-up counts method entries
-         rather than loop back-edges, so a 19,200-iteration loop inside a method
-         entered once a frame never compiles — measured at eleven times slower
-         than the same arithmetic split across many calls. See the note in
-         `119_winui_demos.mst`, which is where it was found."
+        "ROW BY ROW, and the row is a METHOD — but NOT for the reason first
+         written here. The original claim (`tier-up counts method entries, not
+         back-edges; there is no OSR`) was wrong: this VM does OSR, counts
+         back-edges, and would have rescued this loop in place. The real rule,
+         measured and corrected in `119_winui_demos.mst`s note: a hot loop
+         tiers only in an INSTALLED method of argc <= 5. This one is both, so
+         it now has two roads to compiled code — the invocation counter after
+         the first frame, and OSR at back-edge 10,001 within it."
         0 to: h - 1 do: [ :y |
             self plasmaRow: y base: base stride: stride width: w phase: ph ].
         PlasmaPhase := ph + 4.
