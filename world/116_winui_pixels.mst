@@ -1,0 +1,242 @@
+"── 116_winui_pixels.mst — WG8 / SM0: the pixel plane ────────────────────
+ docs/sprints/upstream_review_2026-08-12.md. Upstream's thesis, ported: *the
+ VM writes video memory, it does not send messages*.
+
+ WHAT CHANGED, and it is a whole class of cost rather than a speed-up. The
+ shape this replaces — build a ByteArray, hand it to a `blit:` primitive, copy
+ it out into a fresh Vec, push that through a mutex to another thread, memcpy
+ it into a slot, upload — is three full-frame copies and an allocation PER
+ FRAME. Here the guest stores bytes straight into the buffer the renderer will
+ draw, and the only copy left is the upload the GPU needs anyway.
+
+ THE HONEST DIFFERENCE from the Mac: Metal's shared-storage buffers give a
+ PERSISTENT pointer whose bytes the GPU samples, so upstream has zero copies.
+ D3D11 hands out a mapped pointer only between Map and Unmap, which cannot be
+ given to the guest to hold across frames — so this is one copy where the Mac
+ has none. `winui_render`'s own comment carries the same note; neither side
+ pretends otherwise.
+
+ THE SHAPE COMES FROM THE RENDERER, ALWAYS. Width, height and STRIDE are
+ asked for, never assumed — and that is the standing caution of the WG8 review
+ made concrete. A pixel plane is the one place in this port where the GUEST
+ computes an address, which is exactly the two-authorities arrangement that
+ cost WG6c four defects. The cell grid escaped it by making the renderer the
+ only side that knows where a pixel lives; a pixel plane cannot, so the
+ discipline moves to the buffer's shape.
+
+ BGRA, because that is the swapchain's format (`DXGI_FORMAT_B8G8R8A8_UNORM`)
+ and a plane in any other order would be converted on every frame — which is
+ the copy this file exists to avoid."
+
+Object subclass: WinPixels [
+    <classVars: Available>
+
+    WinPixels class >> rawPlane: hwnd <Integer> w: w <Integer> h: h <Integer> ^ <Integer> [
+        <primitive: FFI function: #MacvmRenderPixelPlane library: #'winui_render.dll' ret: #g args: #(g g g)>
+        ^self primitiveFailed: 'MacvmRenderPixelPlane'
+    ]
+    WinPixels class >> rawStride: hwnd <Integer> ^ <Integer> [
+        <primitive: FFI function: #MacvmRenderPixelStride library: #'winui_render.dll' ret: #g args: #(g)>
+        ^self primitiveFailed: 'MacvmRenderPixelStride'
+    ]
+    WinPixels class >> rawDrop: hwnd <Integer> ^ <Integer> [
+        <primitive: FFI function: #MacvmRenderDropPixelPlane library: #'winui_render.dll' ret: #g args: #(g)>
+        ^self primitiveFailed: 'MacvmRenderDropPixelPlane'
+    ]
+
+    WinPixels class >> available ^ <Boolean> [
+        Available isNil ifTrue: [
+            Available := [ self rawStride: 0. true ] on: Error do: [ :e | false ] ].
+        ^Available
+    ]
+
+    WinPixels class >> planeFor: hwnd <Integer> width: w <Integer> height: h <Integer> ^ <Integer> [
+        "The buffer's ADDRESS. It CHANGES when the size does, so this is asked
+         for per frame rather than cached — one call, and it removes a whole
+         class of dangling-pointer bug that would present as garbage on screen
+         or as a fault inside the renderer."
+        (self available not or: [ hwnd = 0 ]) ifTrue: [ ^0 ].
+        ^[ self rawPlane: hwnd w: w h: h ] on: Error do: [ :e | 0 ]
+    ]
+
+    WinPixels class >> strideFor: hwnd <Integer> ^ <Integer> [
+        (self available not or: [ hwnd = 0 ]) ifTrue: [ ^0 ].
+        ^[ self rawStride: hwnd ] on: Error do: [ :e | 0 ]
+    ]
+
+    WinPixels class >> dropFor: hwnd <Integer> [
+        self available ifFalse: [ ^self ].
+        [ self rawDrop: hwnd ] on: Error do: [ :e | nil ].
+        ^self
+    ]
+
+    "── one pixel ───────────────────────────────────────────────────────
+     Written through `WinArena u32At:put:` — a store into foreign memory, the
+     same mechanism `Alien forAddress:size:` gives and the same one the cell
+     grid uses. There is no primitive here and no message: THIS is the whole
+     of `the VM writes video memory`."
+
+    WinPixels class >> at: base <Integer> x: x <Integer> y: y <Integer> stride: stride <Integer>
+                       put: bgra <Integer> [
+        WinArena u32At: base + (y * stride) + (x * 4) put: bgra.
+        ^self
+    ]
+
+    WinPixels class >> transparentBackground ^ <Integer> [
+        "The background that means DO NOT FILL — `BG_TRANSPARENT` in
+         `winui_render`, above the COLORREF range so it cannot collide with a
+         colour anyone means. Clearing a grid to this is what lets a HUD sit
+         over live pixels: the glyphs still draw, the cells behind them do not.
+
+         Without it the two planes cannot compose at all — `draw_grid` fills
+         every cell's background, so a plane under a full-width grid shows only
+         in the margin the grid does not reach. Measured exactly that way: the
+         first plasma frame was bands of colour down the right edge and along
+         the bottom, and white everywhere the grid was."
+        ^16r01000000
+    ]
+
+    WinPixels class >> bgraR: r <Integer> g: g <Integer> b: b <Integer> ^ <Integer> [
+        "BGRA as one word, alpha opaque. The swapchain is B8G8R8A8, so blue is
+         the LOW byte — the same packing `colorRefPacksBlueHigh` pins for
+         COLORREF, one byte order along."
+        ^((b bitAnd: 255) bitShift: 0)
+            + ((g bitAnd: 255) bitShift: 8)
+            + ((r bitAnd: 255) bitShift: 16)
+            + 16rFF000000
+    ]
+]
+
+Object subclass: WinShell [
+    <classVars: PlasmaPhase CanvasFrames>
+
+    "-- the CANVAS view, which is where pixels belong --------------------
+     The first version of this demo drew plasma into the EDITOR's pane, and the
+     author's response was the right one: that is a strange place to test
+     pixels. `docs/SPRINTS.md`'s WG8 row always said Canvas, and a view whose
+     whole job is a pixel plane is both the honest home for it and the better
+     proof — the Editor pane happening to also work would say nothing about
+     whether a Canvas does.
+
+     It is the fourth consumer of WG6d-3's per-window renderers, and the first
+     that is mostly PIXELS rather than mostly cells: the plane underneath, a
+     cell HUD over it, neither knowing about the other."
+
+    WinShell class >> canvasViewName ^ <Symbol> [ ^#canvas ]
+    WinShell class >> canvasPaneName ^ <Symbol> [ ^#canvasPane ]
+
+    WinShell class >> canvasPaneHwnd ^ <Integer> [
+        | c |
+        c := self controlNamed: self canvasPaneName.
+        ^c isNil ifTrue: [ 0 ] ifFalse: [ c handle ]
+    ]
+
+    WinShell class >> buildCanvasPane [
+        (self controlNamed: self canvasPaneName) ifNotNil: [ :x | ^self ].
+        self
+            addControl: self canvasPaneName
+            class: self className
+            text: ''
+            style: (((WinApi constant: 'WS_CHILD')
+                bitOr: (WinApi constant: 'WS_BORDER'))
+                bitOr: (WinApi constant: 'WS_CLIPSIBLINGS'))
+            exStyle: 0.
+        ^self
+    ]
+
+    WinShell class >> showCanvasPane: aBool <Boolean> [
+        (self controlNamed: self canvasPaneName) ifNotNil: [ :c | c show: aBool ].
+        ^self
+    ]
+
+    WinShell class >> layoutCanvasPane: content <Array> [
+        (self controlNamed: self canvasPaneName) ifNotNil: [ :c | c moveTo: content ].
+        ^self
+    ]
+
+    WinShell class >> canvasSize ^ <Array> [
+        "The pane's client size in PIXELS. A canvas is one pixel per pixel, so
+         there is no cell arithmetic in this method at all."
+        | c r |
+        c := self controlNamed: self canvasPaneName.
+        c isNil ifTrue: [ ^Array with: 1 with: 1 ].
+        r := [ c screenRect ] on: Error do: [ :e | nil ].
+        r isNil ifTrue: [ ^Array with: 1 with: 1 ].
+        ^Array
+            with: (((r at: 3) - (r at: 1)) max: 1)
+            with: (((r at: 4) - (r at: 2)) max: 1)
+    ]
+
+    WinShell class >> canvasFrames ^ <Integer> [
+        ^CanvasFrames isNil ifTrue: [ 0 ] ifFalse: [ CanvasFrames ] ]
+
+    "-- the demo ---------------------------------------------------------
+     Plasma: cheap, obviously wrong if the arithmetic is wrong, and it MOVES —
+     so a frozen frame reads as frozen rather than as a still image. Upstream's
+     45d does the same job for the same reason."
+
+    WinShell class >> plasmaPhase ^ <Integer> [
+        ^PlasmaPhase isNil ifTrue: [ 0 ] ifFalse: [ PlasmaPhase ] ]
+
+    WinShell class >> drawPlasmaOn: hwnd <Integer> width: w <Integer> height: h <Integer> ^ <Boolean> [
+        "One frame, stored STRAIGHT into the renderer's own buffer. Pure
+         arithmetic over (x, y, phase) — no allocation, and nothing retained
+         between frames but one integer."
+        | base stride ph |
+        base := WinPixels planeFor: hwnd width: w height: h.
+        base = 0 ifTrue: [ ^false ].
+        stride := WinPixels strideFor: hwnd.
+        stride = 0 ifTrue: [ ^false ].
+        ph := self plasmaPhase.
+        0 to: h - 1 do: [ :y |
+            0 to: w - 1 do: [ :x |
+                | v |
+                "Integer-only: a per-pixel Float would allocate on a
+                 tagged-integer VM, and this loop runs w*h times a frame."
+                v := ((x * 3) + (y * 2) + ph) bitAnd: 255.
+                WinPixels at: base x: x y: y stride: stride
+                    put: (WinPixels bgraR: v g: 255 - v b: ((x + y + ph) bitAnd: 255)) ] ].
+        PlasmaPhase := ph + 4.
+        ^true
+    ]
+
+    WinShell class >> renderCanvas ^ <Boolean> [
+        "BOTH PLANES, which is the claim WG8 actually makes: pixels underneath,
+         a text HUD over them, neither knowing about the other.
+
+         The plane is a FIXED 160x120 stretched to the pane by the renderer,
+         nearest-neighbour — cheap at any window size, and the pixels look like
+         pixels rather than being interpolated into values the guest never
+         wrote. The grid is cleared to `transparentBackground`, so every cell
+         the HUD does not fill lets the plane through while the cells it does
+         fill still draw their glyphs."
+        | hwnd cw ch cols rows base label col |
+        hwnd := self canvasPaneHwnd.
+        hwnd = 0 ifTrue: [ ^false ].
+        (WinRender cellWidthFor: hwnd) = 0 ifTrue: [
+            (WinRender attach: hwnd points: 9 dpi: self editorMetricsDpi)
+                ifFalse: [ ^false ] ].
+        (self drawPlasmaOn: hwnd width: 160 height: 120) ifFalse: [ ^false ].
+        cw := WinRender cellWidthFor: hwnd.
+        ch := WinRender cellHeightFor: hwnd.
+        (cw = 0 or: [ ch = 0 ]) ifTrue: [ ^false ].
+        cols := (((self canvasSize at: 1) // cw) max: 1).
+        rows := (((self canvasSize at: 2) // ch) max: 1).
+        base := WinRender gridFor: hwnd cols: cols rows: rows.
+        base = 0 ifTrue: [ ^false ].
+        WinRender clear: hwnd to: 16rFFFFFF on: WinPixels transparentBackground.
+        label := 'CANVAS - the VM writes these pixels directly - frame '
+            , (self canvasFrames + 1) printString.
+        col := 0.
+        label do: [ :chr |
+            col < cols ifTrue: [
+                WinRender at: base col: col row: 0 cols: cols
+                    put: chr asInteger
+                    fg: 16rFFFFFF
+                    bg: WinPixels transparentBackground ].
+            col := col + 1 ].
+        WinRender caretFor: hwnd col: 0 row: 0 visible: false.
+        CanvasFrames := self canvasFrames + 1.
+        ^WinRender present: hwnd
+    ]
+]

@@ -60,6 +60,20 @@ pub struct Cell {
     pub bg: u32,
 }
 
+/// A background that means **do not fill** — leave whatever is underneath.
+///
+/// WG8/SM0. Without it the two planes cannot compose: `draw_grid` fills every
+/// cell's background, so a pixel plane under a full-width grid is covered
+/// everywhere except the margin the grid does not reach. That is exactly what
+/// the first plasma frame looked like — bands of colour down the right edge
+/// and along the bottom, and white everywhere the grid was.
+///
+/// Chosen ABOVE the COLORREF range (which is `0x00BBGGRR`, top byte zero) so
+/// it cannot collide with a colour anyone means. A cell with this background
+/// still draws its GLYPH — which is what makes a HUD over live pixels one
+/// value rather than a mode.
+pub const BG_TRANSPARENT: u32 = 0x0100_0000;
+
 impl Cell {
     pub fn blank() -> Self {
         Cell {
@@ -220,6 +234,9 @@ pub fn draw_grid(
                 let start = c;
                 while c < cols && cells[base + c as usize].bg == bg {
                     c += 1;
+                }
+                if bg == BG_TRANSPARENT {
+                    continue;
                 }
                 brush.SetColor(&colorref_to_d2d(bg));
                 rt.FillRectangle(
@@ -489,4 +506,96 @@ mod tests {
             "column 0 is blank, so ANY ink there is column 1's glyph having escaped its cell"
         );
     }
+}
+
+// ── WG8 / SM0: the PIXEL plane ──────────────────────────────────────────────
+
+/// One pane's pixel plane: BGRA bytes the GUEST writes and the renderer draws.
+///
+/// **The Windows shape of upstream's SM0**, and the one honest difference is
+/// worth stating rather than glossed. Metal's `MTLStorageModeShared` gives a
+/// PERSISTENT CPU pointer whose bytes the GPU samples directly — zero copies.
+/// D3D11 has no equivalent for a texture: `D3D11_USAGE_DYNAMIC` hands out a
+/// pointer only between `Map` and `Unmap`, which cannot be given to the guest
+/// to hold across frames.
+///
+/// So this is ONE copy per presented frame — a `CopyFromMemory` into a D2D
+/// bitmap — where the Mac has none. It still deletes what SM0's design
+/// actually indicts:
+///
+/// * the marshalling (`ByteArray` → `copy_bytes_out` → a fresh `Vec`),
+/// * the per-frame ALLOCATION,
+/// * the hop through a `Mutex<VecDeque>` to another thread,
+///
+/// leaving only the upload the GPU needs anyway. Three copies and an
+/// allocation become one copy and none.
+pub struct PixelPlane {
+    pub w: u32,
+    pub h: u32,
+    /// `w * 4`, BGRA. Handed to the guest rather than assumed BY it — see the
+    /// standing caution in the WG8 review: a pixel plane is the one place the
+    /// guest computes an address, so the SHAPE must come from this side.
+    pub stride: u32,
+    pub bytes: Vec<u8>,
+}
+
+impl PixelPlane {
+    pub fn new(w: u32, h: u32) -> Self {
+        let stride = w * 4;
+        PixelPlane {
+            w,
+            h,
+            stride,
+            bytes: vec![0u8; (stride as usize) * (h as usize)],
+        }
+    }
+}
+
+/// Draw a pixel plane to fill `dest`, nearest-neighbour.
+///
+/// NEAREST, not linear, and it is a correctness choice rather than a taste
+/// one: a plane is pixels the guest computed, and interpolating them invents
+/// values it did not write. A Julia set at 320x240 blown up to a pane should
+/// look like big pixels, because that is what it is.
+pub fn draw_pixel_plane(
+    rt: &ID2D1RenderTarget,
+    plane: &PixelPlane,
+    dest_w: f32,
+    dest_h: f32,
+) -> Result<(), String> {
+    unsafe {
+        let props = windows::Win32::Graphics::Direct2D::D2D1_BITMAP_PROPERTIES {
+            pixelFormat: rt_props().pixelFormat,
+            dpiX: 96.0,
+            dpiY: 96.0,
+        };
+        let bmp = rt
+            .CreateBitmap(
+                windows::Win32::Graphics::Direct2D::Common::D2D_SIZE_U {
+                    width: plane.w,
+                    height: plane.h,
+                },
+                Some(plane.bytes.as_ptr() as *const _),
+                plane.stride,
+                &props,
+            )
+            .map_err(|e| format!("CreateBitmap: {e}"))?;
+        // `ID2D1RenderTarget`'s own DrawBitmap: FIVE arguments (no perspective
+        // transform) and no Result. The six-argument one belongs to
+        // `ID2D1DeviceContext`, and picking the wrong overload is how the
+        // caret's brush went missing in WG6d-1 — so the arity is named here.
+        rt.DrawBitmap(
+            &bmp,
+            Some(&D2D_RECT_F {
+                left: 0.0,
+                top: 0.0,
+                right: dest_w,
+                bottom: dest_h,
+            }),
+            1.0,
+            windows::Win32::Graphics::Direct2D::D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
+            None,
+        );
+    }
+    Ok(())
 }

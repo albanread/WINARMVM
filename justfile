@@ -1803,3 +1803,86 @@ gate-wg7:
     for i in $(seq 1 60); do [ -f /tmp/wg7_exit ] && break || sleep 0.5; done
     test "$(cat /tmp/wg7_exit)" = "0"
     echo "gate-wg7: PASS"
+
+# docs/sprints/upstream_review_2026-08-12.md — WG8 / SM0: the pixel plane.
+#
+# WHY THIS GATE LEADS WITH A VIEW rather than with pixels. The first cut of this
+# demo drew plasma into the EDITOR's pane, because the Editor's pane already had
+# a renderer attached and it was the shortest path to a coloured rectangle. That
+# was the wrong place, and being told so is what produced the Canvas. So the
+# first three assertions here are about a VIEW existing — registered, switchable,
+# built — and only then about what is drawn in it. A pixel plane that happens to
+# work inside somebody else's pane proves nothing about whether this shell can
+# host a canvas.
+#
+# THREE CLAIMS, and each has a failure mode a screenshot would not catch:
+#
+#  1. THE PLANE REACHES THE SCREEN. `stride` comes from the renderer and is the
+#     one number the guest is forbidden to assume — 160 BGRA pixels is 640 bytes
+#     only if D3D chose not to pad the row. Asserting it is non-zero asserts the
+#     Map succeeded; asserting the guest ASKED is the standing caution of the
+#     WG8 review, which is the whole discipline a pixel plane has left.
+#
+#  2. IT MOVES. Frames and phase both advance. A still image that was right once
+#     and then froze looks identical to a working one in any single snapshot,
+#     and that is exactly the bug a live buffer has.
+#
+#  3. THE TWO PLANES COMPOSE. The HUD's cells carry `transparentBackground`, so
+#     the renderer skips their background fill and the pixels show through. The
+#     constant is duplicated across an FFI boundary that carries no types; if it
+#     drifts, the HUD paints a solid bar over the plane. The world suite pins the
+#     value, this pins that the pane still presented with it in place.
+gate-wg8:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    taskkill //F //IM macvm-winui.exe > /dev/null 2>&1 || true
+    # BUILD FIRST — WG6d-2 lost an afternoon to a gate that passed against a
+    # binary predating the change it was gating.
+    cargo build --quiet -p win_gui -p winui_host -p winui_render
+    rm -f /tmp/wg8_exit /tmp/wg8_app.txt /tmp/wg8_gate.txt target/winui-wg8.png
+    ( MACVM_WINUI_CTL=7716 ./target/debug/macvm-winui.exe > /tmp/wg8_app.txt 2>&1; \
+        echo $? > /tmp/wg8_exit ) &
+    for i in $(seq 1 90); do
+        (exec 3<>/dev/tcp/127.0.0.1/7716) 2>/dev/null && break || sleep 0.5
+    done
+    sleep 3
+    ./target/debug/macvm rusttcl scripts/winui-wg8.tcl | tee /tmp/wg8_gate.txt
+    cat /tmp/wg8_app.txt
+
+    # 1. The VIEW exists, in its own right.
+    grep -q 'WG8 open true'    /tmp/wg8_gate.txt
+    grep -q 'WG8 switched true' /tmp/wg8_gate.txt
+    grep -q 'WG8 active #canvas' /tmp/wg8_gate.txt
+    grep -q 'WG8 built true'   /tmp/wg8_gate.txt
+    HWND=$(grep -E '^WG8 pane-hwnd ' /tmp/wg8_gate.txt | awk '{print $NF}')
+    test "$HWND" -gt 0
+
+    # 2. The PLANE is real and its shape came from the renderer.
+    STRIDE=$(grep -E '^WG8 stride ' /tmp/wg8_gate.txt | awk '{print $NF}')
+    echo "canvas: pane $HWND, stride $STRIDE bytes"
+    test "$STRIDE" -ge 640
+    grep -q 'WG8 plane true' /tmp/wg8_gate.txt
+    grep -q "WG8 last-error ''" /tmp/wg8_gate.txt
+
+    # 3. It MOVES — asserted as a relationship (WG2 Δ 14), never as a total:
+    #    two explicit renders must advance the counter by exactly two, whatever
+    #    number of paints the window happened to do first.
+    F1=$(grep -E '^WG8 frames-1 ' /tmp/wg8_gate.txt | awk '{print $NF}')
+    F2=$(grep -E '^WG8 frames-2 ' /tmp/wg8_gate.txt | awk '{print $NF}')
+    echo "canvas: $F1 frames, then $F2"
+    test "$F2" -eq "$((F1 + 2))"
+    PHASE=$(grep -E '^WG8 phase ' /tmp/wg8_gate.txt | awk '{print $NF}')
+    test "$PHASE" -gt 0
+    grep -q 'WG8 render-a true' /tmp/wg8_gate.txt
+    grep -q 'WG8 render-b true' /tmp/wg8_gate.txt
+
+    # 4. And the two planes composed — the sentinel still matches Rust's, and
+    #    the pane presented at least as many frames as we asked it to.
+    grep -q 'WG8 transparent 16777216' /tmp/wg8_gate.txt
+    PF=$(grep -E '^WG8 present-frames ' /tmp/wg8_gate.txt | awk '{print $NF}')
+    test "$PF" -ge "$F2"
+
+    test -s target/winui-wg8.png
+    for i in $(seq 1 60); do [ -f /tmp/wg8_exit ] && break || sleep 0.5; done
+    test "$(cat /tmp/wg8_exit)" = "0"
+    echo "gate-wg8: PASS"

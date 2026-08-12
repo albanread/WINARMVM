@@ -56,7 +56,55 @@ TestCase subclass: WinUiEditorWg6cTests [
         self runTest: #testMonitorRendersTheWholeTableItWasGiven
              do: [ self testMonitorRendersTheWholeTableItWasGiven ].
         self runTest: #testAddToWorldNamesItsFileAfterTheClass
-             do: [ self testAddToWorldNamesItsFileAfterTheClass ]
+             do: [ self testAddToWorldNamesItsFileAfterTheClass ].
+        self runTest: #testPixelPackingIsBgraNotRgba
+             do: [ self testPixelPackingIsBgraNotRgba ].
+        self runTest: #testTransparentBackgroundIsNotAColour
+             do: [ self testTransparentBackgroundIsNotAColour ]
+    ]
+
+    testTransparentBackgroundIsNotAColour [
+        "The Canvas composes two planes by having the HUD's cells declare a
+         background the renderer SKIPS rather than fills. That sentinel has to
+         be a value no real background can collide with, and this is the test
+         that says so: `BG_TRANSPARENT` sets bit 24, which is above every bit a
+         24-bit RGB background can reach.
+
+         The constant is duplicated — `winui_render`'s `BG_TRANSPARENT` and
+         this — because it crosses an FFI boundary that carries no types. If
+         they ever drift, the HUD paints a solid bar over the pixels; asserting
+         the VALUE here is what makes that a test failure rather than a
+         screenshot someone has to notice."
+        | t |
+        t := WinPixels transparentBackground.
+        self assert: t = 16r01000000
+            description: 'the sentinel must match Rust BG_TRANSPARENT, was ' , t printString.
+        self assert: t > 16rFFFFFF
+            description: 'and must be unreachable by any 24-bit colour'.
+        self assert: ((WinPixels bgraR: 255 g: 255 b: 255) bitAnd: 16rFFFFFF) ~= t
+            description: 'white is a colour, not a hole'
+    ]
+
+    testPixelPackingIsBgraNotRgba [
+        "The swapchain is `DXGI_FORMAT_B8G8R8A8_UNORM`, so BLUE is the low byte
+         — one byte order along from COLORREF, and exactly the kind of thing
+         that looks plausible while every red thing renders blue.
+
+         Asserted on PURE colours, because a mixed one can be wrong in a way
+         that still looks like a colour: pure red must land in bits 16..23 and
+         nowhere else."
+        | red blue green |
+        red := WinPixels bgraR: 255 g: 0 b: 0.
+        green := WinPixels bgraR: 0 g: 255 b: 0.
+        blue := WinPixels bgraR: 0 g: 0 b: 255.
+        self assert: red = 16rFFFF0000
+            description: 'red is the THIRD byte, but packed as ' , red printString.
+        self assert: green = 16rFF00FF00
+            description: 'green is the second, but packed as ' , green printString.
+        self assert: blue = 16rFF0000FF
+            description: 'blue is the LOW byte, but packed as ' , blue printString.
+        self assert: (WinPixels bgraR: 0 g: 0 b: 0) = 16rFF000000
+            description: 'and alpha is always opaque, or the plane is invisible'
     ]
 
     testAddToWorldNamesItsFileAfterTheClass [

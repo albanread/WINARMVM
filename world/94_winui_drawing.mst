@@ -192,7 +192,8 @@ Object subclass: WinShell [
         aSymbol == #outliner   ifTrue: [ ^16rE9D2 ].  "Org / hierarchy"
         aSymbol == #find       ifTrue: [ ^16rE721 ].  "Search"
         aSymbol == #editor     ifTrue: [ ^16rE943 ].  "Code"
-        aSymbol == #debugger   ifTrue: [ ^16rEBE8 ].  "Bug" 
+        aSymbol == #debugger   ifTrue: [ ^16rEBE8 ].  "Bug"
+        aSymbol == #canvas     ifTrue: [ ^16rE790 ].  "Colour" 
         ^16rE897                                       "Help"
     ]
 

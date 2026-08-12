@@ -31,7 +31,10 @@ use windows::Win32::Graphics::Dxgi::{
     DXGI_USAGE_RENDER_TARGET_OUTPUT,
 };
 
-use crate::{client_size, colorref_to_d2d, draw_grid, mono_face_metrics, rt_props, Cell, CellMetrics};
+use crate::{
+    client_size, colorref_to_d2d, draw_grid, draw_pixel_plane, mono_face_metrics, rt_props, Cell,
+    CellMetrics, PixelPlane,
+};
 
 struct Renderer {
     hwnd: HWND,
@@ -47,6 +50,11 @@ struct Renderer {
     rows: u32,
     cells: Vec<Cell>,
     caret: Option<(u32, u32)>,
+    /// WG8/SM0: the pixel plane, when this pane has one. Drawn UNDER the cell
+    /// grid, so a demo can put a HUD over its own pixels without either half
+    /// knowing about the other — which is the whole reason the two planes are
+    /// separate rather than one buffer with a mode flag.
+    plane: Option<PixelPlane>,
     frames: u64,
 }
 
@@ -199,6 +207,7 @@ fn build(hwnd: HWND, pt: f32, dpi: f32) -> Result<Renderer, String> {
             rows: 0,
             cells: Vec::new(),
             caret: None,
+            plane: None,
             frames: 0,
         };
         r.bind_backbuffer()?;
@@ -255,6 +264,12 @@ impl Renderer {
         unsafe {
             rt.BeginDraw();
             rt.Clear(Some(&colorref_to_d2d(0x00FF_FFFF)));
+        }
+        if let Some(plane) = self.plane.as_ref() {
+            if let Err(e) = draw_pixel_plane(&rt, plane, self.px_w as f32, self.px_h as f32) {
+                let _ = unsafe { rt.EndDraw(None, None) };
+                return Err(e);
+            }
         }
         let drew = draw_grid(
             &rt,
@@ -406,6 +421,65 @@ pub extern "C" fn MacvmRenderPresent(hwnd: i64) -> i64 {
 #[no_mangle]
 pub extern "C" fn MacvmRenderFrames(hwnd: i64) -> i64 {
     with_pane(hwnd, 0, |r| r.frames as i64)
+}
+
+/// Give this pane a pixel plane of `w`x`h` and answer its BUFFER ADDRESS, or 0.
+///
+/// The guest wraps the address in an `Alien` and stores BGRA bytes into it —
+/// upstream SM0's "the VM writes video memory, not messages", in the shape
+/// D3D11 allows.
+///
+/// **The address changes when the size does**, because the buffer is
+/// reallocated, so the guest must re-ask after a resize and must never cache
+/// it across one. Same contract as the cell grid, same reason.
+#[no_mangle]
+pub extern "C" fn MacvmRenderPixelPlane(hwnd: i64, w: i64, h: i64) -> i64 {
+    if w <= 0 || h <= 0 {
+        set_error("pixel plane dimensions must be positive");
+        return 0;
+    }
+    let got = with_pane(hwnd, 0i64, |r| {
+        let (w, h) = (w as u32, h as u32);
+        let need = match r.plane.as_ref() {
+            Some(p) => p.w != w || p.h != h,
+            None => true,
+        };
+        if need {
+            r.plane = Some(PixelPlane::new(w, h));
+        }
+        r.plane
+            .as_mut()
+            .map(|p| p.bytes.as_mut_ptr() as i64)
+            .unwrap_or(0)
+    });
+    if got == 0 {
+        set_error("no renderer attached to that window");
+    } else {
+        set_error("");
+    }
+    got
+}
+
+/// The plane's STRIDE in bytes, 0 when there is none.
+///
+/// Answered rather than assumed, and that is the standing caution of the WG8
+/// review made concrete: a pixel plane is the one place the guest computes an
+/// address, so its SHAPE must come from this side. A guest that assumed
+/// `w * 4` would be right today and wrong the moment a plane is padded.
+#[no_mangle]
+pub extern "C" fn MacvmRenderPixelStride(hwnd: i64) -> i64 {
+    with_pane(hwnd, 0, |r| {
+        r.plane.as_ref().map(|p| p.stride as i64).unwrap_or(0)
+    })
+}
+
+/// Drop this pane's pixel plane. A pane with none draws only its cell grid.
+#[no_mangle]
+pub extern "C" fn MacvmRenderDropPixelPlane(hwnd: i64) -> i64 {
+    with_pane(hwnd, OK, |r| {
+        r.plane = None;
+        OK
+    })
 }
 
 /// The last call's reason, UTF-16, NUL-terminated. Empty after a success.

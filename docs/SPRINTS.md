@@ -464,6 +464,24 @@ from the opposite direction — upstream reached it from bandwidth, this port
 from correctness (two authorities computing one pixel, four shipped defects).
 So Windows needs SM0, not SM1, and three views already run on the text plane.
 
+**SM0 landed 2026-08-12 as the Canvas view** (`world/116_winui_pixels.mst`,
+`gate-wg8`). The plane is a `D3D11_USAGE_DYNAMIC` BGRA texture whose mapped
+pointer the guest stores into through an `Alien`; the renderer draws it beneath
+the cell grid, and cells carrying `BG_TRANSPARENT` skip their background fill so
+a text HUD composes over the pixels without either side knowing about the other.
+
+It is worth recording HOW it landed, because the correction was the design. The
+first cut drew its plasma into the *Editor's* pane — that pane already had a
+renderer attached, so it was the shortest path to a coloured rectangle — and the
+response to that was "a strange place to test pixels; we are meant to have a
+canvas tab". Correct on both counts: this row always said Canvas, and a pixel
+plane borrowed into somebody else's pane demonstrates a texture, not a view.
+`gate-wg8` now leads with three assertions about a view *existing* — registered,
+switchable, built — before it asserts anything about pixels at all.
+
+Still open in WG8: SM4's palette-as-memory, runnable doc examples, and the
+teaching empty states.
+
 ---
 
 ## Standing rules

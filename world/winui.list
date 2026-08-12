@@ -131,3 +131,7 @@
 # WG6c-3 named and could not build — File In needs "a fresh world, then your
 # file", which is WG7-3's restart, and both need 113's file writer.
 115_winui_filein.mst
+# WINARM (WG8/SM0): the PIXEL plane — the VM writes video memory rather than
+# sending it. Upstream's SM0 in the shape D3D11 allows, on the D3D device
+# `winui_render` already owns. Loads after 110, whose renderer holds the plane.
+116_winui_pixels.mst

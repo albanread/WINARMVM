@@ -236,6 +236,8 @@ Object subclass: WinShell [
         self registerViewNamed: #editor title: 'Editor'.
         "WG7-1: the Debugger, next to the other code views."
         self registerViewNamed: #debugger title: 'Debugger'.
+        "WG8: the Canvas — pixels, where pixels belong."
+        self registerViewNamed: #canvas title: 'Canvas'.
         self registerViewNamed: #welcome title: 'Welcome'.
         self registerViewNamed: #transcript title: 'Transcript'.
         self registerViewNamed: #metrics title: 'Metrics'.
@@ -267,7 +269,8 @@ Object subclass: WinShell [
             ifNotNil: [ :c | c show: (aSymbol ~~ #browser
                 and: [ aSymbol ~~ #editor
                 and: [ aSymbol ~~ self monitorViewName
-                and: [ aSymbol ~~ self debuggerViewName ] ] ]) ].
+                and: [ aSymbol ~~ self debuggerViewName
+                and: [ aSymbol ~~ self canvasViewName ] ] ] ]) ].
         self showBrowserPanes: aSymbol == #browser.
         (self controlNamed: self outlinerName)
             ifNotNil: [ :c | c show: aSymbol == #outliner ].
@@ -275,6 +278,7 @@ Object subclass: WinShell [
         self showEditorViewPanes: aSymbol == #editor.
         self showMonitorPane: aSymbol == self monitorViewName.
         self showDebuggerPane: aSymbol == self debuggerViewName.
+        self showCanvasPane: aSymbol == self canvasViewName.
         self views do: [ :v |
             | c |
             (v at: 1) == aSymbol ifFalse: [
@@ -380,6 +384,16 @@ Object subclass: WinShell [
         "WG7-2: the Monitor's own cell pane, built after the content child so
          it sits ABOVE it in the sibling z-order — the same WS_CLIPSIBLINGS
          rule the editor pane follows, and the same failure if it is ignored."
+        aSymbol == self canvasViewName ifTrue: [
+            self buildCanvasPane.
+            self isOpen ifTrue: [
+                | rects |
+                rects := self layout
+                    rectsIn: self clientWidth
+                    by: self clientHeight
+                    dpi: (Dpi isNil ifTrue: [ WinApi constant: 'USER_DEFAULT_SCREEN_DPI' ] ifFalse: [ Dpi ]).
+                self layoutCanvasPane: (rects at: #content) ].
+            self renderCanvas ].
         aSymbol == self debuggerViewName ifTrue: [
             self buildDebuggerPane.
             self isOpen ifTrue: [
@@ -737,6 +751,8 @@ Object subclass: WinShell [
             self layoutMonitorPane: (rects at: #content) ].
         (self viewIsBuilt: self debuggerViewName) ifTrue: [
             self layoutDebuggerPane: (rects at: #content) ].
+        (self viewIsBuilt: self canvasViewName) ifTrue: [
+            self layoutCanvasPane: (rects at: #content) ].
 
         (self controlNamed: #splitter) ifNotNil: [ :c |
             (c moveTo: (rects at: #splitter)) ifTrue: [ moved := moved + 1 ] ].

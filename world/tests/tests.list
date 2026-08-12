@@ -182,5 +182,8 @@ tier1.mst
 # WG6c-3 finished: File In / Add to World. 67 checks the PURE part — finding
 # the class name a buffer defines, which decides what Add to World writes.
 ../115_winui_filein.mst
+# WG8/SM0: the pixel plane. 67 checks its PURE part — the BGRA packing, which
+# is one byte order along from COLORREF and easy to get backwards.
+../116_winui_pixels.mst
 67_winui_editor_tests.mst
 99_run_all.mst
