@@ -391,6 +391,24 @@ pub(crate) fn prim_alien_size(_vm: &mut VmState, args: &[Oop]) -> PrimResult {
     PrimResult::Ok(SmallInt::new(effective_len(a) as i64).oop())
 }
 
+/// An indirect Alien over host memory, minted from Rust rather than from a
+/// guest send. WG11-W7's `screenMemory` needs exactly this: a LENGTH-BOUNDED
+/// view over a buffer the host owns, so a demo writing pixels cannot walk off
+/// the end of the framebuffer however wrong its arithmetic is.
+///
+/// Verbatim from `upstream/main:src/runtime/alien.rs` — the same five lines
+/// `Alien class >> forAddress:size:` already runs, factored out so a primitive
+/// can call it.
+pub(crate) fn make_indirect_alien(vm: &mut VmState, addr: u64, nbytes: usize) -> Oop {
+    let klass = vm.universe.alien_klass;
+    let obj = alloc::alloc_indexable_bytes(vm, klass, 0);
+    let a = AlienOop::try_from(obj.oop())
+        .expect("make_indirect_alien: freshly allocated with alien_klass must be a valid AlienOop");
+    a.set_external_addr(addr);
+    a.set_indirect_size(nbytes);
+    a.oop()
+}
+
 // --- id 119/120: Alien class >> new: / forAddress:size: ---------------------
 
 /// `Alien class >> new: n` (id 119, argc 1) — a fresh DIRECT Alien with `n`

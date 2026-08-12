@@ -160,6 +160,78 @@ impl GameFrame {
     }
 }
 
+/// **WG11-W7: the direct framebuffer's rotating set.**
+///
+/// Three host-owned buffers the GUEST writes pixels into through an `Alien`,
+/// published to `embed`'s registry so `screenMemory` can hand out the one for
+/// the frame being drawn. The ring is what decouples a demo that has already
+/// started frame N+1 from a host still uploading frame N — upstream's own
+/// comment records the tearing that taught it.
+///
+/// HOST MEMORY, NOT A MAPPED TEXTURE, and that is the Windows difference. D3D11
+/// hands out a `Map`ped pointer only between Map and Unmap and it may not be
+/// held across frames, so this is a staging region copied into the renderer's
+/// plane on Present — one copy where Metal has none. The guest contract is
+/// identical either way, which is why it was written as an address and a
+/// stride rather than as a texture.
+///
+/// LEAKED DELIBERATELY (`Box::leak`): the registry publishes raw pointers that
+/// the guest may hold for the life of a frame, and upstream's contract is that
+/// they stay valid until `clear_screen_memory`. A demo re-opening at a new size
+/// leaks one set of buffers, which is bounded by how many times a user opens a
+/// demo and is the safe direction — freeing under a writing VM is not.
+struct DirectRing {
+    w: u32,
+    h: u32,
+    stride: usize,
+    bufs: Vec<&'static mut [u8]>,
+}
+
+static DIRECT: Mutex<Option<DirectRing>> = Mutex::new(None);
+/// The HOST's own count of rendered frames — the twin of the VM's present
+/// count. Both sides pick `frame % nbuf`, so they agree on which buffer a frame
+/// belongs to without either waiting on the other.
+static DIRECT_FRAME: AtomicU64 = AtomicU64::new(0);
+
+/// How many buffers rotate. Three: one being written, one being uploaded, one
+/// spare — the same depth upstream settled on.
+const DIRECT_NBUF: usize = 3;
+
+/// Build (or rebuild) the ring at `w`x`h` and publish it. Answers the stride.
+fn open_direct(w: u32, h: u32) -> usize {
+    let stride = w as usize;
+    let mut guard = match DIRECT.lock() {
+        Ok(g) => g,
+        Err(_) => return 0,
+    };
+    if let Some(r) = guard.as_ref() {
+        if r.w == w && r.h == h {
+            return r.stride;
+        }
+    }
+    let mut bufs: Vec<&'static mut [u8]> = Vec::with_capacity(DIRECT_NBUF);
+    let mut ptrs: Vec<*mut u8> = Vec::with_capacity(DIRECT_NBUF);
+    for _ in 0..DIRECT_NBUF {
+        let b: &'static mut [u8] =
+            Box::leak(vec![0u8; stride * h as usize].into_boxed_slice());
+        ptrs.push(b.as_mut_ptr());
+        bufs.push(b);
+    }
+    macvm::embed::publish_screen_buffers(&ptrs, stride, h as usize);
+    DIRECT_FRAME.store(0, Ordering::Relaxed);
+    *guard = Some(DirectRing { w, h, stride, bufs });
+    stride
+}
+
+/// The buffer the HOST should read for the frame it is about to upload, copied
+/// out. `None` when no direct pane is open.
+fn direct_frame() -> Option<(u32, u32, Vec<u8>)> {
+    let guard = DIRECT.lock().ok()?;
+    let r = guard.as_ref()?;
+    let slot = (DIRECT_FRAME.load(Ordering::Relaxed) as usize) % r.bufs.len();
+    Some((r.w, r.h, r.bufs[slot].to_vec()))
+}
+
 fn shared() -> &'static Arc<Mutex<GameFrame>> {
     static G: OnceLock<Arc<Mutex<GameFrame>>> = OnceLock::new();
     G.get_or_init(|| Arc::new(Mutex::new(GameFrame::new(DEF_W, DEF_H))))
@@ -255,6 +327,17 @@ impl GameSink for WinGameSink {
             // contract `45a_life.mst`'s HUD depends on.
             GameCommand::TextClear => f.text.clear(),
             GameCommand::Present => {
+                // WG11-W7: the pixels a demo wrote STRAIGHT into the ring are
+                // the frame. Copied into the sink's own buffer here, so the
+                // upload path downstream is identical whether the game drew
+                // through commands or through memory.
+                if let Some((dw, dh, px)) = direct_frame() {
+                    if dw == f.w && dh == f.h {
+                        let n = px.len().min(f.indices.len());
+                        f.indices[..n].copy_from_slice(&px[..n]);
+                    }
+                    DIRECT_FRAME.fetch_add(1, Ordering::AcqRel);
+                }
                 PRESENTED.fetch_add(1, Ordering::Release);
                 f.generation += 1;
                 // Never post while holding the frame the pump is about to take.
@@ -273,6 +356,15 @@ impl GameSink for WinGameSink {
                 FPS.store(fps.clamp(1, 120) as u64, Ordering::Relaxed)
             }
             GameCommand::SetPaneSize { w, h } => f.resize(w.max(1), h.max(1)),
+            GameCommand::OpenDirect { w, h } => {
+                // The pane takes the framebuffer's shape, so a demo that opens
+                // 320x240 direct gets a 320x240 pane without also sending
+                // resizeTo:by: — which upstream's demos rely on.
+                f.resize(w.max(1), h.max(1));
+                drop(f);
+                open_direct(w.max(1), h.max(1));
+                return;
+            }
             // Everything else is a later W: sprites (W10), the legacy 5x7 text
             // overlay (W4), sound (W6), the runtime shader (W11), per-scanline
             // palette and scroll (W9). Swallowed rather than logged — a game

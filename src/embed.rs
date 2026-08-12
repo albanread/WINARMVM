@@ -30,7 +30,7 @@
 
 use std::cell::Cell;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use crate::codecache::deopt_trap;
@@ -418,6 +418,10 @@ pub enum GameCommand {
     // engine call the GUI game host already links (`macgamepane-graphics`),
     // exactly like the commands above; a GUI that has not yet grown the arm
     // ignores it harmlessly. ──
+    /// **WG11-W7 (SM0).** Build the direct framebuffer — the rotating set of
+    /// index buffers a demo writes pixels straight into, published for
+    /// `screenMemory`. `GamePane>>openDirect:height:`.
+    OpenDirect { w: u32, h: u32 },
     /// Resize the pane to `w`x`h`, recreating the indexed framebuffer, text
     /// overlay and shader layer at the new resolution. A demo sends this FIRST
     /// (before any draw) if it wants a non-default size; a demo that never
@@ -471,6 +475,141 @@ pub enum GameCommand {
 /// Where game-primitive commands go — the game analogue of [`TranscriptSink`].
 /// `Send` because the GUI's sink hands commands across the worker-to-main
 /// thread channel, exactly like the transcript sink hands text.
+
+// ── WG11-W7: shared screen memory (upstream SM0) ────────────────────────────
+//
+// Taken VERBATIM from `upstream/main:src/embed.rs`. This is the guest-facing
+// contract — `screenMemory`, `screenStride`, and the rotation both sides agree
+// on by counting — and two implementations of it would be two chances to
+// disagree about which buffer a frame belongs to. The comments below are
+// upstream's, including the one recording the tearing that taught the counting.
+//
+// THE WINDOWS DIFFERENCE, stated once here rather than implied: these pointers
+// are HOST memory, not a mapped GPU texture. D3D11 hands out a `Map`ped pointer
+// only between Map and Unmap and it may not be held across frames, so the host
+// copies the buffer into the renderer's plane on Present — one copy where Metal
+// has none. The guest contract ("ask for an address and a stride") is identical
+// either way, which is the whole reason it was written as an address and a
+// stride. See `winui_render/src/lib.rs`'s note and the D3D12 CUSTOM-heap route
+// that would close it.
+
+// â”€â”€ shared screen memory (docs/shared_screen_memory_design.md) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+//
+// The one piece of game state that does NOT travel as a command, and cannot.
+// Everything else here flows VM â†’ host: the VM emits, the host applies. But
+// `GamePane>>screenMemory` has to *return* an address, and the address belongs
+// to the host â€” it is the `contents()` of a Metal buffer the main thread
+// created. A primitive on the VM thread has to read it directly.
+//
+// So the host PUBLISHES it here and the primitive READS it. Plain atomics, no
+// lock: the publisher is one thread (main, at pane creation and again after
+// every present, since the write buffer rotates), and readers only ever load.
+//
+// `generation` is the safety interlock. The S21 supervisor can kill and
+// respawn the primary while a demo holds an Alien over this memory, and a pane
+// can close underneath one. Every published buffer carries a generation; the
+// primitive stamps the generation it read into the Alien's size-0 case, and
+// `clear_screen_memory` bumps it so a stale handle reads as "no buffer" rather
+// than as freed memory. Belt and braces on top of the fact that the buffers
+// themselves are only freed on pane close, with the writing VM stopped first.
+// ROTATION, and why it is counted rather than published.
+//
+// The first cut published ONE pointer â€” "the current write buffer" â€” and
+// republished it after each present. That tore, visibly and badly, and the
+// reason is a race the "three buffers, no fence" argument missed: the rotation
+// happens on the MAIN thread when the Present command is drained, but the VM
+// does not wait for that. A demo sends `present` and immediately starts the
+// next frame, so it fetches the OLD published pointer and begins writing the
+// very buffer the GPU is about to read. ParallelMandel showed it worst, its
+// four workers piling into the buffer being displayed.
+//
+// The fix needs no synchronisation, only agreement. Both sides count the same
+// ordered events: the host publishes ALL the buffers once, and each side picks
+// `frame % count` â€” the VM incrementing its counter when it sends `present`,
+// the host incrementing its own when it renders one. The command stream is
+// ordered, so the two counts describe the same frame without either waiting on
+// the other.
+const MAX_SCREEN_BUFFERS: usize = 4;
+static SCREEN_PTRS: [AtomicUsize; MAX_SCREEN_BUFFERS] =
+    [const { AtomicUsize::new(0) }; MAX_SCREEN_BUFFERS];
+static SCREEN_NBUF: AtomicUsize = AtomicUsize::new(0);
+/// How many frames the VM has presented. Picks which buffer `screenMemory`
+/// hands out; the host's own count picks which one it renders.
+static SCREEN_FRAME: AtomicU64 = AtomicU64::new(0);
+static SCREEN_STRIDE: AtomicUsize = AtomicUsize::new(0);
+static SCREEN_HEIGHT: AtomicUsize = AtomicUsize::new(0);
+static SCREEN_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Count a presented frame â€” called by the `present` primitive, so the VM's
+/// notion of "which buffer am I drawing into" advances at exactly the moment
+/// it finishes a frame, not whenever the host gets round to drawing it.
+pub(crate) fn advance_screen_frame() {
+    SCREEN_FRAME.fetch_add(1, Ordering::AcqRel);
+}
+
+/// Publish the direct framebuffer's ROTATING SET â€” every buffer, once, at pane
+/// creation. Not "the current one after each present": see the note above, and
+/// the tearing that taught it.
+///
+/// # Safety contract (not `unsafe`, but a contract all the same)
+/// Every pointer must stay valid and writable until [`clear_screen_memory`],
+/// and the host must stop the writing VM before freeing them.
+pub fn publish_screen_buffers(ptrs: &[*mut u8], stride: usize, height: usize) {
+    let n = ptrs.len().min(MAX_SCREEN_BUFFERS);
+    SCREEN_STRIDE.store(stride, Ordering::Relaxed);
+    SCREEN_HEIGHT.store(height, Ordering::Relaxed);
+    SCREEN_FRAME.store(0, Ordering::Relaxed);
+    for (i, p) in ptrs.iter().take(n).enumerate() {
+        SCREEN_PTRS[i].store(*p as usize, Ordering::Relaxed);
+    }
+    // Count last, with Release: a reader that sees a non-zero count is
+    // guaranteed to see the pointers, the stride and the height that go with it.
+    SCREEN_NBUF.store(n, Ordering::Release);
+}
+
+/// Publish a SINGLE buffer â€” the degenerate case, used by tests and by any
+/// host with nothing to rotate. Identical to a rotating set of one, which
+/// means no rotation and therefore no tear-freedom: fine when one writer
+/// finishes a whole frame between presents, which is exactly what a test does.
+pub fn publish_screen_memory(ptr: *mut u8, stride: usize, height: usize) {
+    publish_screen_buffers(&[ptr], stride, height);
+}
+
+/// Retract the framebuffer â€” the pane closed, or is being rebuilt. Bumps the
+/// generation so any Alien still held over the old memory is dead rather than
+/// dangling.
+pub fn clear_screen_memory() {
+    SCREEN_NBUF.store(0, Ordering::Release);
+    for p in SCREEN_PTRS.iter() {
+        p.store(0, Ordering::Relaxed);
+    }
+    SCREEN_STRIDE.store(0, Ordering::Relaxed);
+    SCREEN_HEIGHT.store(0, Ordering::Relaxed);
+    SCREEN_FRAME.store(0, Ordering::Relaxed);
+    SCREEN_GENERATION.fetch_add(1, Ordering::AcqRel);
+}
+
+/// The published framebuffer as `(ptr, stride, height)`, or `None` when no
+/// direct pane is open.
+pub(crate) fn screen_memory() -> Option<(*mut u8, usize, usize)> {
+    let n = SCREEN_NBUF.load(Ordering::Acquire);
+    if n == 0 {
+        return None;
+    }
+    // The buffer for the frame the VM is drawing NOW â€” its own present count,
+    // not whatever the host last got round to rendering.
+    let slot = (SCREEN_FRAME.load(Ordering::Relaxed) as usize) % n;
+    let p = SCREEN_PTRS[slot].load(Ordering::Relaxed);
+    if p == 0 {
+        return None;
+    }
+    Some((
+        p as *mut u8,
+        SCREEN_STRIDE.load(Ordering::Relaxed),
+        SCREEN_HEIGHT.load(Ordering::Relaxed),
+    ))
+}
+
 pub trait GameSink: Send {
     fn emit(&mut self, cmd: GameCommand);
 }
