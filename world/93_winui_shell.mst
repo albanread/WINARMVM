@@ -829,6 +829,9 @@ Object subclass: WinShell [
          LBN_SELCHANGE is 1 here for the same reason it is everywhere else in
          this method — one door, one drain, one pass later."
         name == #editorSave ifTrue: [ self saveEditorClass. ^self ].
+        "WG6c-3, finished in WG7: the two verbs that needed a restart."
+        name == #editorFileIn ifTrue: [ self fileIn. ^self ].
+        name == #editorAddWorld ifTrue: [ self addToWorld. ^self ].
         (aCode = 1 and: [ name == #editorClasses ])
             ifTrue: [ self onEditorClassChosen. ^self ].
         ^self wg3ServiceCommand: anId code: aCode from: aHandle

@@ -127,3 +127,7 @@
 # primary parks and publishes; this renders. Loads after 110 (the renderer it
 # draws on) and 93 (the view it registers into).
 114_winui_debugger.mst
+# WINARM (WG6c-3, finished in WG7): File In and Add to World. The two verbs
+# WG6c-3 named and could not build — File In needs "a fresh world, then your
+# file", which is WG7-3's restart, and both need 113's file writer.
+115_winui_filein.mst

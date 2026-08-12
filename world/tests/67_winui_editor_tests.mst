@@ -54,7 +54,28 @@ TestCase subclass: WinUiEditorWg6cTests [
         self runTest: #testMonitorShedsColumnsNarrowestFirst
              do: [ self testMonitorShedsColumnsNarrowestFirst ].
         self runTest: #testMonitorRendersTheWholeTableItWasGiven
-             do: [ self testMonitorRendersTheWholeTableItWasGiven ]
+             do: [ self testMonitorRendersTheWholeTableItWasGiven ].
+        self runTest: #testAddToWorldNamesItsFileAfterTheClass
+             do: [ self testAddToWorldNamesItsFileAfterTheClass ]
+    ]
+
+    testAddToWorldNamesItsFileAfterTheClass [
+        "Add to World writes `world/user_<name>.mst`, and the NAME comes from
+         the code rather than from a dialog — the first class the buffer
+         defines. Deliberately the same shape `flows::parse_mst_source` looks
+         for, because two parsers disagreeing about what a class definition IS
+         would be a very confusing pair of error messages.
+
+         A buffer with no class in it answers NIL rather than guessing, so the
+         verb can refuse instead of writing `user_nil.mst`."
+        self assert: (WinShell firstClassNameIn: 'Object subclass: Demo [ run [ ^1 ] ]') = 'Demo'
+            description: 'the first class name is found'.
+        self assert: (WinShell firstClassNameIn: 'Magnitude subclass: Money_2 [ ]') = 'Money_2'
+            description: 'digits and underscores are part of a name'.
+        self assert: (WinShell firstClassNameIn: '"just a comment" 3 + 4') isNil
+            description: 'a buffer with no class definition answers nil'.
+        self assert: (WinShell firstClassNameIn: '') isNil
+            description: 'and so does an empty one'
     ]
 
     "── WG7-2: the Monitor ───────────────────────────────────────────────"

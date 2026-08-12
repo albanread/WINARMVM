@@ -26,23 +26,27 @@
  shape belongs in a change that is ABOUT it, with its own gate, and not as a
  side effect of adding a view.
 
- FILE IN AND ADD TO WORLD ARE NOT HERE, and that is a finding rather than an
- omission. On the Mac both write the buffer to a file and then ask the host to
- RESTART THE PRIMARY — `fileIn`'s contract is *a fresh world, then your file*,
- and `addToWorld` additionally writes `world/user_<name>.mst`, appends to
- `world.list` and re-imports the image. `win_gui` boots its primary once
- through `handshake_wire_vms` and holds it for the life of the process; there
- is no teardown, no re-handshake, and nothing that could give a caller a fresh
- world. That is host machinery, not a view feature, and inventing a weaker
- File In that merely evaluated the buffer in the CURRENT world would be a
- different verb wearing the same name."
+ FILE IN AND ADD TO WORLD LIVE IN 115, and the reason they are not here is
+ worth keeping: when this file was written they could not be built at all.
+ File In's contract is *a fresh world, then your file*, and `win_gui` booted
+ its primary once and held it for the process lifetime — there was no
+ teardown to build on. That was host machinery, not a view feature, and
+ inventing a weaker File In that merely evaluated the buffer into the CURRENT
+ world would have been a different verb wearing the same name.
+
+ WG7-3 built the restart and 113 built the file writer; 115 is the short file
+ between them. This view contributes the two BUTTONS and nothing else."
 
 Object subclass: WinShell [
     <classVars: EditorViewClass EditorSaveCount EditorSaveMessage>
 
     "── The panes ────────────────────────────────────────────────────────"
 
-    WinShell class >> editorViewPaneNames ^ <Array> [ ^#(#editorClasses #editorSave) ]
+    WinShell class >> editorViewPaneNames ^ <Array> [
+        "WG6c-3's own row, completed: Save, File In, Add to World. The last two
+         waited on WG7-3's restart and 113's file writer, and are the reason
+         this list changed rather than the view being rebuilt."
+        ^#(#editorClasses #editorSave #editorFileIn #editorAddWorld) ]
 
     WinShell class >> buildEditorViewPanes [
         (self controlNamed: #editorClasses) ifNotNil: [ :c | ^self ].
@@ -51,11 +55,13 @@ Object subclass: WinShell [
                 bitOr: ((WinApi constant: 'WS_BORDER') bitOr: (WinApi constant: 'WS_VSCROLL')))
                 bitOr: (WinApi constant: 'LBS_NOTIFY'))
             exStyle: 0.
-        self addControl: #editorSave class: 'BUTTON' text: 'Save'
-            style: (((WinApi constant: 'WS_CHILD')
-                bitOr: (WinApi constant: 'WS_VISIBLE'))
-                bitOr: (WinApi constant: 'WS_TABSTOP'))
-            exStyle: 0.
+        #(#editorSave 'Save' #editorFileIn 'File In' #editorAddWorld 'Add to World')
+            pairsDo: [ :sym :label |
+                self addControl: sym class: 'BUTTON' text: label
+                    style: (((WinApi constant: 'WS_CHILD')
+                        bitOr: (WinApi constant: 'WS_VISIBLE'))
+                        bitOr: (WinApi constant: 'WS_TABSTOP'))
+                    exStyle: 0 ].
         self editorViewPaneNames do: [ :n |
             (self controlNamed: n) ifNotNil: [ :c | c setFont: self guiFont ] ].
         "THE CUSTOM PANE LAST, and the order is load-bearing. A child window is
@@ -79,10 +85,16 @@ Object subclass: WinShell [
         x := content at: 1. y := content at: 2. w := content at: 3. h := content at: 4.
         col := 220 min: (w // 2).
         top := 30.
-        btn := 90.
+        btn := 96.
         out at: #editorClasses put: (Array with: x with: y with: col with: h).
-        out at: #editorSave put: (Array
+        "Three verbs, packed from the RIGHT so the widest one does not push the
+         others off the edge as the pane narrows."
+        out at: #editorAddWorld put: (Array
             with: x + w - btn with: y with: btn with: 24).
+        out at: #editorFileIn put: (Array
+            with: x + w - (btn * 2) - 6 with: y with: btn with: 24).
+        out at: #editorSave put: (Array
+            with: x + w - (btn * 3) - 12 with: y with: btn with: 24).
         out at: self editorPaneName put: (Array
             with: x + col + 6
             with: y + top

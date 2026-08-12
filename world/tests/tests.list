@@ -179,5 +179,8 @@ tier1.mst
 # WG7-1: the Debugger. Its report parsing is PURE, so 67 checks it with no
 # primary and nothing halted.
 ../114_winui_debugger.mst
+# WG6c-3 finished: File In / Add to World. 67 checks the PURE part — finding
+# the class name a buffer defines, which decides what Add to World writes.
+../115_winui_filein.mst
 67_winui_editor_tests.mst
 99_run_all.mst

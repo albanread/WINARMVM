@@ -133,6 +133,7 @@ pub struct PrimaryLink {
 fn spawn_primary(
     world_dir: PathBuf,
     wake: InboxWakeFn,
+    extra: Option<PathBuf>,
 ) -> Result<(u32, HostedInbox, InboxSender, JoinHandle<()>, MetricsSnapshot, Arc<AtomicBool>), VmError>
 {
     let (ready_tx, ready_rx) = mpsc::channel::<Result<(u32, HostedInbox, InboxSender), VmError>>();
@@ -150,6 +151,7 @@ fn spawn_primary(
                 ready_tx,
                 metrics_for_primary,
                 stop_for_primary,
+                extra,
             )
         })
         .map_err(|e| VmError {
@@ -194,6 +196,7 @@ pub fn restart_primary(
     link: &mut PrimaryLink,
     world_dir: PathBuf,
     wake: InboxWakeFn,
+    extra: Option<PathBuf>,
 ) -> Result<(), VmError> {
     // 1. Ask the old beat to finish, and WAIT for it. `pumpInbox:` returns
     //    every beat by design (that is the seam D1 kept for exactly this), so
@@ -205,7 +208,7 @@ pub fn restart_primary(
 
     // 2. A fresh primary, wired the same way a boot wires one.
     let (hosted_id, inbox, to_primary, thread, metrics, stop) =
-        spawn_primary(world_dir, wake)?;
+        spawn_primary(world_dir, wake, extra)?;
 
     // 3. Point the UI worker at it. Anything still holding the OLD id or the
     //    OLD sender is now stale by construction, which is the point: a
@@ -227,7 +230,7 @@ pub fn handshake_wire_vms(
     wake: InboxWakeFn,
 ) -> Result<WiredVms, VmError> {
     let (hosted_id, hosted_inbox, to_primary, primary_thread, metrics, stop) =
-        spawn_primary(world_dir.clone(), wake)?;
+        spawn_primary(world_dir.clone(), wake, None)?;
 
     // Boot the UI worker VM IN PLACE on THIS thread — boot must run on the
     // driving thread, because its foreign-fault handler (P2's VEH) and its
@@ -269,6 +272,7 @@ fn primary_thread_main(
     ready_tx: mpsc::Sender<Result<(u32, HostedInbox, InboxSender), VmError>>,
     metrics: MetricsSnapshot,
     stop: Arc<AtomicBool>,
+    extra: Option<PathBuf>,
 ) {
     // The persistent primary — the environment's state, the VM a user would
     // call "their image". `ExitThread` (boot's default) is right here: a
@@ -284,6 +288,21 @@ fn primary_thread_main(
             return;
         }
     };
+    // WG6c-3/WG7: FILE IN. The contract is "a fresh world, THEN your file",
+    // and this is the "then": loaded before the primary registers anybody or
+    // serves anything, so the first request already sees the user's classes.
+    //
+    // A BROKEN FILE IS REPORTED AND SURVIVED. It must not take the primary
+    // down with it — the whole point of file-in is iterating on code that does
+    // not compile yet, and a GUI that vanished on a syntax error would be
+    // useless for exactly the case it exists for.
+    if let Some(path) = extra.as_ref() {
+        match primary.run_file(path) {
+            Ok(()) => eprintln!("macvm-winui: filed in {}", path.display()),
+            Err(e) => eprintln!("macvm-winui: file-in FAILED for {}: {}", path.display(), e.msg),
+        }
+    }
+
     // Installing a worker-boot fn makes this VM the PRIMARY (creates its inbox
     // + registry) — required before `register_hosted_worker`, and it lets the
     // primary spawn compute workers later.

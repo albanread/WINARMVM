@@ -202,6 +202,31 @@ pub const WM_APP_DRAIN: u32 = 0x8000 + 7;
 /// BUILD error rather than a test.
 const _WM_APP_DRAIN_IS_PRIVATE: () = assert!(WM_APP_DRAIN >= 0x8000);
 
+/// WINARM (WG6c-3, finished in WG7): **File In** — the guest asking the host
+/// to restart the primary on a file it has just written.
+///
+/// A private message rather than an allowlisted one, and handled by the
+/// TRAMPOLINE rather than routed to `WinShell`, for the same reason
+/// [`WM_APP_DRAIN`] is: its meaning is the HOST's, not Smalltalk's. The guest
+/// cannot restart the primary — it IS one of the two VMs involved — so what
+/// crosses here is a request, recorded and acted on by the pump between
+/// dispatches. Restarting from inside the door would be a VM entry joining a
+/// thread that is waiting on the VM.
+///
+/// The FILE is not carried: the guest writes to a path both sides derive the
+/// same way (`GetTempPathW` here, `std::env::temp_dir()` there — both read
+/// TMP/TEMP), so nothing has to marshal a string through a `wParam`.
+pub const WM_APP_FILEIN: u32 = 0x8000 + 8;
+const _WM_APP_FILEIN_IS_PRIVATE: () = assert!(WM_APP_FILEIN >= 0x8000);
+
+/// Set by the trampoline when a `WM_APP_FILEIN` arrives; taken by the pump.
+static FILEIN_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// The pump: has the guest asked for a File In since we last looked?
+pub fn take_filein_requested() -> bool {
+    FILEIN_REQUESTED.swap(false, Ordering::AcqRel)
+}
+
 /// **The closed set.** A message not named here never reaches the VM entry
 /// point, whatever `WinShell` may or may not implement — `allowlist_is_a_closed_set`
 /// is the test, and the probe counter it reads is [`vm_entries`].
@@ -887,6 +912,15 @@ pub extern "system" fn macvm_wndproc(hwnd: isize, msg: u32, wparam: usize, lpara
     //     panic unwinding into Win32's dispatcher is UB.
     if msg == WM_APP_DRAIN {
         let _ = catch_unwind(AssertUnwindSafe(|| service_drain(hwnd)));
+        return 0;
+    }
+    // WG6c-3/WG7: File In. RECORDED here and acted on by the pump — the same
+    // flag-and-drain shape as everything else, and load-bearing rather than
+    // stylistic: the work is "join the primary's thread and spawn a new one",
+    // which cannot happen inside a wndproc without the door holding a VM entry
+    // while it waits on another VM.
+    if msg == WM_APP_FILEIN {
+        FILEIN_REQUESTED.store(true, Ordering::Release);
         return 0;
     }
     if msg == WM_TIMER {

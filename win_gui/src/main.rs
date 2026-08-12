@@ -277,6 +277,16 @@ mod app {
     /// view specifically. Rows are newline-separated, fields US-separated
     /// (0x1F), the same wire format WG6b's Find already uses and the guest
     /// already parses.
+    /// Where File In writes its buffer, and where the restart reads it.
+    ///
+    /// BOTH SIDES DERIVE IT, neither carries it: the guest builds the same
+    /// path from `GetTempPathW` and both read TMP/TEMP, so nothing has to
+    /// marshal a string through a private message's `wParam`. The coupling is
+    /// this constant, named in both files.
+    fn filein_scratch_path() -> std::path::PathBuf {
+        std::env::temp_dir().join("macvm-editor-filein.mst")
+    }
+
     fn refresh_monitor(vm: &mut VmHandle) {
         use std::time::{Duration, Instant};
         static LAST: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
@@ -698,6 +708,7 @@ mod app {
                                 l,
                                 world_dir(),
                                 std::sync::Arc::new(wake_ui_thread),
+                                None,
                             ) {
                                 Ok(()) => {
                                     format!("OK restart hosted_id {} -> {}", before, l.hosted_id)
@@ -1056,6 +1067,30 @@ mod app {
                     // only have told us. That the pump is still running at all
                     // while the VM it debugs is frozen is WG4 D1's two-VM
                     // split doing its job.
+                    // WG6c-3/WG7: FILE IN — a fresh world, then the file the
+                    // guest just wrote. Acted on HERE because it joins the
+                    // primary's thread, which a wndproc must never do.
+                    if macvm::runtime::win_wndproc::take_filein_requested() {
+                        let vm: &mut VmHandle = unsafe { &mut *vmp };
+                        let path = filein_scratch_path();
+                        let msg = match link.as_mut() {
+                            None => "file-in needs the two-VM path".to_string(),
+                            Some(l) => match crate::boot::restart_primary(
+                                vm,
+                                l,
+                                world_dir(),
+                                std::sync::Arc::new(wake_ui_thread),
+                                Some(path.clone()),
+                            ) {
+                                Ok(()) => format!("filed in {}", path.display()),
+                                Err(e) => format!("file-in FAILED: {}", e.msg),
+                            },
+                        };
+                        let _ = guarded_exec(
+                            vm,
+                            &format!("WinShell appendTranscript: 'editor: {msg}'."),
+                        );
+                    }
                     if crate::debugger::take_halt_arrived() {
                         let vm: &mut VmHandle = unsafe { &mut *vmp };
                         let payload = crate::debugger::report().replace('\u{27}', "''");
