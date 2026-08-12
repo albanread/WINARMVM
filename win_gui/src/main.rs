@@ -115,6 +115,7 @@ fn main() {
 #[cfg(windows)]
 mod boot;
 mod debugger;
+mod game;
 
 #[cfg(windows)]
 #[path = "../../gui/src/control.rs"]
@@ -1004,6 +1005,11 @@ mod app {
         // The previous allocation total, so ALLOC can report a RATE rather than
         // a running sum — the Mac's own cluster does the same.
         let mut prev_alloc: Option<u64> = None;
+        // WG11-W1: the Canvas pane's hwnd, learned once. Zero until the view is
+        // built; re-asked only while it is zero, so a running game costs no VM
+        // entry to find out where its pixels go.
+        let mut game_pane_hwnd: i64 = 0;
+        let mut game_mode_set = false;
         let mut had_window = !window.0.is_null();
         loop {
             let rc = unsafe { GetMessageW(&mut msg, None, 0, 0) }.0;
@@ -1096,6 +1102,34 @@ mod app {
                     // 8000-assertion corpus to run rather than an empty image.
                     // Same door and the same reason as file-in: it joins the
                     // primary's thread.
+                    // WG11-W1: the GAME FRAME. A presented frame is uploaded to
+                    // the Canvas pane and shown. Done HERE, between dispatches,
+                    // because the renderer's per-hwnd state is thread_local to
+                    // this thread and the frame was drawn on the primary's.
+                    //
+                    // The pane's hwnd is CACHED and re-asked only while it is
+                    // zero: a `guarded_eval` per frame would be sixty VM entries
+                    // a second to learn a number that changes once.
+                    if crate::game::frame_pending() {
+                        let vm: &mut VmHandle = unsafe { &mut *vmp };
+                        if game_pane_hwnd == 0 {
+                            game_pane_hwnd = guarded_eval(vm, "WinShell canvasPaneHwnd")
+                                .ok()
+                                .and_then(|s| s.trim().parse::<i64>().ok())
+                                .unwrap_or(0);
+                        }
+                        if game_pane_hwnd != 0 {
+                            // ONCE: tell the Canvas a game owns it, so its own
+                            // WM_PAINT stops redrawing the shell's demo over
+                            // the game's frame. One VM entry per game, not
+                            // per frame.
+                            if !game_mode_set {
+                                let _ = guarded_exec(vm, "WinShell canvasMode: #game.");
+                                game_mode_set = true;
+                            }
+                            crate::game::upload_and_present(game_pane_hwnd);
+                        }
+                    }
                     if macvm::runtime::win_wndproc::take_loadtests_requested() {
                         let vm: &mut VmHandle = unsafe { &mut *vmp };
                         let msg = match link.as_mut() {

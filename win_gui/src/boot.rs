@@ -342,6 +342,11 @@ fn primary_thread_main(
     // a frontend belongs to the VM that halts, and a restarted primary is a
     // different VM.
     crate::debugger::install(&mut primary, wake_for_debugger);
+    // WG11-W1: the GamePane host. Installed on the PRIMARY, because that is
+    // where a game's step block runs and therefore where its commands are
+    // emitted. Before this there was no consumer at all in the Windows GUI —
+    // `GamePane new ... run` emitted into `None` and did nothing.
+    crate::game::install(&mut primary);
 
     // WG7-2: join the Monitor's roster. `monitor_register` REUSES a dead slot
     // with the same label, so a restarted primary (WG7-3) keeps ONE row and

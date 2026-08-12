@@ -330,6 +330,13 @@ Object subclass: WinShell [
 Object subclass: WinShell [
 
     WinShell class >> drawGalleryOn: hwnd <Integer> ^ <Boolean> [
+        "#game: THE GUEST STANDS DOWN. When an upstream game owns the pane its
+         frames arrive from the host — drawn in the primary, uploaded by the
+         pump — and the plane already holds the picture. Answering true without
+         touching it means a WM_PAINT re-presents the GAME's frame instead of
+         overwriting it with ours, which is exactly what a repaint did the first
+         time a game ran here: the plasma HUD reappeared over Life."
+        self canvasMode == #game  ifTrue: [ ^true ].
         self canvasMode == #life  ifTrue: [ ^self drawLifeOn: hwnd ].
         self canvasMode == #julia ifTrue: [
             ^self drawJuliaOn: hwnd width: self canvasPlaneWidth height: self canvasPlaneHeight ].
@@ -337,6 +344,9 @@ Object subclass: WinShell [
     ]
 
     WinShell class >> canvasLabel ^ <String> [
+        "#game draws NO label — the pane belongs to the game, including the
+         cells. Answering empty is what makes the HUD row vanish."
+        self canvasMode == #game ifTrue: [ ^'' ].
         self canvasMode == #life ifTrue: [
             ^'CANVAS life - gen ' , self lifeGeneration printString
                 , ', ' , self lifePopulation printString , ' alive, indexed plane' ].

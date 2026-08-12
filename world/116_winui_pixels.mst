@@ -509,6 +509,12 @@ Object subclass: WinShell [
         base := WinRender gridFor: hwnd cols: cols rows: rows.
         base = 0 ifTrue: [ ^false ].
         WinRender clear: hwnd to: 16rFFFFFF on: WinPixels transparentBackground.
+        "An EMPTY label means the pane wants no HUD at all (#game) — present
+         the plane and nothing else."
+        self canvasLabel isEmpty ifTrue: [
+            WinRender caretFor: hwnd col: 0 row: 0 visible: false.
+            CanvasFrames := self canvasFrames + 1.
+            ^WinRender present: hwnd ].
         "`WinShell canvasMode: #plasma | #palette | #life | #julia` in the
          Workspace switches; each mode owns its own line via `canvasLabel`."
         label := self canvasLabel , ' - frame ' , (self canvasFrames + 1) printString.

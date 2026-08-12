@@ -6,4 +6,7 @@
 # inside it would starve the very work being waited on.
 gui connect 7720
 gui drain now
+# The first (auto) run has settled by now, so the empty-image screen can be
+# read without racing it.
+puts "WG9 empty-first-line [gui eval {(WinShell testsDisplayRows first) at: 1}]"
 puts "WG9 run-again [gui eval {WinShell runTests}]"

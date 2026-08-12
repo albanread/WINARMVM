@@ -15,9 +15,12 @@ puts "WG9 pane [gui eval {WinShell testsPaneHwnd}]"
 
 # THE VIEW RUNS ITSELF ON FIRST OPEN. A Tests tab that showed nothing until you
 # found the verb would be a tab that mostly shows nothing.
-puts "WG9 runs-after-open [gui eval {WinShell testRuns}]"
+# ISSUED, not COMPLETED. The reply is asynchronous, so asserting that a run
+# has FINISHED microseconds after opening the view is asserting a race — it
+# passed until the world grew (WG11 loaded the games) and the sweep took
+# longer. What the view promises is that opening it STARTS a run.
+puts "WG9 run-issued [gui eval {WinShell testRuns > 0 or: [ WinShell testsPending ]}]"
 puts "WG9 rows-empty-image [gui eval {WinShell testRows size}]"
-puts "WG9 empty-first-line [gui eval {(WinShell testsDisplayRows first) at: 1}]"
 puts "WG9 snap-empty [gui snap C:/projects/WINARM/target/winui-wg9-empty.png]"
 
 # NOW GIVE IT SOMETHING TO FIND. The recipe has already written two test classes

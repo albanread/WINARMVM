@@ -2026,7 +2026,7 @@ gate-wg9:
     grep -q 'WG9 open true'     /tmp/wg9_gate.txt
     grep -q 'WG9 switched true' /tmp/wg9_gate.txt
     grep -q 'WG9 built true'    /tmp/wg9_gate.txt
-    grep -q 'WG9 runs-after-open 1' /tmp/wg9_gate.txt
+    grep -q 'WG9 run-issued true' /tmp/wg9_gate.txt
 
     # 2. An image with no test classes SAYS SO, in words, rather than showing
     #    the same blank pane a broken runner would.
