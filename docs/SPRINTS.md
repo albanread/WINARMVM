@@ -445,10 +445,24 @@ is already landed; **P5's resolver is the gate to WG0**.
 | WG5 Workspace + Browser | `L` | WG4 | syntax-coloured Workspace (Ctrl-D/Ctrl-P, ghost line); four-pane Browser on the shared model; Accept persists byte-identically to the web path |
 | WG6 Outliner + Find + Editor | `M` | WG5 | live-reflection tree; Find lands selections in the Browser; File In / Add to World |
 | WG7 Debugger + Monitor | `M` | WG5 | halt loop fronted natively (+F5/F10/F11); Monitor with column priority; primary restart-in-place |
-| WG8 Docs + Canvas + parity | `M` | WG4 | runnable doc examples; GDI-blit Canvas (Mandelbrot + Benchmark Chart); every empty state teaches; `docs/gallery-win/` captured |
+| WG8 Screen memory + docs | `L` | WG7 | SM0's PIXEL plane on the existing D3D device (a `D3D11_USAGE_DYNAMIC` texture the guest stores into through an `Alien`, sampled beside the cell grid); SM4's palette-as-memory; runnable doc examples; every empty state teaches |
+| WG9 SUnit + Tests tab | `M` | WG6 | `TestCase` in the world, a Tests tab, a headless runner — edit a class, run its tests, click a failure, end in the Debugger (upstream `6536294`) |
+| WG10 Demo gallery | `M` | WG8, WG9 | Life, Julia, plasma on the pixel plane; FreeCell and Minesweeper on the text plane we already have; `docs/gallery-win/` captured |
 
 Games/sound (D3D11/XAudio2) stay the recorded stretch — the Demos menu
 greys with a reason naming the design doc, never silently.
+
+**WG8 was `GDI-blit Canvas` until 2026-08-12** and is not any more. Upstream's
+SM0–SM4 (`docs/shared_screen_memory_design.md`) moves bulk state OFF the
+command channel and into memory the VM writes directly, and a blit is precisely
+the three-copies-per-frame path it exists to delete. Building the blit first
+would be building the thing we would then replace.
+
+The review is `docs/sprints/upstream_review_2026-08-12.md`, and its finding is
+worth carrying here: **WG6d already built SM1's text plane**, independently and
+from the opposite direction — upstream reached it from bandwidth, this port
+from correctness (two authorities computing one pixel, four shipped defects).
+So Windows needs SM0, not SM1, and three views already run on the text plane.
 
 ---
 
