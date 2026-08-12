@@ -232,6 +232,103 @@ fn direct_frame() -> Option<(u32, u32, Vec<u8>)> {
     Some((r.w, r.h, r.bufs[slot].to_vec()))
 }
 
+/// **WG11-W8: the text plane (SM1).**
+///
+/// `cols * rows` cells of four bytes — `[char, fg, bg, flags]`, fg and bg being
+/// PALETTE INDICES — that the guest writes stores into through an `Alien`. A HUD
+/// redrawn every frame costs nothing on the command channel, which is the whole
+/// of SM1.
+///
+/// CELLS ARE A FIXED 6x8, not DirectWrite metrics: a 5x7 glyph plus one column
+/// of spacing and one row of leading, so a 320x240 pane is 53x30. Upstream's
+/// demos hard-code rows against exactly that (`row: 28` for a bottom line), and
+/// a grid sized from a font would put their HUDs in the wrong place or clip
+/// them. This is emulated hardware; its cell size is part of the spec.
+///
+/// ONE GRID, IN PLACE — it does not rotate, so an Alien over it may be kept for
+/// the life of the pane. Leaked for the same reason the pixel ring is.
+const CELL_W: u32 = 6;
+const CELL_H: u32 = 8;
+
+struct TextPlane {
+    cols: usize,
+    rows: usize,
+    cells: &'static mut [u8],
+}
+
+static TEXTP: Mutex<Option<TextPlane>> = Mutex::new(None);
+
+/// Build (or rebuild) the grid for a `w`x`h` pane and publish it.
+fn open_text_plane(w: u32, h: u32) {
+    let cols = (w / CELL_W).max(1) as usize;
+    let rows = (h / CELL_H).max(1) as usize;
+    let mut guard = match TEXTP.lock() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+    if let Some(t) = guard.as_ref() {
+        if t.cols == cols && t.rows == rows {
+            return;
+        }
+    }
+    let cells: &'static mut [u8] = Box::leak(vec![0u8; cols * rows * 4].into_boxed_slice());
+    macvm::embed::publish_text_memory(cells.as_mut_ptr(), cols, rows);
+    *guard = Some(TextPlane { cols, rows, cells });
+}
+
+/// Snapshot the grid for the pump. `None` when nothing has been written — a
+/// game with no HUD pays nothing.
+fn text_cells() -> Option<(usize, usize, Vec<u8>)> {
+    let guard = TEXTP.lock().ok()?;
+    let t = guard.as_ref()?;
+    // Char 0 means "unused cell, draws nothing", so an all-zero grid is empty.
+    if t.cells.iter().step_by(4).all(|&c| c == 0) {
+        return None;
+    }
+    Some((t.cols, t.rows, t.cells.to_vec()))
+}
+
+/// Draw the cell grid into `dst` (BGRA, `w`x`h`) through `palette`.
+///
+/// CHAR 0 DRAWS NOTHING — not a black square. That is what lets a HUD occupy
+/// one row of a 53x30 grid and leave the game visible everywhere else.
+fn draw_text_plane(dst: &mut [u32], w: u32, h: u32, palette: &[u32]) {
+    let Some((cols, rows, cells)) = text_cells() else {
+        return;
+    };
+    let rgb = |i: u8| -> (u8, u8, u8) {
+        let c = palette.get(i as usize).copied().unwrap_or(0xFF00_0000);
+        (((c >> 16) & 0xFF) as u8, ((c >> 8) & 0xFF) as u8, (c & 0xFF) as u8)
+    };
+    for row in 0..rows {
+        for col in 0..cols {
+            let o = (row * cols + col) * 4;
+            let ch = cells[o];
+            if ch == 0 {
+                continue;
+            }
+            let (x, y) = ((col as u32 * CELL_W) as i64, (row as u32 * CELL_H) as i64);
+            let bg = cells[o + 2];
+            if bg != 0 {
+                // A non-zero background paints the whole cell first; zero means
+                // transparent, which is how a HUD sits over the picture.
+                let (br, bgc, bb) = rgb(bg);
+                let word = 0xFF00_0000 | ((br as u32) << 16) | ((bgc as u32) << 8) | bb as u32;
+                for dy in 0..CELL_H as i64 {
+                    for dx in 0..CELL_W as i64 {
+                        let (px, py) = (x + dx, y + dy);
+                        if px >= 0 && py >= 0 && (px as u32) < w && (py as u32) < h {
+                            dst[py as usize * w as usize + px as usize] = word;
+                        }
+                    }
+                }
+            }
+            let (fr, fg, fb) = rgb(cells[o + 1]);
+            crate::text_overlay::draw_char(dst, w, h, x, y, ch as char, fr, fg, fb, 1);
+        }
+    }
+}
+
 fn shared() -> &'static Arc<Mutex<GameFrame>> {
     static G: OnceLock<Arc<Mutex<GameFrame>>> = OnceLock::new();
     G.get_or_init(|| Arc::new(Mutex::new(GameFrame::new(DEF_W, DEF_H))))
@@ -355,7 +452,10 @@ impl GameSink for WinGameSink {
             GameCommand::SetFrameRate { fps } => {
                 FPS.store(fps.clamp(1, 120) as u64, Ordering::Relaxed)
             }
-            GameCommand::SetPaneSize { w, h } => f.resize(w.max(1), h.max(1)),
+            GameCommand::SetPaneSize { w, h } => {
+                f.resize(w.max(1), h.max(1));
+                open_text_plane(w.max(1), h.max(1));
+            }
             GameCommand::OpenDirect { w, h } => {
                 // The pane takes the framebuffer's shape, so a demo that opens
                 // 320x240 direct gets a 320x240 pane without also sending
@@ -363,6 +463,7 @@ impl GameSink for WinGameSink {
                 f.resize(w.max(1), h.max(1));
                 drop(f);
                 open_direct(w.max(1), h.max(1));
+                open_text_plane(w.max(1), h.max(1));
                 return;
             }
             // Everything else is a later W: sprites (W10), the legacy 5x7 text
@@ -499,7 +600,8 @@ pub fn upload_and_present(hwnd: i64) -> bool {
     let Some((w, h, indices, palette, overlay)) = take_frame() else {
         return false;
     };
-    if overlay.is_some() {
+    if overlay.is_some() || text_cells().is_some() {
+        // Either text layer means RGB over indices, so the direct path.
         TEXT_MODE.store(true, Ordering::Relaxed);
     }
     let want_indexed = !TEXT_MODE.load(Ordering::Relaxed);
@@ -557,6 +659,15 @@ pub fn upload_and_present(hwnd: i64) -> bool {
                 &palette,
                 overlay.as_deref(),
             );
+            // W8: the CELL grid goes on last, over the pixels and over the
+            // legacy overlay — it is the topmost layer, as it is upstream.
+            if stride as usize == w as usize * 4 {
+                let dst = std::slice::from_raw_parts_mut(
+                    base as *mut u32,
+                    w as usize * h as usize,
+                );
+                draw_text_plane(dst, w, h, &palette);
+            }
         }
         // A GAME OWNS THE WHOLE PANE.
         let _ = (api.clear)(hwnd, 0x00FF_FFFF, 0x0100_0000);
@@ -566,5 +677,8 @@ pub fn upload_and_present(hwnd: i64) -> bool {
 
 /// Install the sink on `vm` — the primary, where a game's step block runs.
 pub fn install(vm: &mut macvm::embed::VmHandle) {
+    // The default pane has a text plane from the start: Minesweeper writes its
+    // HUD without ever resizing, and `textMemory` must not fail for it.
+    open_text_plane(DEF_W, DEF_H);
     vm.set_game_sink(Box::new(WinGameSink));
 }

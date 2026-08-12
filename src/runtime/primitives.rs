@@ -1508,6 +1508,38 @@ pub static PRIMITIVES: &[PrimDesc] = &[
         can_fail: true,
     },
     PrimDesc {
+        id: 271,
+        name: "GamePane>>textMemory",
+        f: prim_game_text_memory,
+        argc: 0,
+        can_allocate: true,
+        can_fail: true,
+    },
+    PrimDesc {
+        id: 272,
+        name: "GamePane>>textCols",
+        f: prim_game_text_cols,
+        argc: 0,
+        can_allocate: false,
+        can_fail: true,
+    },
+    PrimDesc {
+        id: 273,
+        name: "GamePane>>textRows",
+        f: prim_game_text_rows,
+        argc: 0,
+        can_allocate: false,
+        can_fail: true,
+    },
+    PrimDesc {
+        id: 274,
+        name: "Alien>>replaceFrom:to:with:startingAt:",
+        f: crate::runtime::alien::prim_alien_replace_from_to_with,
+        argc: 4,
+        can_allocate: false,
+        can_fail: true,
+    },
+    PrimDesc {
         id: 300,
         name: "platformName",
         f: prim_platform_name,
@@ -1771,6 +1803,44 @@ fn prim_game_screen_stride(_vm: &mut VmState, _args: &[Oop]) -> PrimResult {
         return PrimResult::Fail;
     };
     PrimResult::Ok(SmallInt::new(stride as i64).oop())
+}
+
+/// `textMemory` (271): the text plane's cell grid as an indirect `Alien` —
+/// `cols * rows` cells of four bytes, `[char, fg, bg, flags]`, row by row.
+/// Writing a character is a STORE; there is no command, which is why a HUD
+/// redrawn every frame costs nothing at all (SM1).
+///
+/// Unlike `screenMemory` this does NOT rotate — one grid, in place — so the
+/// Alien may be kept for the life of the pane. Fails when no pane is open.
+fn prim_game_text_memory(vm: &mut VmState, _args: &[Oop]) -> PrimResult {
+    let Some((ptr, cols, rows)) = crate::embed::text_memory() else {
+        return PrimResult::Fail;
+    };
+    let bytes = cols.saturating_mul(rows).saturating_mul(4);
+    if bytes == 0 {
+        return PrimResult::Fail;
+    }
+    PrimResult::Ok(crate::runtime::alien::make_indirect_alien(
+        vm, ptr as u64, bytes,
+    ))
+}
+
+/// `textCols` (272): the grid's width in CELLS. Cells are a fixed 6x8 pixels
+/// (a 5x7 glyph plus one column of spacing and one row of leading), so a
+/// 320x240 pane is 53x30 — and demos hard-code rows against exactly that.
+fn prim_game_text_cols(_vm: &mut VmState, _args: &[Oop]) -> PrimResult {
+    let Some((_, cols, _)) = crate::embed::text_memory() else {
+        return PrimResult::Fail;
+    };
+    PrimResult::Ok(SmallInt::new(cols as i64).oop())
+}
+
+/// `textRows` (273): the grid's height in cells. See `textCols`.
+fn prim_game_text_rows(_vm: &mut VmState, _args: &[Oop]) -> PrimResult {
+    let Some((_, _, rows)) = crate::embed::text_memory() else {
+        return PrimResult::Fail;
+    };
+    PrimResult::Ok(SmallInt::new(rows as i64).oop())
 }
 
 /// `run` (208): start the frame loop (the GUI timer begins pulling GameSteps).
@@ -5715,6 +5785,10 @@ mod tests {
             (268, "GamePane>>openDirect:height:"),
             (269, "GamePane>>screenMemory"),
             (270, "GamePane>>screenStride"),
+            (271, "GamePane>>textMemory"),
+            (272, "GamePane>>textCols"),
+            (273, "GamePane>>textRows"),
+            (274, "Alien>>replaceFrom:to:with:startingAt:"),
             (300, "platformName"),
             (301, "wallClockMilliseconds"),
             // WINARM (WG0): winkb's data half (constants + struct offsets),

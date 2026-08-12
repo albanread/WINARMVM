@@ -610,6 +610,50 @@ pub(crate) fn screen_memory() -> Option<(*mut u8, usize, usize)> {
     ))
 }
 
+
+// ── WG11-W8: the text plane (upstream SM1) ──────────────────────────────────
+//
+// A cell grid the guest writes STORES into, not commands: `cols * rows` cells
+// of four bytes, `[char, fg, bg, flags]`, laid out row by row, where fg and bg
+// are PALETTE INDICES rather than colours. A HUD redrawn every frame therefore
+// costs nothing on the command channel at all, which is the whole of SM1.
+//
+// Unlike the pixel plane this does NOT rotate — one grid, in place — so an
+// Alien over it may be kept for the life of the pane.
+static TEXT_PTR: AtomicUsize = AtomicUsize::new(0);
+static TEXT_COLS: AtomicUsize = AtomicUsize::new(0);
+static TEXT_ROWS: AtomicUsize = AtomicUsize::new(0);
+
+/// Publish the text cell grid. Unlike the framebuffer this does NOT rotate â€”
+/// there is one grid and it stays put â€” so the host publishes once when the
+/// pane is built and retracts on close.
+pub fn publish_text_memory(ptr: *mut u8, cols: usize, rows: usize) {
+    TEXT_COLS.store(cols, Ordering::Relaxed);
+    TEXT_ROWS.store(rows, Ordering::Relaxed);
+    TEXT_PTR.store(ptr as usize, Ordering::Release);
+}
+
+/// Retract the text grid â€” the pane closed.
+pub fn clear_text_memory() {
+    TEXT_PTR.store(0, Ordering::Release);
+    TEXT_COLS.store(0, Ordering::Relaxed);
+    TEXT_ROWS.store(0, Ordering::Relaxed);
+}
+
+/// The published text grid as `(ptr, cols, rows)`, or `None` when no pane is
+/// open.
+pub(crate) fn text_memory() -> Option<(*mut u8, usize, usize)> {
+    let p = TEXT_PTR.load(Ordering::Acquire);
+    if p == 0 {
+        return None;
+    }
+    Some((
+        p as *mut u8,
+        TEXT_COLS.load(Ordering::Relaxed),
+        TEXT_ROWS.load(Ordering::Relaxed),
+    ))
+}
+
 pub trait GameSink: Send {
     fn emit(&mut self, cmd: GameCommand);
 }
