@@ -1,0 +1,339 @@
+"── 118_winui_tests.mst — WG9: the Tests view ────────────────────────────
+ upstream `6536294` S4. The tab that closes a loop this shell already had three
+ quarters of: edit a class in the Browser, run its tests, read the failure, open
+ the code. Every piece but the tab existed.
+
+ IT RUNS IN THE PRIMARY, and that is the whole reason this file is thin. The
+ test classes live where the user's objects live — the Browser compiles into the
+ image the primary boots, `TestRunner allTestClasses` sweeps the primary's own
+ reflection, and `86_sunit_runner.mst` is loaded by `world.list` so the primary
+ has it. This VM ships one expression across the worker seam and formats what
+ comes back. It does not know what a TestCase is and must not: a second copy of
+ the suite in the UI VM would answer questions about the wrong image.
+
+ WHICH MAKES THE ANSWER A STRING. The seam carries pickled payloads, so what
+ crosses is `Name|run|failed|firstFailure` per line — flat, boring, and parsed
+ here by code that cannot see the classes that produced it.
+
+ AND THE REPLY IS ASYNCHRONOUS, which is not a detail: a suite takes as long as
+ it takes, and the window keeps drawing throughout. That is §2.2's whole point
+ and the reason the primary is a different VM. The view renders `running…` and
+ then re-renders when the reply lands, rather than freezing and lying about it."
+
+Object subclass: WinShell [
+    <classVars: TestRows TestRuns TestPending TestLastError>
+
+    WinShell class >> testsViewName ^ <Symbol> [ ^#tests ]
+    WinShell class >> testsPaneName ^ <Symbol> [ ^#testsPane ]
+
+    WinShell class >> testsPaneHwnd ^ <Integer> [
+        | c |
+        c := self controlNamed: self testsPaneName.
+        ^c isNil ifTrue: [ 0 ] ifFalse: [ c handle ]
+    ]
+
+    WinShell class >> buildTestsPane [
+        (self controlNamed: self testsPaneName) ifNotNil: [ :x | ^self ].
+        self
+            addControl: self testsPaneName
+            class: self className
+            text: ''
+            style: (((WinApi constant: 'WS_CHILD')
+                bitOr: (WinApi constant: 'WS_BORDER'))
+                bitOr: (WinApi constant: 'WS_CLIPSIBLINGS'))
+            exStyle: 0.
+        ^self
+    ]
+
+    WinShell class >> showTestsPane: aBool <Boolean> [
+        (self controlNamed: self testsPaneName) ifNotNil: [ :c | c show: aBool ].
+        ^self
+    ]
+
+    WinShell class >> layoutTestsPane: content <Array> [
+        (self controlNamed: self testsPaneName) ifNotNil: [ :c | c moveTo: content ].
+        ^self
+    ]
+
+    "── running ─────────────────────────────────────────────────────────"
+
+    WinShell class >> testRows ^ <OrderedCollection> [
+        ^TestRows isNil ifTrue: [ OrderedCollection new ] ifFalse: [ TestRows ] ]
+    WinShell class >> testRuns ^ <Integer> [
+        ^TestRuns isNil ifTrue: [ 0 ] ifFalse: [ TestRuns ] ]
+    WinShell class >> testsPending ^ <Boolean> [ ^TestPending == true ]
+    WinShell class >> testsLastError ^ <String> [
+        ^TestLastError isNil ifTrue: [ '' ] ifFalse: [ TestLastError ] ]
+
+    WinShell class >> runTests ^ <Boolean> [
+        "Ship it and return. DECLINED WHILE ONE IS IN FLIGHT — two overlapping
+         sweeps would interleave their replies and the second would overwrite
+         the first's rows with its own, which looks like tests that fixed
+         themselves."
+        self testsPending ifTrue: [ ^false ].
+        TestPending := true.
+        TestLastError := ''.
+        self renderTests.
+        Worker uiDoit: 'TestRunner runAllReporting' onReply: [ :result |
+            WinShell testReplyArrived: result ].
+        ^true
+    ]
+
+    WinShell class >> runTestsNamed: aName <String> ^ <Boolean> [
+        "One class again after a fix, which is the loop anyone actually works
+         in. Same reply format, so one parser serves both."
+        self testsPending ifTrue: [ ^false ].
+        TestPending := true.
+        TestLastError := ''.
+        self renderTests.
+        Worker uiDoit: 'TestRunner runNamed: ''' , aName , ''''
+            onReply: [ :result | WinShell testReplyArrived: result ].
+        ^true
+    ]
+
+    WinShell class >> testReplyArrived: aString <String> [
+        TestPending := false.
+        TestRuns := self testRuns + 1.
+        TestRows := self parseTestReport: (self unquotedReply: aString).
+        self testRows isEmpty ifTrue: [ TestLastError := aString ].
+        self activeView == self testsViewName ifTrue: [ self renderTests ].
+        ^self
+    ]
+
+    WinShell class >> unquotedReply: aString <String> ^ <String> [
+        "The seam answers a rendered String, so a String result arrives wearing
+         quotes and with its own doubled inside. Undone here rather than at the
+         far end, because the far end's job is to answer the report and the
+         quoting belongs to how it travelled, not to what it says.
+
+         PURE, so the unwrapping is checkable with no window and no primary."
+        | s out i |
+        s := aString.
+        (s size >= 2 and: [ (s at: 1) = $' and: [ (s at: s size) = $' ] ])
+            ifFalse: [ ^s ].
+        s := s copyFrom: 2 to: s size - 1.
+        out := WriteStream on: String new.
+        i := 1.
+        [ i <= s size ] whileTrue: [
+            (((s at: i) = $') and: [ i < s size and: [ (s at: i + 1) = $' ] ])
+                ifTrue: [ out nextPut: $'. i := i + 2 ]
+                ifFalse: [ out nextPut: (s at: i). i := i + 1 ] ].
+        ^out contents
+    ]
+
+    WinShell class >> parseTestReport: aString <String> ^ <OrderedCollection> [
+        "`Name|run|failed|firstFailure` per line into `{name. run. failed. msg}`.
+
+         THREE SPLITS, NOT FOUR — the message is the last field and keeps every
+         `|` it contains. A failure message that split its own row would be a
+         parse bug reported as a test result, which is the most confusing thing
+         a test view can do.
+
+         PURE over a String, so the whole of what this view shows is checkable
+         without a primary, a window or a single real test."
+        | out |
+        out := OrderedCollection new.
+        (self linesOf: aString) do: [ :line |
+            | fields |
+            line isEmpty ifFalse: [
+                fields := self splitReportLine: line.
+                fields notNil ifTrue: [ out add: fields ] ] ].
+        ^out
+    ]
+
+    WinShell class >> linesOf: aString <String> ^ <OrderedCollection> [
+        | out cur |
+        out := OrderedCollection new.
+        cur := WriteStream on: String new.
+        aString do: [ :ch |
+            (ch = Character nl or: [ ch asInteger = 13 ])
+                ifTrue: [ out add: cur contents. cur := WriteStream on: String new ]
+                ifFalse: [ cur nextPut: ch ] ].
+        cur contents isEmpty ifFalse: [ out add: cur contents ].
+        ^out
+    ]
+
+    WinShell class >> splitReportLine: line <String> ^ <Object> [
+        "nil for anything that is not a report line. The primary's own
+         `Transcript show:` output shares this channel in some configurations,
+         so a tolerant parser is not politeness — it is the difference between
+         a Tests view and a Tests view full of `  testOne`."
+        | bars name run failed |
+        bars := OrderedCollection new.
+        1 to: line size do: [ :i | (line at: i) = $| ifTrue: [ bars add: i ] ].
+        bars size < 3 ifTrue: [ ^nil ].
+        name := line copyFrom: 1 to: (bars at: 1) - 1.
+        run := line copyFrom: (bars at: 1) + 1 to: (bars at: 2) - 1.
+        failed := line copyFrom: (bars at: 2) + 1 to: (bars at: 3) - 1.
+        (self looksNumeric: run) ifFalse: [ ^nil ].
+        (self looksNumeric: failed) ifFalse: [ ^nil ].
+        ^Array
+            with: name
+            with: run asInteger
+            with: failed asInteger
+            with: (line copyFrom: (bars at: 3) + 1 to: line size)
+    ]
+
+    WinShell class >> looksNumeric: s <String> ^ <Boolean> [
+        s isEmpty ifTrue: [ ^false ].
+        s do: [ :ch | ch isDigit ifFalse: [ ^false ] ].
+        ^true
+    ]
+
+    "── the totals, which are what anyone reads first ────────────────────"
+
+    WinShell class >> testTotalRun ^ <Integer> [
+        | n | n := 0.
+        self testRows do: [ :r | n := n + (r at: 2) ].
+        ^n ]
+    WinShell class >> testTotalFailed ^ <Integer> [
+        | n | n := 0.
+        self testRows do: [ :r | n := n + (r at: 3) ].
+        ^n ]
+    WinShell class >> testFailingRows ^ <OrderedCollection> [
+        ^self testRows select: [ :r | (r at: 3) > 0 ] ]
+
+    "── what the pane shows ─────────────────────────────────────────────
+     Rows of `{text. colour}`, built PURELY so the whole display is checkable
+     headless — the render below only blits what this answers."
+
+    WinShell class >> testsDisplayRows ^ <OrderedCollection> [
+        | out |
+        out := OrderedCollection new.
+        self testsPending ifTrue: [
+            out add: (Array with: 'Running the suite in the primary...' with: 16r806000).
+            out add: (Array with: '' with: 16r000000).
+            out add: (Array with: 'The window stays live while it runs - that is what the' with: 16r606060).
+            out add: (Array with: 'second VM is for.' with: 16r606060).
+            ^out ].
+        self testRuns = 0 ifTrue: [ ^self testsEmptyState ].
+        self testRows isEmpty ifTrue: [
+            out add: (Array with: 'No test classes in the image.' with: 16r0000C0).
+            out add: (Array with: '' with: 16r000000).
+            out add: (Array with: 'TestRunner allTestClasses found nothing below TestCase.' with: 16r000000).
+            self testsLastError isEmpty ifFalse: [
+                out add: (Array with: 'reply was: ' , self testsLastError with: 16r606060) ].
+            ^out ].
+        out add: (Array with: (self testTotalFailed = 0
+            ifTrue: [ 'PASS  ' , (self count: self testTotalRun of: 'assertion')
+                , ', ' , (self count: self testRows size of: 'class') ]
+            ifFalse: [ 'FAIL  ' , self testTotalFailed printString , ' of '
+                , (self count: self testTotalRun of: 'assertion') , ', '
+                , self testFailingRows size printString , ' of '
+                , (self count: self testRows size of: 'class') ])
+            with: (self testTotalFailed = 0 ifTrue: [ 16r008000 ] ifFalse: [ 16r0000C0 ])).
+        out add: (Array with: '' with: 16r000000).
+        "FAILURES FIRST. A pass is a number; a failure is work, and putting it
+         below sixty green rows is how it gets scrolled past."
+        self testFailingRows do: [ :r |
+            out add: (Array with: (self padded: (r at: 1) to: 34) , ' '
+                , (r at: 3) printString , '/' , (r at: 2) printString , ' failed'
+                with: 16r0000C0).
+            (r at: 4) isEmpty ifFalse: [
+                out add: (Array with: '        ' , (r at: 4) with: 16r404040) ] ].
+        self testFailingRows isEmpty ifFalse: [
+            out add: (Array with: '' with: 16r000000) ].
+        self testRows do: [ :r |
+            (r at: 3) = 0 ifTrue: [
+                out add: (Array with: (self padded: (r at: 1) to: 34) , ' '
+                    , (r at: 2) printString , ' ok'
+                    with: 16r008000) ] ].
+        ^out
+    ]
+
+    WinShell class >> testsEmptyState ^ <OrderedCollection> [
+        "BEFORE THE FIRST RUN, and it has more to explain than most: where tests
+         live, why that is not this VM, and what a TestCase looks like. ASCII
+         only — a guest String is UTF-8 bytes and this grid takes codepoints."
+        | out |
+        out := OrderedCollection new.
+        #(
+            'No run yet. WinShell runTests runs every TestCase in the image.'
+            ''
+            'Tests run in the PRIMARY VM, where your objects live - not in the'
+            'VM drawing this window. That is why the suite can take its time'
+            'without the window stopping.'
+            ''
+            'A test class is any subclass of TestCase, found by its chain:'
+            ''
+            '    TestCase subclass: MyTests ['
+            '        runAll [ self runTest: #testAdds do: [ self testAdds ] ]'
+            '        testAdds [ self assert: 1 + 1 = 2 description: ''arithmetic'' ]'
+            '    ]'
+            ''
+            'File In from the Editor puts it in the primary; then run again.'
+        ) do: [ :line | out add: (Array with: line with: 16r000000) ].
+        ^out
+    ]
+
+    WinShell class >> count: n <Integer> of: noun <String> ^ <String> [
+        "`1 class`, not `1 classes`. A small thing, and the reason it is here
+         rather than inlined is that the verdict line is the one line of this
+         view everybody reads — a grammar wart in it is read every single run.
+
+         `class` -> `classes` needs the `es`, `assertion` -> `assertions` does
+         not, so the rule is by last letter rather than a bare `s`."
+        "The suffix goes in a TEMP rather than inline. `,` is binary and binds
+         tighter than a keyword message, so `a , b ifTrue: [...]` makes the
+         whole concatenation the receiver of `ifTrue:` — which failed as
+         `does not understand size`, a long way from the mistake."
+        | last suffix |
+        n = 1 ifTrue: [ ^'1 ' , noun ].
+        last := noun isEmpty ifTrue: [ $  ] ifFalse: [ noun at: noun size ].
+        suffix := (last = $s or: [ last = $x ]) ifTrue: [ 'es' ] ifFalse: [ 's' ].
+        ^n printString , ' ' , noun , suffix
+    ]
+
+    WinShell class >> padded: s <String> to: n <Integer> ^ <String> [
+        | out |
+        s size >= n ifTrue: [ ^s copyFrom: 1 to: n ].
+        out := WriteStream on: String new.
+        out nextPutAll: s.
+        s size + 1 to: n do: [ :i | out nextPut: $  ].
+        ^out contents
+    ]
+
+    WinShell class >> renderTests ^ <Boolean> [
+        "Blit `testsDisplayRows` onto the grid. This method decides NOTHING
+         about content — everything it draws was chosen by a pure method above,
+         which is why the view is testable without a window."
+        "`col` is a METHOD temp, not a block temp, and that is load-bearing
+         rather than tidy. Declared as `| col |` inside the outer block, the
+         inner `[ :chr | col < cols ]` read it as nil and failed with `does not
+         understand <` — a nested block does not see a temp declared in an
+         enclosing BLOCK here, only one declared in the enclosing METHOD.
+         `renderDebugger` gets this right by having always been written this
+         way; this file got it wrong by being written from scratch."
+        | hwnd cw ch c r cols rows base row col |
+        hwnd := self testsPaneHwnd.
+        hwnd = 0 ifTrue: [ ^false ].
+        (WinRender cellWidthFor: hwnd) = 0 ifTrue: [
+            (WinRender attach: hwnd points: 9 dpi: self editorMetricsDpi)
+                ifFalse: [ ^false ] ].
+        cw := WinRender cellWidthFor: hwnd.
+        ch := WinRender cellHeightFor: hwnd.
+        (cw = 0 or: [ ch = 0 ]) ifTrue: [ ^false ].
+        c := self controlNamed: self testsPaneName.
+        r := [ c screenRect ] on: Error do: [ :e | nil ].
+        r isNil ifTrue: [ ^false ].
+        cols := ((((r at: 3) - (r at: 1)) // cw) max: 1).
+        rows := ((((r at: 4) - (r at: 2)) // ch) max: 1).
+        base := WinRender gridFor: hwnd cols: cols rows: rows.
+        base = 0 ifTrue: [ ^false ].
+        WinRender clear: hwnd to: 16r000000 on: 16rFFFFFF.
+        row := 0.
+        self testsDisplayRows do: [ :pair |
+            row < rows ifTrue: [
+                col := 0.
+                (pair at: 1) do: [ :chr |
+                    col < cols ifTrue: [
+                        WinRender at: base col: col row: row cols: cols
+                            put: (chr asInteger < 32 ifTrue: [ 32 ] ifFalse: [ chr asInteger ])
+                            fg: (pair at: 2)
+                            bg: 16rFFFFFF ].
+                    col := col + 1 ].
+                row := row + 1 ] ].
+        WinRender caretFor: hwnd col: 0 row: 0 visible: false.
+        ^WinRender present: hwnd
+    ]
+]

@@ -64,7 +64,82 @@ TestCase subclass: WinUiEditorWg6cTests [
         self runTest: #testAnEmptyDebuggerSaysHowToFillIt
              do: [ self testAnEmptyDebuggerSaysHowToFillIt ].
         self runTest: #testAnEmptyMonitorSaysItIsEarlyNotBroken
-             do: [ self testAnEmptyMonitorSaysItIsEarlyNotBroken ]
+             do: [ self testAnEmptyMonitorSaysItIsEarlyNotBroken ].
+        self runTest: #testTestReportParsesWhatTheRunnerAnswers
+             do: [ self testTestReportParsesWhatTheRunnerAnswers ].
+        self runTest: #testTestReportKeepsPipesInsideAMessage
+             do: [ self testTestReportKeepsPipesInsideAMessage ].
+        self runTest: #testAReplyIsUnquotedBeforeItIsParsed
+             do: [ self testAReplyIsUnquotedBeforeItIsParsed ].
+        self runTest: #testTheVerdictLineCountsAndAgrees
+             do: [ self testTheVerdictLineCountsAndAgrees ]
+    ]
+
+    "── WG9: the Tests view, checked without a primary ───────────────────
+     Everything the pane draws is computed by pure methods over a parsed report,
+     which is what makes the whole view checkable here: no window, no worker
+     seam, and not a single real test class."
+
+    testTestReportParsesWhatTheRunnerAnswers [
+        "`Name|run|failed|firstFailure` per line, which is what
+         `TestRunner reportFor:` writes. Both halves of a seam that carries no
+         types, so the format is pinned on this side too."
+        | rows |
+        rows := WinShell parseTestReport: 'AlphaTests|12|0|
+BetaTests|3|1|testWrong: one is not two
+'.
+        self assert: rows size equals: 2.
+        self assert: ((rows at: 1) at: 1) equals: 'AlphaTests'.
+        self assert: ((rows at: 1) at: 2) equals: 12.
+        self assert: ((rows at: 1) at: 3) equals: 0.
+        self assert: ((rows at: 2) at: 4) equals: 'testWrong: one is not two'.
+        "LINES THAT ARE NOT REPORT LINES ARE DROPPED. `runTest:do:` prints each
+         test's name to the Transcript, and in some configurations that shares
+         this channel — a parser that took every line would fill the view with
+         `  testOne` and call each one a test class."
+        self assert: (WinShell parseTestReport: '  testOne
+AlphaTests|1|0|
+not a report line at all
+') size equals: 1
+    ]
+
+    testTestReportKeepsPipesInsideAMessage [
+        "THREE SPLITS, NOT FOUR. The message is the last field and keeps every
+         `|` in it. A failure message that split its own row would be a parse
+         bug reported as a test result, which is the most confusing thing a test
+         view can do — you would go looking at the test."
+        | rows |
+        rows := WinShell parseTestReport: 'PipeTests|1|1|expected a|b got c|d
+'.
+        self assert: rows size equals: 1.
+        self assert: ((rows at: 1) at: 4) equals: 'expected a|b got c|d'
+    ]
+
+    testAReplyIsUnquotedBeforeItIsParsed [
+        "The worker seam answers a RENDERED String, so a String result arrives
+         wearing quotes with its own doubled inside. Undoing that is the
+         difference between two parsed rows and none — the failure mode is a
+         Tests view that always says `no test classes in the image` while the
+         runner is working perfectly."
+        self assert: (WinShell unquotedReply: '''A|1|0|''') equals: 'A|1|0|'.
+        self assert: (WinShell unquotedReply: '''it''''s''') equals: 'it''s'.
+        "Not quoted? Then untouched — the seam is allowed to change its mind
+         about rendering without this becoming a truncation bug."
+        self assert: (WinShell unquotedReply: 'A|1|0|') equals: 'A|1|0|'.
+        self assert: (WinShell unquotedReply: '') equals: ''
+    ]
+
+    testTheVerdictLineCountsAndAgrees [
+        "The one line everybody reads. It must agree with the rows beneath it —
+         a verdict computed from anything other than the same rows the pane
+         draws could say PASS above a red row.
+
+         And it must count in English: `1 class`, not `1 classes`. Small, and
+         read on every single run."
+        self assert: (WinShell count: 1 of: 'class') equals: '1 class'.
+        self assert: (WinShell count: 2 of: 'class') equals: '2 classes'.
+        self assert: (WinShell count: 0 of: 'assertion') equals: '0 assertions'.
+        self assert: (WinShell count: 1 of: 'assertion') equals: '1 assertion'
     ]
 
     testAnEmptyDebuggerSaysHowToFillIt [

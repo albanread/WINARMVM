@@ -1,7 +1,10 @@
 # SUnit-lite + in-language test suite load order (sprint_s06_detail.md
 # 'SUnit-lite'). Appended after world/world.list by tests/it_world.rs only
 # — macvm run/repl never load this directory.
-00_sunit.mst
+# 00_sunit.mst MOVED to world/85_sunit.mst (WG9). It is part of the world
+# now rather than part of the harness; world.list loads it for everyone, and
+# a second copy here would shadow it with an identical class and hide any
+# drift between them.
 01_object_tests.mst
 02_boolean_tests.mst
 03_integer_tests.mst
@@ -185,5 +188,10 @@ tier1.mst
 # WG8/SM0: the pixel plane. 67 checks its PURE part — the BGRA packing, which
 # is one byte order along from COLORREF and easy to get backwards.
 ../116_winui_pixels.mst
+
+# WG9: the Tests view. Its display is built by PURE methods over a parsed
+# report, so what the pane would show is checkable here with no window, no
+# primary and no real test.
+../118_winui_tests.mst
 67_winui_editor_tests.mst
 99_run_all.mst

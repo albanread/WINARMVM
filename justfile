@@ -1971,3 +1971,98 @@ gate-cookbook:
     for i in $(seq 1 60); do [ -f /tmp/cook_exit ] && break || sleep 0.5; done
     test "$(cat /tmp/cook_exit)" = "0"
     echo "gate-cookbook: PASS"
+
+# docs/SPRINTS.md WG9 (upstream `6536294`) — SUnit and the Tests tab.
+#
+# THE LOOP, END TO END, and it is the only way to gate a view whose whole job is
+# to report on OTHER code: start with an image that has no test classes, put two
+# in it through the path a user actually has (File In, which restarts the
+# primary from clean boot with the file on top), run them, and check the view
+# agrees with what they did.
+#
+# ONE PASSES AND ONE FAILS. A suite that can only report success is
+# indistinguishable from a suite that always reports success, and this gate
+# would pass against both if the fixture were all green.
+#
+# THE EMPTY IMAGE IS GATED FIRST, deliberately. `world.list` has TestCase in it
+# now but no subclasses, so a fresh primary genuinely has nothing to run — and
+# "no test classes in the image" must be distinguishable from "the runner is
+# broken", because they are the same blank pane otherwise.
+#
+# FOUR PARTS WITH BASH SLEEPS BETWEEN, for the reason winui-wg5b.tcl recorded:
+# `gui sleep` blocks the APP, and what is being waited on IS the app — a primary
+# restart, then a worker reply. Sleeping inside it would starve the work.
+gate-wg9:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    taskkill //F //IM macvm-winui.exe > /dev/null 2>&1 || true
+    cargo build --quiet -p win_gui -p winui_host -p winui_render
+    rm -f /tmp/wg9_exit /tmp/wg9_app.txt /tmp/wg9_gate.txt \
+        target/winui-wg9.png target/winui-wg9-empty.png target/winui-wg9-one.png
+    # The fixture goes to the file-in path both sides derive independently —
+    # Python's gettempdir and the host's std::env::temp_dir both read TMP/TEMP.
+    python scripts/wg9-fixture.py
+    ( MACVM_WINUI_CTL=7720 ./target/debug/macvm-winui.exe > /tmp/wg9_app.txt 2>&1; \
+        echo $? > /tmp/wg9_exit ) &
+    for i in $(seq 1 90); do
+        (exec 3<>/dev/tcp/127.0.0.1/7720) 2>/dev/null && break || sleep 0.5
+    done
+    sleep 4
+    ./target/debug/macvm rusttcl scripts/winui-wg9-a.tcl | tee    /tmp/wg9_gate.txt
+    sleep 12
+    ./target/debug/macvm rusttcl scripts/winui-wg9-b.tcl | tee -a /tmp/wg9_gate.txt
+    sleep 12
+    ./target/debug/macvm rusttcl scripts/winui-wg9-c.tcl | tee -a /tmp/wg9_gate.txt
+    sleep 8
+    ./target/debug/macvm rusttcl scripts/winui-wg9-d.tcl | tee -a /tmp/wg9_gate.txt
+    cat /tmp/wg9_app.txt
+
+    # 1. The view exists and RUNS ITSELF on first open. A Tests tab that showed
+    #    nothing until you found the verb would be a tab that mostly shows
+    #    nothing.
+    grep -q 'WG9 open true'     /tmp/wg9_gate.txt
+    grep -q 'WG9 switched true' /tmp/wg9_gate.txt
+    grep -q 'WG9 built true'    /tmp/wg9_gate.txt
+    grep -q 'WG9 runs-after-open 1' /tmp/wg9_gate.txt
+
+    # 2. An image with no test classes SAYS SO, in words, rather than showing
+    #    the same blank pane a broken runner would.
+    grep -q 'WG9 rows-empty-image 0' /tmp/wg9_gate.txt
+    grep -q "WG9 empty-first-line 'No test classes in the image.'" /tmp/wg9_gate.txt
+
+    # 3. File In put them in the PRIMARY, and the run found them. Asserted on
+    #    the numbers rather than the picture: 1 + 2 assertions across two
+    #    classes, exactly one of them wrong.
+    grep -q 'WG9 requested true' /tmp/wg9_gate.txt
+    grep -q 'WG9 run-again true' /tmp/wg9_gate.txt
+    grep -q 'WG9 pending false'  /tmp/wg9_gate.txt
+    grep -q "WG9 error ''"       /tmp/wg9_gate.txt
+    ROWS=$(grep -E '^WG9 rows '           /tmp/wg9_gate.txt | awk '{print $NF}')
+    ASSERTS=$(grep -E '^WG9 assertions '  /tmp/wg9_gate.txt | awk '{print $NF}')
+    FAILED=$(grep -E '^WG9 failed '       /tmp/wg9_gate.txt | awk '{print $NF}')
+    echo "tests: $ROWS classes, $ASSERTS assertions, $FAILED failed"
+    test "$ROWS" -eq 2
+    test "$ASSERTS" -eq 3
+    test "$FAILED" -eq 1
+    grep -q 'WG9 failing-classes 1' /tmp/wg9_gate.txt
+
+    # 4. And the FAILURE reached the screen with its message intact. A test view
+    #    that reports a count and loses the reason sends you to read the test.
+    grep -q "WG9 first-failure 'testWrong: one is not two'" /tmp/wg9_gate.txt
+    grep -q "WG9 verdict 'FAIL  1 of 3 assertions, 1 of 2 classes'" /tmp/wg9_gate.txt
+
+    # 5. One class on its own REPLACES the report rather than appending to it.
+    #    A single-class re-run that appended would leave the old failing row in
+    #    place and show a fixed class beside a stale red one — which is exactly
+    #    the moment you would trust it least and need it most.
+    grep -q 'WG9 rerun-one true'          /tmp/wg9_gate.txt
+    grep -q 'WG9 one-rows 1'              /tmp/wg9_gate.txt
+    grep -q "WG9 one-name 'WgNineOkTests'" /tmp/wg9_gate.txt
+    grep -q 'WG9 one-failed 0'            /tmp/wg9_gate.txt
+    grep -q "WG9 one-verdict 'PASS  1 assertion, 1 class'" /tmp/wg9_gate.txt
+
+    test -s target/winui-wg9-empty.png
+    test -s target/winui-wg9-one.png
+    for i in $(seq 1 60); do [ -f /tmp/wg9_exit ] && break || sleep 0.5; done
+    test "$(cat /tmp/wg9_exit)" = "0"
+    echo "gate-wg9: PASS"

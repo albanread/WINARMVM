@@ -140,3 +140,8 @@
 # is executed against a live window by `just gate-cookbook`; this is what
 # makes the result checkable rather than merely printed.
 117_winui_examples.mst
+
+# WINARM (WG9, upstream 6536294 S4): the Tests view. Runs the suite in the
+# PRIMARY through the worker seam and renders the result on a cell grid.
+# `world/86_sunit_runner.mst` is the far half and loads from world.list.
+118_winui_tests.mst

@@ -509,6 +509,45 @@ keeping, because each was a defect the change surfaced:
 
 WG8 is complete.
 
+### WG9 — SUnit and the Tests tab (2026-08-12)
+
+**SUnit moved into the world.** It was `world/tests/00_sunit.mst`, loaded only by
+`tests/it_world.rs`, which made it part of the *harness* rather than part of the
+language. That was fine while the only tests were ours and the only runner was
+cargo. It stopped being fine the moment the shell grew a Browser that compiles
+into a running image: a `TestCase` someone writes there has to be a real class in
+the primary. It is `world/85_sunit.mst` now and loads from `world.list` for
+everyone — `macvm run`, the repl, the web GUI, the Windows shell and the harness
+alike. `tests.list` no longer carries a copy; two identical definitions would
+shadow each other and hide any drift.
+
+**`world/86_sunit_runner.mst`** adds the two things SUnit deliberately lacked:
+discovery (`allTestClasses`, by the superclass *chain* so an intermediate
+`MyProjectTestCase` still works) and a runner that **answers instead of
+printing** — `TestRunner report` calls `Smalltalk quit:`, which is right for a
+cargo run and fatal for a GUI.
+
+**The Tests view runs in the primary.** Test classes live where the user's
+objects live, so the view ships one expression across the worker seam and formats
+what comes back — it does not know what a `TestCase` is and must not. The reply
+is asynchronous, so the window keeps drawing throughout; the pane says
+`Running the suite in the primary…` and re-renders when the reply lands.
+
+`gate-wg9` gates the whole loop: an image with no test classes says so in words,
+then File In puts two in it — **one passing and one failing**, because a suite
+that can only report success is indistinguishable from one that always reports
+it — and the view is checked against what they actually did.
+
+Three notes from building it, each a defect the gate or an existing test caught:
+
+- A nested block does **not** see a temp declared in an enclosing *block* here,
+  only one declared in the enclosing *method*. `| col |` inside the outer block
+  read as nil and failed with `does not understand <`.
+- `,` is binary and binds tighter than a keyword message, so
+  `a , b ifTrue: […]` makes the whole concatenation the receiver.
+- The glyph table's own uniqueness test caught `#tests` colliding with
+  `#transcript` before it ever reached a screen.
+
 ---
 
 ## Standing rules

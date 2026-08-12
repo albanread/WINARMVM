@@ -377,9 +377,11 @@ fn deliberately_failing_assertion_fails_the_run() {
     let mut vm = common::test_vm();
     let buf = OutputBuffer::new();
     vm.out = Box::new(buf.clone());
+    // WG9: SUnit moved into the world (`world/85_sunit.mst`) and is loaded by
+    // `load_world` above. The explicit `00_sunit.mst` load that used to sit
+    // here is gone with it — a second copy would shadow the first with an
+    // identical class and hide any drift between them.
     world::load_world(&mut vm, &world_dir()).expect("load_world");
-    let dir = world_dir().join("tests");
-    world::load_file(&mut vm, &dir.join("00_sunit.mst")).expect("load 00_sunit.mst");
 
     let src = "TestCase subclass: DeliberatelyFailingTests [\n\
         runAll [ self runTest: #testBoom do: [ self testBoom ] ]\n\
