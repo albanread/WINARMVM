@@ -679,6 +679,45 @@ cannot ship.
 > **argc ≤ 5**. Anything timed from a workspace or inside a block measures the
 > interpreter — so a benchmark must call an installed method and time the *call*.
 
+### WG11 status, and the defect that must be fixed FIRST (2026-08-12)
+
+**Life and FreeCell play, unedited.** `45a_life.mst` simulates (GEN 376 -> 480
+in ten seconds, ~10.4 gen/s against the 15/s it asks for) with its 5x7 HUD;
+`45c_freecell.mst` deals 617 with real ranks, suits, free cells and
+foundations. Both are `git show upstream/main:` byte-for-byte. W0-W5 done.
+
+**BLOCKING DEFECT — the primitive numbers have COLLIDED.** WINARM
+independently allocated ids 266-276 for its own Windows primitives
+(`platformName` 266, `wallClockMilliseconds` 267, the WinProbe winkb block
+268-271, `primWndProcAddress` 272 ...). Upstream uses those SAME ids for
+GamePane shared memory (`overscan:` 266, `scrollTo:` 267, `openDirect:` 268,
+`screenMemory` 269, `screenStride` 270, `textMemory` 271, `textCols`/`textRows`
+272/273, Alien `replaceFrom:` 274, `paletteMemory`/`paletteGlobalBase`
+275/276).
+
+This is not a detail — **it breaks the portability contract at its
+foundation.** The same Smalltalk cannot run on both machines while a primitive
+number means two different things. Minesweeper is the proof: its 0-argument
+`textMemory` (271) reaches WINARM'''s 1-argument `primWinkbStructSize:`, reads
+`args[1]` off the end of a 1-element slice, and PANICS the primary —
+`index out of bounds: the len is 1 but the index is 1`, and the user'''s image
+is gone.
+
+The fix is to renumber WINARM'''s Windows-specific primitives OUT of upstream'''s
+range (upstream is the source of truth and cannot move), touching the
+`PRIMITIVES` table, the id->name registry, and every `<primitive: N>` in
+`world/`. Nothing in W7-W9 should be built until that is done, or it will be
+built on top of a collision.
+
+**Partly hardened, NOT closed.** A guest must never be able to panic the VM by
+declaring a primitive with the wrong arity, whatever the number means. Arity
+guards now sit in both primitive call paths — `interpreter/send.rs`'''s
+`try_primitive` and `codecache/stubs.rs`'''s `rt_call_primitive` — failing the
+primitive (so the method'''s own `^nil` body runs) instead of indexing past the
+end. Both suites stay green. **But Minesweeper still panics**, so there is a
+THIRD path into `prim_by_id` that is not yet guarded; find it before renumbering
+so the guard can be tested by the same reproducer.
+
 **WG11 — GamePane parity (settled 2026-08-12).** Not just `shader:` — the
 whole of upstream's guest-facing games surface, implemented on the D3D11 pipe,
 under two principles the author set:

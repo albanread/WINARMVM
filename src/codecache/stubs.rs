@@ -2338,6 +2338,16 @@ pub unsafe extern "C" fn rt_call_primitive(
     let fp = vm.reg_block.last_compiled_fp;
     let rootspill_base = fp - crate::oops::layout::ROOTSPILL_BYTES as u64;
     let n = argc_plus_recv as usize;
+    // ARITY GUARD, the compiled twin of `try_primitive`'s. A method may declare
+    // any primitive number with any argument count; the primitive indexes the
+    // slice by its OWN arity, so a mismatch reads past the end and PANICS the
+    // VM from guest code. Upstream's Minesweeper does exactly that here — its
+    // 0-argument `textMemory` is primitive 271, which WINARM had allocated to a
+    // 1-argument `primWinkbStructSize:`. Fail instead, so the method's own
+    // Smalltalk body (`^nil`) runs.
+    if desc.argc as usize + 1 != n {
+        return crate::oops::layout::PRIM_FAIL_SENTINEL;
+    }
     debug_assert!(
         n <= crate::oops::layout::ROOTSPILL_SLOTS,
         "rt_call_primitive: {n} args exceeds ROOTSPILL_SLOTS -- driver.rs's own argc<=5 \

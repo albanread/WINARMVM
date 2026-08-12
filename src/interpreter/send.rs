@@ -97,6 +97,25 @@ pub(crate) fn try_primitive(vm: &mut VmState, m: MethodOop, argc: u8) -> Primiti
     let desc = crate::runtime::primitives::prim_by_id(prim_id as u16)
         .unwrap_or_else(|| panic!("try_primitive: unknown primitive id {prim_id}"));
     let argc_usize = argc as usize;
+    // ARITY GUARD. The slice below is sized from the METHOD's declared argc,
+    // but the primitive indexes it by its OWN — so a method that declares
+    // `<primitive: N>` with the wrong number of arguments makes the primitive
+    // read past the end. That is a guest-triggerable PANIC in the VM, which no
+    // guest may ever cause, whatever it declares.
+    //
+    // Found by running upstream's Minesweeper: its `textMemory` is primitive
+    // 271 with no arguments, WINARM had independently allocated 271 to a
+    // one-argument `primWinkbStructSize:`, and the mismatched call took the
+    // whole primary down with `index out of bounds: the len is 1 but the
+    // index is 1`. (The id collision is its own defect — see docs/SPRINTS.md —
+    // but a collision must FAIL, not crash.)
+    //
+    // Failing is exactly right rather than merely safe: `Fallthrough` runs the
+    // method's Smalltalk body, which for every such wrapper is the `^nil`/
+    // `^self` that already means "this primitive did not happen".
+    if desc.argc as usize != argc_usize {
+        return PrimitiveOutcome::Fallthrough;
+    }
     let sp = vm.stack.sp;
     let base = sp - argc_usize - 1;
     // Holds receiver + up to `MAX_PRIMITIVE_ARGS` arguments. A method that

@@ -441,7 +441,17 @@ fn primary_thread_main(
             // the next step cannot even be asked for until this one's `present`
             // has been emitted.
             next_frame = std::time::Instant::now() + crate::game::frame_period();
-            let _ = primary.exec(&crate::game::step_doit());
+            // A STEP THAT FAILS STOPS THE GAME. Found by running Minesweeper
+            // before its primitives exist: `textClearPlane` reaches a nil
+            // `textMemory`, the step raises, and with a 4 ms beat the host
+            // retried it two hundred and fifty times a second — the primary
+            // starved, its metrics went stale, and the window showed nothing.
+            // A broken game must cost the user their GAME, not their shell.
+            if let Err(e) = primary.exec(&crate::game::step_doit()) {
+                eprintln!("macvm-winui: game step failed, stopping: {e:?}");
+                crate::game::stop();
+                let _ = primary.exec("GamePane reset");
+            }
         }
         // A RUNNING GAME GETS A FAST BEAT. Parking for BEAT_MS between frames
         // would cap the rate at the beat regardless of how quick a frame is;
