@@ -107,7 +107,7 @@ Object subclass: WinShell [
         menu value: 'Demos' value: (OrderedCollection new
             add: (Array with: 2021 with: 'Life' with: #menuLife with: true);
             add: (Array with: 2022 with: 'FreeCell' with: #menuFreeCell with: true);
-            add: (Array with: 2023 with: 'Minesweeper (sheared until WG11-W9)'
+            add: (Array with: 2023 with: 'Minesweeper'
                         with: #menuMinesweeper with: true);
             add: (Array with: 0 with: '-' with: nil with: true);
             "W7 landed: these write pixels STRAIGHT into shared screen memory
@@ -117,8 +117,7 @@ Object subclass: WinShell [
             "W8 landed: the text plane, so these run too."
             add: (Array with: 2026 with: 'Plasma' with: #menuPlasma with: true);
             add: (Array with: 2027 with: 'Text Pages' with: #menuTextPages with: true);
-            add: (Array with: 2028 with: 'Copper - needs the palette memory (WG11-W9)'
-                        with: nil with: false);
+            add: (Array with: 2028 with: 'Copper' with: #menuCopper with: true);
             add: (Array with: 0 with: '-' with: nil with: true);
             add: (Array with: 2029 with: 'Stop Demo' with: #menuStopDemo with: true);
             yourself).
@@ -240,6 +239,7 @@ Object subclass: WinShell [
     WinShell class >> menuJulia     [ ^self launchDemo: 'GamePane reset. Julia launch. 1' named: 'Julia' ]
     WinShell class >> menuAttractor [ ^self launchDemo: 'GamePane reset. Attractor launch. 1' named: 'Attractor' ]
     WinShell class >> menuPlasma    [ ^self launchDemo: 'GamePane reset. Plasma launch. 1' named: 'Plasma' ]
+    WinShell class >> menuCopper    [ ^self launchDemo: 'GamePane reset. Copper launch. 1' named: 'Copper' ]
     WinShell class >> menuTextPages [ ^self launchDemo: 'GamePane reset. TextPages launch. 1' named: 'Text Pages' ]
 
     WinShell class >> menuStopDemo [

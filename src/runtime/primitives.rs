@@ -1484,6 +1484,22 @@ pub static PRIMITIVES: &[PrimDesc] = &[
     // WINARM's own Windows primitives were moved to 300+ to make room (they
     // had collided here, and Minesweeper crashed the VM proving it).
     PrimDesc {
+        id: 266,
+        name: "GamePane>>overscan:",
+        f: prim_game_overscan,
+        argc: 1,
+        can_allocate: false,
+        can_fail: true,
+    },
+    PrimDesc {
+        id: 267,
+        name: "GamePane>>scrollTo:y:",
+        f: prim_game_scroll,
+        argc: 2,
+        can_allocate: false,
+        can_fail: true,
+    },
+    PrimDesc {
         id: 268,
         name: "GamePane>>openDirect:height:",
         f: prim_game_open_direct,
@@ -1536,6 +1552,22 @@ pub static PRIMITIVES: &[PrimDesc] = &[
         name: "Alien>>replaceFrom:to:with:startingAt:",
         f: crate::runtime::alien::prim_alien_replace_from_to_with,
         argc: 4,
+        can_allocate: false,
+        can_fail: true,
+    },
+    PrimDesc {
+        id: 275,
+        name: "GamePane>>paletteMemory",
+        f: prim_game_palette_memory,
+        argc: 0,
+        can_allocate: true,
+        can_fail: true,
+    },
+    PrimDesc {
+        id: 276,
+        name: "GamePane>>paletteGlobalBase",
+        f: prim_game_palette_global_base,
+        argc: 0,
         can_allocate: false,
         can_fail: true,
     },
@@ -1753,6 +1785,55 @@ fn prim_game_present(vm: &mut VmState, args: &[Oop]) -> PrimResult {
     crate::embed::advance_screen_frame();
     game_emit(vm, GameCommand::Present);
     PrimResult::Ok(args[0])
+}
+
+/// `overscan:` (266): grow the world buffer beyond the viewport, so a game can
+/// scroll a picture larger than the screen.
+fn prim_game_overscan(vm: &mut VmState, args: &[Oop]) -> PrimResult {
+    let Some(m) = smi_i64(args[1]) else {
+        return PrimResult::Fail;
+    };
+    if !(0..=256).contains(&m) {
+        return PrimResult::Fail;
+    }
+    game_emit(vm, GameCommand::SetOverscan { margin: m as u32 });
+    PrimResult::Ok(args[0])
+}
+
+/// `scrollTo:y:` (267): pan the viewport within the world. No redraw — the
+/// picture is already there; only which part of it is on screen changes.
+fn prim_game_scroll(vm: &mut VmState, args: &[Oop]) -> PrimResult {
+    let (Some(x), Some(y)) = (smi_i64(args[1]), smi_i64(args[2])) else {
+        return PrimResult::Fail;
+    };
+    game_emit(vm, GameCommand::Scroll { x, y });
+    PrimResult::Ok(args[0])
+}
+
+/// `paletteMemory` (275): the palette as an indirect `Alien` of RGBA quads —
+/// `viewport_h * 16` per-scanline entries then 240 globals. SM4.
+fn prim_game_palette_memory(vm: &mut VmState, _args: &[Oop]) -> PrimResult {
+    let Some((ptr, entries, _)) = crate::embed::palette_memory() else {
+        return PrimResult::Fail;
+    };
+    let bytes = entries.saturating_mul(4);
+    if bytes == 0 {
+        return PrimResult::Fail;
+    }
+    PrimResult::Ok(crate::runtime::alien::make_indirect_alien(
+        vm, ptr as u64, bytes,
+    ))
+}
+
+/// `paletteGlobalBase` (276): the entry index where the globals start, which is
+/// `viewport_h * 16`. ASKED FOR, never assumed — it is a function of the pane's
+/// HEIGHT, so a guest that hard-coded it would write globals into scanline 16's
+/// per-line colours.
+fn prim_game_palette_global_base(_vm: &mut VmState, _args: &[Oop]) -> PrimResult {
+    let Some((_, _, base)) = crate::embed::palette_memory() else {
+        return PrimResult::Fail;
+    };
+    PrimResult::Ok(SmallInt::new(base as i64).oop())
 }
 
 /// `openDirect:height:` (268): build the direct framebuffer — the rotating set
@@ -5782,6 +5863,8 @@ mod tests {
             (263, "Sound class>>playEffect:"),
             (264, "Worker class>>primEvalDoitQuiet:"),
             (265, "instVarAt:put:"),
+            (266, "GamePane>>overscan:"),
+            (267, "GamePane>>scrollTo:y:"),
             (268, "GamePane>>openDirect:height:"),
             (269, "GamePane>>screenMemory"),
             (270, "GamePane>>screenStride"),
@@ -5789,6 +5872,8 @@ mod tests {
             (272, "GamePane>>textCols"),
             (273, "GamePane>>textRows"),
             (274, "Alien>>replaceFrom:to:with:startingAt:"),
+            (275, "GamePane>>paletteMemory"),
+            (276, "GamePane>>paletteGlobalBase"),
             (300, "platformName"),
             (301, "wallClockMilliseconds"),
             // WINARM (WG0): winkb's data half (constants + struct offsets),

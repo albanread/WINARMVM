@@ -418,6 +418,14 @@ pub enum GameCommand {
     // engine call the GUI game host already links (`macgamepane-graphics`),
     // exactly like the commands above; a GUI that has not yet grown the arm
     // ignores it harmlessly. ──
+    /// **WG11-W9.** Grow the world buffer beyond the viewport by `margin`
+    /// pixels on every side, so a game can scroll a picture larger than the
+    /// screen (`GamePane>>overscan:`).
+    SetOverscan { margin: u32 },
+    /// **WG11-W9.** Pan the viewport within that world (`GamePane>>scrollTo:y:`).
+    /// The COPPER does not move with it: the per-scanline palette keys off the
+    /// screen row, so raster bars stay locked to the display.
+    Scroll { x: i64, y: i64 },
     /// **WG11-W7 (SM0).** Build the direct framebuffer — the rotating set of
     /// index buffers a demo writes pixels straight into, published for
     /// `screenMemory`. `GamePane>>openDirect:height:`.
@@ -651,6 +659,46 @@ pub(crate) fn text_memory() -> Option<(*mut u8, usize, usize)> {
         p as *mut u8,
         TEXT_COLS.load(Ordering::Relaxed),
         TEXT_ROWS.load(Ordering::Relaxed),
+    ))
+}
+
+
+// ── WG11-W9: the palette as memory (upstream SM4) ───────────────────────────
+//
+// The last plane, and the one that makes the other two cheap: `entries` RGBA
+// quads the guest STORES into, laid out as `viewport_h` groups of sixteen
+// per-scanline colours followed by 240 globals. Re-colouring the whole screen
+// costs the PALETTE's size, not the SCREEN's — which is the entire trick behind
+// `45f_copper.mst`, where the picture is drawn once and never redrawn and only
+// what colour index 1 MEANS on each of 240 scanlines changes.
+static PALETTE_PTR: AtomicUsize = AtomicUsize::new(0);
+static PALETTE_ENTRIES: AtomicUsize = AtomicUsize::new(0);
+static PALETTE_GLOBAL_BASE: AtomicUsize = AtomicUsize::new(0);
+
+/// Publish the palette buffer. The host also tells its pane that the guest now
+/// owns it, so the pane stops uploading a CPU copy over the guest's writes.
+pub fn publish_palette_memory(ptr: *mut u8, entries: usize, global_base: usize) {
+    PALETTE_ENTRIES.store(entries, Ordering::Relaxed);
+    PALETTE_GLOBAL_BASE.store(global_base, Ordering::Relaxed);
+    PALETTE_PTR.store(ptr as usize, Ordering::Release);
+}
+
+pub fn clear_palette_memory() {
+    PALETTE_PTR.store(0, Ordering::Release);
+    PALETTE_ENTRIES.store(0, Ordering::Relaxed);
+    PALETTE_GLOBAL_BASE.store(0, Ordering::Relaxed);
+}
+
+/// `(ptr, entries, global_base)`, or `None` when no pane is open.
+pub(crate) fn palette_memory() -> Option<(*mut u8, usize, usize)> {
+    let p = PALETTE_PTR.load(Ordering::Acquire);
+    if p == 0 {
+        return None;
+    }
+    Some((
+        p as *mut u8,
+        PALETTE_ENTRIES.load(Ordering::Relaxed),
+        PALETTE_GLOBAL_BASE.load(Ordering::Relaxed),
     ))
 }
 

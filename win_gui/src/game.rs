@@ -35,7 +35,7 @@
 //! arrives with the shader rewrite; until then a copper index renders as a flat
 //! colour rather than wrongly, and no game in the target set asks for one.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use macvm::embed::{GameCommand, GameSink};
@@ -329,6 +329,61 @@ fn draw_text_plane(dst: &mut [u32], w: u32, h: u32, palette: &[u32]) {
     }
 }
 
+/// **WG11-W9: the palette as memory (SM4).**
+///
+/// `h * 16 + 240` RGBA quads the guest stores into — `h` groups of sixteen
+/// PER-SCANLINE colours, then 240 globals. Re-colouring the whole screen costs
+/// the palette's size rather than the screen's, which is the whole trick behind
+/// Copper: the picture is drawn once, never redrawn, and only what colour
+/// index 1 MEANS on each scanline changes.
+///
+/// RGBA HERE, BGRA THERE. The guest writes RGBA bytes (upstream's layout, and
+/// what its demos assume); the renderer's palette texture is BGRA words. The
+/// swizzle happens once per frame on upload, in `copper_palette`, rather than
+/// asking either side to speak the other's byte order.
+struct PalettePlane {
+    entries: usize,
+    global_base: usize,
+    bytes: &'static mut [u8],
+}
+
+static PAL: Mutex<Option<PalettePlane>> = Mutex::new(None);
+
+fn open_palette(h: u32) {
+    let global_base = h as usize * 16;
+    let entries = global_base + 240;
+    let mut guard = match PAL.lock() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+    if let Some(pp) = guard.as_ref() {
+        if pp.entries == entries {
+            return;
+        }
+    }
+    let bytes: &'static mut [u8] = Box::leak(vec![0u8; entries * 4].into_boxed_slice());
+    macvm::embed::publish_palette_memory(bytes.as_mut_ptr(), entries, global_base);
+    *guard = Some(PalettePlane { entries, global_base, bytes });
+}
+
+/// The copper table as the renderer wants it: BGRA words, in the same slot
+/// order `PixelPlane::palette_slot` computes. `None` until a guest writes one.
+fn copper_palette() -> Option<Vec<u32>> {
+    let guard = PAL.lock().ok()?;
+    let pp = guard.as_ref()?;
+    if pp.bytes.iter().all(|&b| b == 0) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(pp.entries);
+    for e in 0..pp.entries {
+        let o = e * 4;
+        let (r, g, b) = (pp.bytes[o], pp.bytes[o + 1], pp.bytes[o + 2]);
+        out.push(0xFF00_0000 | ((r as u32) << 16) | ((g as u32) << 8) | b as u32);
+    }
+    let _ = pp.global_base;
+    Some(out)
+}
+
 fn shared() -> &'static Arc<Mutex<GameFrame>> {
     static G: OnceLock<Arc<Mutex<GameFrame>>> = OnceLock::new();
     G.get_or_init(|| Arc::new(Mutex::new(GameFrame::new(DEF_W, DEF_H))))
@@ -342,6 +397,10 @@ static UPLOADED: AtomicU64 = AtomicU64::new(0);
 /// `GamePane>>run`/`stop`. Read by the pump to decide whether to keep stepping.
 static RUNNING: AtomicBool = AtomicBool::new(false);
 static FPS: AtomicU64 = AtomicU64::new(60);
+/// WG11-W9: `overscan:`'s margin, and the viewport's pan within the world.
+static OVERSCAN: AtomicUsize = AtomicUsize::new(0);
+static SCROLL_X: AtomicUsize = AtomicUsize::new(0);
+static SCROLL_Y: AtomicUsize = AtomicUsize::new(0);
 
 pub fn is_running() -> bool {
     RUNNING.load(Ordering::Relaxed)
@@ -447,6 +506,17 @@ impl GameSink for WinGameSink {
                 // Present makes it showable.
                 crate::app::wake_ui_thread();
             }
+            GameCommand::SetOverscan { margin } => {
+                // The WORLD grows; the viewport does not. The plane is
+                // reallocated at world size and the shader pans within it.
+                let (vw, vh) = (f.w, f.h);
+                let _ = (vw, vh);
+                OVERSCAN.store(margin as usize, Ordering::Relaxed);
+            }
+            GameCommand::Scroll { x, y } => {
+                SCROLL_X.store(x.max(0) as usize, Ordering::Relaxed);
+                SCROLL_Y.store(y.max(0) as usize, Ordering::Relaxed);
+            }
             GameCommand::StartLoop => RUNNING.store(true, Ordering::Relaxed),
             GameCommand::StopLoop => RUNNING.store(false, Ordering::Relaxed),
             GameCommand::SetFrameRate { fps } => {
@@ -455,6 +525,7 @@ impl GameSink for WinGameSink {
             GameCommand::SetPaneSize { w, h } => {
                 f.resize(w.max(1), h.max(1));
                 open_text_plane(w.max(1), h.max(1));
+                open_palette(h.max(1));
             }
             GameCommand::OpenDirect { w, h } => {
                 // The pane takes the framebuffer's shape, so a demo that opens
@@ -464,6 +535,7 @@ impl GameSink for WinGameSink {
                 drop(f);
                 open_direct(w.max(1), h.max(1));
                 open_text_plane(w.max(1), h.max(1));
+                open_palette(h.max(1));
                 return;
             }
             // Everything else is a later W: sprites (W10), the legacy 5x7 text
@@ -534,6 +606,9 @@ struct RenderApi {
     drop_plane: unsafe extern "C" fn(i64) -> i64,
     stride: unsafe extern "C" fn(i64) -> i64,
     palette_len: unsafe extern "C" fn(i64) -> i64,
+    // W9: the copper contract and the viewport's pan.
+    make_copper: unsafe extern "C" fn(i64) -> i64,
+    scroll: unsafe extern "C" fn(i64, i64, i64) -> i64,
 }
 
 /// Which shape this module last left the renderer's plane in: `true` indexed,
@@ -581,6 +656,12 @@ fn render_api() -> Option<&'static RenderApi> {
                 palette_len: std::mem::transmute::<u64, unsafe extern "C" fn(i64) -> i64>(sym(
                     "MacvmRenderPaletteLen",
                 )?),
+                make_copper: std::mem::transmute::<u64, unsafe extern "C" fn(i64) -> i64>(sym(
+                    "MacvmRenderMakeCopper",
+                )?),
+                scroll: std::mem::transmute::<u64, unsafe extern "C" fn(i64, i64, i64) -> i64>(
+                    sym("MacvmRenderScroll")?,
+                ),
             })
         }
     })
@@ -628,10 +709,23 @@ pub fn upload_and_present(hwnd: i64) -> bool {
                 return false;
             }
             std::ptr::copy_nonoverlapping(indices.as_ptr(), ix as *mut u8, indices.len());
+            // W9: a guest that wrote a palette gets the COPPER contract —
+            // index 0 transparent, 1..15 per-scanline, 16..255 global — and the
+            // shader's own scroll. Otherwise the flat 256 path is untouched.
+            let copper = copper_palette();
+            if copper.is_some() {
+                (api.make_copper)(hwnd);
+                (api.scroll)(
+                    hwnd,
+                    SCROLL_X.load(Ordering::Relaxed) as i64,
+                    SCROLL_Y.load(Ordering::Relaxed) as i64,
+                );
+            }
             let pal = (api.palette)(hwnd);
             if pal == 0 {
                 return false;
             }
+            let palette = copper.unwrap_or(palette);
             // ASKED, not assumed — W2 made a copper table `h*16+240` entries and
             // added this entry point precisely so a caller cannot write its
             // globals into scanline 16's per-line colours.
@@ -649,6 +743,31 @@ pub fn upload_and_present(hwnd: i64) -> bool {
             let stride = (api.stride)(hwnd);
             if stride <= 0 {
                 return false;
+            }
+            // W9: the COPPER on the direct path. A game with a text HUD takes
+            // this branch, and Copper is exactly that — so without resolving
+            // per-scanline here its bars came out black while its HUD read
+            // fine. The arithmetic is PixelPlane::palette_slot's, in the one
+            // other place that has to agree with it.
+            if let Some(cp) = copper_palette() {
+                let gb = h as usize * 16;
+                let dst = std::slice::from_raw_parts_mut(base as *mut u32, w as usize * h as usize);
+                for y in 0..h as usize {
+                    for x in 0..w as usize {
+                        let ci = indices[y * w as usize + x];
+                        let word = if ci == 0 {
+                            0xFF00_0000
+                        } else if ci < 16 {
+                            cp.get(y * 16 + ci as usize).copied().unwrap_or(0xFF00_0000)
+                        } else {
+                            cp.get(gb + ci as usize - 16).copied().unwrap_or(0xFF00_0000)
+                        };
+                        dst[y * w as usize + x] = word;
+                    }
+                }
+                draw_text_plane(dst, w, h, &palette);
+                let _ = (api.clear)(hwnd, 0x00FF_FFFF, 0x0100_0000);
+                return (api.present)(hwnd) == 0;
             }
             crate::text_overlay::resolve_composite_into(
                 base as *mut u8,
@@ -680,5 +799,6 @@ pub fn install(vm: &mut macvm::embed::VmHandle) {
     // The default pane has a text plane from the start: Minesweeper writes its
     // HUD without ever resizing, and `textMemory` must not fail for it.
     open_text_plane(DEF_W, DEF_H);
+    open_palette(DEF_H);
     vm.set_game_sink(Box::new(WinGameSink));
 }
