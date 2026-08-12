@@ -384,6 +384,74 @@ fn copper_palette() -> Option<Vec<u32>> {
     Some(out)
 }
 
+/// **WG11-W10: sprites.**
+///
+/// A definition is `/`-separated hex rows, FOUR BITS PER PIXEL — each nibble a
+/// palette index into the sprite's OWN sixteen colours, not the pane's. Index 0
+/// is transparent, which is what lets a sprite be a shape rather than a tile.
+///
+/// Frames live in one definition (`addFrame:`), so an animation is one id with
+/// several pictures and `place:x:y:frame:` selects among them. Composited over
+/// the pane in id order at present time — upstream draws them after the indexed
+/// plane and before the text overlay, and so does this.
+struct SpriteDef {
+    frames: Vec<(u32, u32, Vec<u8>)>, // w, h, nibble-per-pixel indices
+    palette: [u32; 16],
+    x: i64,
+    y: i64,
+    frame: usize,
+    visible: bool,
+}
+
+static SPRITES: Mutex<Option<Vec<(i64, SpriteDef)>>> = Mutex::new(None);
+
+/// Parse `/`-separated hex rows into `(w, h, indices)`.
+fn parse_sprite(rows: &str) -> (u32, u32, Vec<u8>) {
+    let lines: Vec<&str> = rows.split('/').filter(|l| !l.is_empty()).collect();
+    let w = lines.iter().map(|l| l.len()).max().unwrap_or(0) as u32;
+    let h = lines.len() as u32;
+    let mut px = vec![0u8; (w * h) as usize];
+    for (y, line) in lines.iter().enumerate() {
+        for (x, c) in line.chars().enumerate() {
+            px[y * w as usize + x] = c.to_digit(16).unwrap_or(0) as u8;
+        }
+    }
+    (w, h, px)
+}
+
+fn with_sprites<T>(f: impl FnOnce(&mut Vec<(i64, SpriteDef)>) -> T) -> Option<T> {
+    let mut g = SPRITES.lock().ok()?;
+    Some(f(g.get_or_insert_with(Vec::new)))
+}
+
+/// Draw every visible sprite into `dst`, in id order. Index 0 is transparent.
+fn draw_sprites(dst: &mut [u32], w: u32, h: u32) {
+    let _ = with_sprites(|v| {
+        for (_, sp) in v.iter() {
+            if !sp.visible {
+                continue;
+            }
+            let Some((sw, sh, px)) = sp.frames.get(sp.frame.min(sp.frames.len().saturating_sub(1)))
+            else {
+                continue;
+            };
+            for sy in 0..*sh as i64 {
+                for sx in 0..*sw as i64 {
+                    let ci = px[(sy as usize) * *sw as usize + sx as usize];
+                    if ci == 0 {
+                        continue;
+                    }
+                    let (x, y) = (sp.x + sx, sp.y + sy);
+                    if x < 0 || y < 0 || x as u32 >= w || y as u32 >= h {
+                        continue;
+                    }
+                    dst[y as usize * w as usize + x as usize] = sp.palette[ci as usize & 15];
+                }
+            }
+        }
+    });
+}
+
 fn shared() -> &'static Arc<Mutex<GameFrame>> {
     static G: OnceLock<Arc<Mutex<GameFrame>>> = OnceLock::new();
     G.get_or_init(|| Arc::new(Mutex::new(GameFrame::new(DEF_W, DEF_H))))
@@ -516,6 +584,68 @@ impl GameSink for WinGameSink {
             GameCommand::Scroll { x, y } => {
                 SCROLL_X.store(x.max(0) as usize, Ordering::Relaxed);
                 SCROLL_Y.store(y.max(0) as usize, Ordering::Relaxed);
+            }
+            GameCommand::DefineSprite { id, rows } => {
+                let f = parse_sprite(&rows);
+                let _ = with_sprites(|v| {
+                    v.retain(|(i, _)| *i != id);
+                    v.push((
+                        id,
+                        SpriteDef {
+                            frames: vec![f],
+                            // Opaque black until the game says otherwise; slot 0
+                            // is never drawn, so its value cannot show.
+                            palette: [0xFF00_0000; 16],
+                            x: 0,
+                            y: 0,
+                            frame: 0,
+                            visible: true,
+                        },
+                    ));
+                    v.sort_by_key(|(i, _)| *i);
+                });
+            }
+            GameCommand::AddFrame { id, rows } => {
+                let f = parse_sprite(&rows);
+                let _ = with_sprites(|v| {
+                    if let Some((_, sp)) = v.iter_mut().find(|(i, _)| *i == id) {
+                        sp.frames.push(f);
+                    }
+                });
+            }
+            GameCommand::SpriteColor { id, index, r, g: gg, b } => {
+                let _ = with_sprites(|v| {
+                    if let Some((_, sp)) = v.iter_mut().find(|(i, _)| *i == id) {
+                        sp.palette[index as usize & 15] =
+                            0xFF00_0000 | ((r as u32) << 16) | ((gg as u32) << 8) | b as u32;
+                    }
+                });
+            }
+            GameCommand::MoveSprite { id, x, y } => {
+                let _ = with_sprites(|v| {
+                    if let Some((_, sp)) = v.iter_mut().find(|(i, _)| *i == id) {
+                        sp.x = x;
+                        sp.y = y;
+                        sp.visible = true;
+                    }
+                });
+            }
+            GameCommand::PlaceSprite { id, x, y, frame } => {
+                let _ = with_sprites(|v| {
+                    if let Some((_, sp)) = v.iter_mut().find(|(i, _)| *i == id) {
+                        sp.x = x;
+                        sp.y = y;
+                        sp.frame = frame as usize;
+                        sp.visible = true;
+                    }
+                });
+            }
+            GameCommand::HideSprite { id } => {
+                let _ = with_sprites(|v| {
+                    if let Some((_, sp)) = v.iter_mut().find(|(i, _)| *i == id) {
+                        sp.visible = false;
+                    }
+                });
             }
             GameCommand::StartLoop => RUNNING.store(true, Ordering::Relaxed),
             GameCommand::StopLoop => RUNNING.store(false, Ordering::Relaxed),
@@ -681,7 +811,8 @@ pub fn upload_and_present(hwnd: i64) -> bool {
     let Some((w, h, indices, palette, overlay)) = take_frame() else {
         return false;
     };
-    if overlay.is_some() || text_cells().is_some() {
+    let any_sprites = with_sprites(|v| v.iter().any(|(_, sp)| sp.visible)).unwrap_or(false);
+    if overlay.is_some() || text_cells().is_some() || any_sprites {
         // Either text layer means RGB over indices, so the direct path.
         TEXT_MODE.store(true, Ordering::Relaxed);
     }
@@ -765,6 +896,7 @@ pub fn upload_and_present(hwnd: i64) -> bool {
                         dst[y * w as usize + x] = word;
                     }
                 }
+                draw_sprites(dst, w, h);
                 draw_text_plane(dst, w, h, &palette);
                 let _ = (api.clear)(hwnd, 0x00FF_FFFF, 0x0100_0000);
                 return (api.present)(hwnd) == 0;
@@ -785,6 +917,9 @@ pub fn upload_and_present(hwnd: i64) -> bool {
                     base as *mut u32,
                     w as usize * h as usize,
                 );
+                // Sprites over the pixels, text over the sprites — upstream's
+                // layer order, so a HUD is never hidden by a sprite.
+                draw_sprites(dst, w, h);
                 draw_text_plane(dst, w, h, &palette);
             }
         }
