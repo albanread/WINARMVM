@@ -604,10 +604,51 @@ Measured after: plasma ~34 fps at the 30 fps target, Julia ~13 fps
 per-pixel *iteration* does not belong on the UI thread), and the control port
 answers instantly while both run.
 
-**Still open (WG11 candidate):** the demo AS a shader — upstream's
-`GamePane>>shader:` (prim 259) lets the guest supply fragment-shader source;
-the D3D11 twin would run Julia on the Adreno at any resolution for zero
-UI-thread cost, which is the full SOC showcase.
+**WG11 — GamePane parity (settled 2026-08-12).** Not just `shader:` — the
+whole of upstream's guest-facing games surface, implemented on the D3D11 pipe,
+under two principles the author set:
+
+1. **Both engines, always.** A shader demo showcases the Adreno; it says
+   nothing about the compiler or the Oryon cores. Every demo that can exist in
+   both forms keeps both: `shader:` source runs on the GPU, and when no source
+   exists for this backend the SOFTWARE version runs — so the CPU path is not
+   a curiosity but the portability guarantee (a game degrades to the compiler,
+   never to a black screen). The HUD names the engine and its frame time.
+2. **The same Smalltalk runs on every system** — mac, windows, arm, x64,
+   linux when ported. Which means the guest API must be UPSTREAM'S, not ours:
+   `GamePane` (`shader:`/`shaderParam:value:`, prims 259/260), IndexedPane's
+   draw calls (`pset`/`cls`/`fillRect:`/`line:`/`circle:`/`blit:`), its
+   palette model (per-scanline 1–15, global 16–255, index 0 transparent — the
+   copper contract; our flat SM4 palette converges to it, a shader edit now
+   that lookup is GPU-side), text overlay, and input.
+
+   **The shaders are the hardware emulation, and they are hardware/OS
+   specific** (the author's words). GamePane is a fantasy-console HARDWARE
+   SPEC; the shaders are each platform's implementation of that console's
+   video chip — Metal on the Mac, HLSL in `gpu.rs` here — authored per-OS by
+   the port, never shipped by a game. Games touch the emulated hardware's
+   state only, the way a ROM touches an emulated video chip's registers: an
+   emulator's video core belongs to the emulator, not to the ROM. That is WHY
+   the same game runs everywhere, and it makes WG11's scope precise — finish
+   emulating upstream's chip behind upstream's primitives.
+
+   **And the Metal→D3D11 port has been done before** — the author has shipped
+   it twice, and the artifacts are vendored in
+   [`docs/reference/gamepane-d3d/`](reference/gamepane-d3d/README.md):
+   WINDARTTALK's `shaders.hlsl` (the complete, line-cited HLSL translation of
+   `gp_engine.mm` — copper palette, sprites, the compute blitter with its
+   SRV/UAV hazards documented, the runtime `fmain` template with the
+   cbuffer-packing trap solved, nearest-letterbox present) plus its host-side
+   design doc — whose §5.6 independently reaches this port's own UMA
+   conclusion — and wingui's production shader set (`text_grid.hlsl` with a
+   CRT mode, compute fill/line, sprites). WG11 implements that reference
+   behind upstream's primitives; it is not a translation project.
+
+The acceptance gate states the principle: **an upstream game's `.mst` loads
+and plays unchanged.** FreeCell or Minesweeper copied byte-for-byte from
+`MACVM/world` is the test — editing the game's source fails the gate, because
+editing the game is what the concept forbids. Canvas input routing (WG10's
+remainder) is therefore a prerequisite, not a parallel task.
 
 ---
 
