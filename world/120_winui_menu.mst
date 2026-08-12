@@ -57,7 +57,7 @@ Object subclass: WinApi [
 ]
 
 Object subclass: WinShell [
-    <classVars: MenuBar MenuCommands>
+    <classVars: MenuBar MenuCommands PendingDemoSource PendingDemoName>
 
     "── the id space ────────────────────────────────────────────────────"
 
@@ -228,11 +228,38 @@ Object subclass: WinShell [
     WinShell class >> launchDemo: source <String> named: aName <String> ^ <Boolean> [
         "Demos run in the PRIMARY, where GamePane and the games live. The Canvas
          is switched to first so the frames have somewhere to land, and its own
-         animation is stopped — the pane cannot belong to two owners."
+         animation is stopped — the pane cannot belong to two owners.
+
+         THE LAUNCH IS NOT SENT HERE. It is remembered, and the HOST is asked
+         (posted, not sent) to wipe the previous demo's layers first; the host
+         then calls `launchPendingDemo` back. Sending the doit here as well
+         would race it: `GamePane reset` is guest state alone, so the host's
+         sprites, text and shader can only be cleared host-side, and a wipe
+         posted to THIS thread while the launch travels to the PRIMARY's has no
+         order between them — half the time it would erase the new demo's own
+         sprites instead of the old demo's leftovers. One request, one order."
         self switchToView: self canvasViewName.
         self canvasAnimating: false.
         self appendTranscript: 'demo: ' , aName.
-        Worker uiDoit: source onReply: [ :r | WinShell appendTranscript: 'demo: ' , aName , ' up' ].
+        PendingDemoSource := source.
+        PendingDemoName := aName.
+        ^WinApi asBool: (WinApi
+            postMessage: self hwndValue
+            message: (16r8000 + 10)
+            wParam: 0
+            lParam: 0)
+    ]
+
+    WinShell class >> launchPendingDemo ^ <Boolean> [
+        "Called BY THE HOST, once it has wiped the pane. Now the primary can be
+         told, and whatever it draws lands on a blank screen."
+        | source name |
+        PendingDemoSource isNil ifTrue: [ ^false ].
+        source := PendingDemoSource.
+        name := PendingDemoName isNil ifTrue: [ 'demo' ] ifFalse: [ PendingDemoName ].
+        PendingDemoSource := nil.
+        PendingDemoName := nil.
+        Worker uiDoit: source onReply: [ :r | WinShell appendTranscript: 'demo: ' , name , ' up' ].
         ^true
     ]
 
@@ -250,9 +277,19 @@ Object subclass: WinShell [
     WinShell class >> menuStopDemo [
         "`GamePane reset` is the same verb Escape sends, and the host stops the
          loop on its own side — see `win_gui/src/game.rs`'s `stop`, which exists
-         because the class-side reset emits no StopLoop."
+         because the class-side reset emits no StopLoop.
+
+         The SAME request the launch uses, with nothing pending: the host wipes
+         the pane and then finds no demo to start. Stopping and starting are
+         one mechanism, so a stop cannot clear less than a start does."
+        PendingDemoSource := nil.
+        PendingDemoName := nil.
         Worker uiDoit: 'GamePane reset. 1' onReply: [ :r | WinShell appendTranscript: 'demo: stopped' ].
-        ^true
+        ^WinApi asBool: (WinApi
+            postMessage: self hwndValue
+            message: (16r8000 + 10)
+            wParam: 0
+            lParam: 0)
     ]
 
     WinShell class >> menuAbout [

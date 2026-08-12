@@ -238,6 +238,31 @@ pub fn take_loadtests_requested() -> bool {
     LOADTESTS_REQUESTED.swap(false, Ordering::AcqRel)
 }
 
+/// WINARM (WG11-W13): **Launch a demo** — the guest asking the host to wipe
+/// the game pane's layers and only THEN start the next demo.
+///
+/// It exists for an ordering reason, not a threading one. `GamePane reset` is
+/// guest state alone (it emits no command, so the host cannot see it), and the
+/// host's layers — text overlay, cell plane, sprites, shader, palette — are
+/// process-lifetime statics rather than a pane object that can be dropped. So
+/// the host must be told, and it must be told *before* the primary is told to
+/// launch, or the wipe lands on the new demo's setup instead of the old
+/// demo's leftovers. Posting this and sending the launch doit side by side
+/// would be exactly that race: two threads, two queues, no order between them.
+///
+/// So the guest posts ONLY this; the pump wipes and then asks the guest to
+/// send the launch. One thread, two steps, in order.
+pub const WM_APP_DEMO: u32 = 0x8000 + 10;
+const _WM_APP_DEMO_IS_PRIVATE: () = assert!(WM_APP_DEMO >= 0x8000);
+
+/// Set by the trampoline when a `WM_APP_DEMO` arrives; taken by the pump.
+static DEMO_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// The pump: has the guest asked to start a demo since we last looked?
+pub fn take_demo_requested() -> bool {
+    DEMO_REQUESTED.swap(false, Ordering::AcqRel)
+}
+
 /// Set by the trampoline when a `WM_APP_FILEIN` arrives; taken by the pump.
 static FILEIN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
@@ -944,6 +969,10 @@ pub extern "system" fn macvm_wndproc(hwnd: isize, msg: u32, wparam: usize, lpara
     }
     if msg == WM_APP_LOADTESTS {
         LOADTESTS_REQUESTED.store(true, Ordering::Release);
+        return 0;
+    }
+    if msg == WM_APP_DEMO {
+        DEMO_REQUESTED.store(true, Ordering::Release);
         return 0;
     }
     if msg == WM_TIMER {

@@ -1150,6 +1150,19 @@ mod app {
                             crate::game::upload_and_present(game_pane_hwnd);
                         }
                     }
+                    // WG11-W13: WIPE, THEN LAUNCH. The guest posted and did NOT
+                    // send the launch, precisely so these two happen in this
+                    // order on this one thread: the previous demo's layers go
+                    // first, and only then is the primary told to start the
+                    // next one. `stop()` is the whole teardown — the Mac gets
+                    // it by dropping its pane object; here it is spelled out.
+                    if macvm::runtime::win_wndproc::take_demo_requested() {
+                        crate::game::stop();
+                        game_pane_hwnd = 0;
+                        game_mode_set = false;
+                        let vm: &mut VmHandle = unsafe { &mut *vmp };
+                        let _ = guarded_exec(vm, "WinShell launchPendingDemo.");
+                    }
                     if macvm::runtime::win_wndproc::take_loadtests_requested() {
                         let vm: &mut VmHandle = unsafe { &mut *vmp };
                         let msg = match link.as_mut() {

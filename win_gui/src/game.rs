@@ -840,6 +840,56 @@ pub fn stop() {
     // W12: a title theme must not keep playing under the next demo. SFX ring
     // out on their own — they are short, and the sister port leaves them too.
     crate::sound::stop_tunes();
+    wipe_layers();
+}
+
+/// **W13: erase every layer**, so the next demo starts on a blank pane.
+///
+/// The Mac gets this for nothing: its pane is an object, `teardown()` drops the
+/// whole `NativeGame`, and sprites, both text layers and the shader go with it.
+/// Here the layers are process-lifetime statics — leaked deliberately, because
+/// the guest holds pointers into them — so "drop the pane" has to be spelled
+/// out, and until it was, a demo inherited its predecessor's screen: Plasma
+/// ran under Minesweeper's `MINES 32` and FreeCell's `DEAL/MOVES` row, three
+/// demos after either had exited.
+///
+/// Deliberately NOT reset here: the pane's SIZE. A demo that never calls
+/// `resizeTo:by:` runs at whatever the last one asked for, which is upstream's
+/// behaviour too — the pane is the console's screen, not the game's.
+fn wipe_layers() {
+    OVERSCAN.store(0, Ordering::Relaxed);
+    SCROLL_X.store(0, Ordering::Relaxed);
+    SCROLL_Y.store(0, Ordering::Relaxed);
+    // Upstream resets the rate when the window closes so it cannot leak into
+    // the next demo — galaxigans asks for 30 and everything else wants 60.
+    FPS.store(60, Ordering::Relaxed);
+    let _ = with_sprites(|v| v.clear());
+    if let Ok(mut g) = TEXTP.lock() {
+        if let Some(t) = g.as_mut() {
+            t.cells.fill(0);
+        }
+    }
+    if let Ok(mut g) = PAL.lock() {
+        if let Some(p) = g.as_mut() {
+            p.bytes.fill(0);
+        }
+    }
+    if let Ok(mut g) = DIRECT.lock() {
+        if let Some(d) = g.as_mut() {
+            for b in d.bufs.iter_mut() {
+                b.fill(0);
+            }
+        }
+    }
+    if let Ok(mut f) = shared().lock() {
+        f.text.clear();
+        f.indices.fill(0);
+        f.palette.fill(0xFF00_0000);
+        // One more generation, so the pump uploads the blank frame rather than
+        // leaving the last game's picture on screen until the next one draws.
+        f.generation += 1;
+    }
+    PRESENTED.fetch_add(1, Ordering::Release);
 }
 
 /// The size the pane currently is, for the input driver's pixel scaling.
