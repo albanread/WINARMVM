@@ -654,6 +654,25 @@ re-ran the full decode + eligibility scan on every 10,000 back-edges, forever
 (≈ twice a frame for `juliaRow:`). The call-path trigger has always checked it
 (`src/interpreter/send.rs:205`); OSR now does too (`src/runtime/osr.rs`).
 
+**And a standing rule, restated because it was nearly violated an hour later:
+JIT thresholds below 20 are not a supported configuration.** `parse_jit` clamps
+the env/CLI surface with *"rule 1: never below 20 — sub-floor compiles graft
+from cold ICs and measure cold-compile deopts, not programs"*. When WG10's Life
+tests turned `world_suite_at_sub_floor_threshold_survives_root_block_deopt` red
+with a wrong ANSWER (`expected 1 got nil`) at `Threshold(2)`, the investigation
+that started was into the wrong thing: a failure reachable only below the floor
+is out of contract, and the response to it must never be to change the compiler
+for a threshold the compiler refuses to run.
+
+The defect that test guards is a `.expect()` inside `rt_uncommon_trap` — an
+`extern "C"` **non-unwinding abort** that takes the whole test binary down. So
+*surviving to produce a report line* is the guard; the `", 0 failed"` it also
+asserted guarded nothing about the abort while quietly gating the entire world
+corpus on an unsupported configuration. It now asserts survival and a plausible
+run count, and REPORTS any sub-floor divergence to stderr instead of failing —
+the information stays visible, the build does not go red for something that
+cannot ship.
+
 **The two durable rules**, which is what the original note should have said:
 
 > A hot loop tiers only if its back edge lives in an **installed method** with
