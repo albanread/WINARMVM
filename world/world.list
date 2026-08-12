@@ -73,6 +73,10 @@
 # GamePane: drive the native Metal game pane from Smalltalk (M3 slice,
 # docs/gamepane_design.md). Numbered game primitives (id block 200+).
 43_gamepane.mst
+# WG11 (upstream 09210e3): TextScreen — an off-screen page composed with
+# put:at:row:color: and shown with `pane textBlast:`. Upstream verbatim; the
+# games that use it are ports, not rewrites.
+43a_textscreen.mst
 # SpriteDoc (docs/asset_editors_design.md): the sprite editor's pure document —
 # frames of 4-bit pixels + one 16-entry palette, hex-row emit/parse, sheet-class
 # source emit. World-list so games can file sheets in and the battery runs
@@ -90,6 +94,49 @@
 # MandelZoom: a zooming Mandelbrot rendered live in the game pane (reuses
 # Mandelbrot>>escapeAtRe:im:; progressive per-frame render, docs/gamepane_design.md).
 45_mandelzoom.mst
+
+# ── WG11: upstream's games, verbatim ────────────────────────────────────
+# Copied byte-for-byte from `upstream/main` (09210e3) — that is the whole
+# point. The portability claim is that the SAME Smalltalk runs on mac,
+# windows, arm and x64; a game we had to edit to load would disprove it.
+# Upstream's own notes come across with them for the same reason.
+#
+# They load harmlessly before the host exists: with no GameSink installed
+# every game primitive fails softly and the wrappers answer nil/self, so
+# these define their classes and wait. `docs/SPRINTS.md` WG11 has the order
+# in which the host, the input driver and the shared-memory primitives
+# arrive to make them run.
+# Life: Conway's Game of Life in the game pane â€” the demo the pane's MOUSE
+# support was built for (SPACE pauses, left draws, right erases; blit: per
+# frame, toroidal 80x60 grid; docs/gamepane_design.md).
+45a_life.mst
+# Minesweeper: the classic, on the pane's two mouse buttons â€” left reveals,
+# right flags. Reads the buttons on their EDGE (one click, one square), the
+# opposite of Life's level-triggered painting; first click always safe.
+45b_minesweeper.mst
+# FreeCell: the single-player card game â€” drag-and-drop over the pane's mouse
+# support, Microsoft's original deal numbering (deal 617 is deal 617), and the
+# real supermove rule (free+1)*2^empty. All 52 cards face up.
+45c_freecell.mst
+# Plasma: SM0 proof â€” a full-screen field written STRAIGHT into GPU shared
+# memory (screenMemory/screenStride), so a frame emits one command (present)
+# no matter how many pixels changed. docs/shared_screen_memory_design.md
+45d_plasma.mst
+# TextPages: the SM3 proof - four pages composed once, each shown by a single
+# memcpy into the text plane; turning a page sends no commands at all.
+45e_textpages.mst
+# Copper: the per-scanline palette, which nothing else demonstrates - the
+# screen is filled ONCE and never redrawn; only what colour index 1 MEANS on
+# each of 240 scanlines changes. The opposite extreme from Plasma.
+45f_copper.mst
+# Attractor: a de Jong strange attractor drawn by DENSITY into direct GPU
+# memory - a count per pixel mapped through the palette, so the image
+# develops like a photographic plate.
+45g_attractor.mst
+# Julia: a live Julia set animated by moving its constant - all 76,800 pixels
+# recomputed every frame into GPU memory, and palette cycling that recolours
+# the screen without touching a pixel. One command a frame.
+45h_julia.mst
 # MandelVM: MandelZoom that dives once then stops — the standalone-window demo
 # (macvm-gui mandelvm / run-mandelvm.sh) that quits when the demo ends.
 46_mandelvm.mst
