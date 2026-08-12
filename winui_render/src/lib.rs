@@ -23,6 +23,7 @@
 #![cfg(windows)]
 
 pub mod gpu;
+pub mod msl;
 pub mod pane;
 
 use std::mem::ManuallyDrop;

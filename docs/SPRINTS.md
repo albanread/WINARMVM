@@ -773,6 +773,32 @@ and plays unchanged.** FreeCell or Minesweeper copied byte-for-byte from
 editing the game is what the concept forbids. Canvas input routing (WG10's
 remainder) is therefore a prerequisite, not a parallel task.
 
+**W11 landed (2026-08-12): the layer-0 shader, and galaxigans plays its
+cosmos.** The shim is the sister port's, function for function
+(`winui_render/src/msl.rs` ← WINDARTTALK `gp_engine_d3d.cpp`): calls-only
+dialect rewrites (`fract`→`frac`, `mix`→`lerp`, 2-arg `atan`→`atan2`, `mod`→a
+floor-based helper because `fmod` truncates and disagrees on negatives), the
+`fragment … [[stage_in]]` entry rewriter, and the 144-byte cbuffer with
+`p[8]` at 16-byte stride. Compiled at runtime by the same `D3DCompile` the
+built-in shaders use; drawn as pass 0 under the plane. **A live shader forces
+the copper contract** — that one decision made the indexed path free
+(copper's index-0 `discard` already composes) and reduced the direct path to
+"index 0 resolves transparent + the plane blends". Compile failure keeps the
+previous shader and prints the compiler's text once — degradation is to the
+software look, never to a dead pane (`gpu.rs` tests pin both, including
+compiling galaxigans' actual 12-scene source out of the world file).
+`linePaletteAt:` (261) rides the same effective-copper table, which is what
+animates the boss beam. Two galaxigans-shaped traps, recorded: the copper
+direct branch had never composited the legacy 5×7 overlay (the Copper demo
+uses SM1 cells), so the HUD vanished until `composite_over` topped that
+branch too; and `cargo build --release` does NOT rebuild the non-default
+GUI members — a stale `winui_render.dll` missing one export nulls the whole
+`RenderApi` OnceLock and every game silently stops uploading. Build with
+`-p win_gui -p winui_host -p winui_render`, like the gates do.
+
+REMAINING for GamePane parity: sound (213/263) — XAudio2/WASAPI behind
+`PlaySound`/`PlayEffect`, which the sink still swallows harmlessly.
+
 ---
 
 ## Standing rules

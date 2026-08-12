@@ -298,7 +298,9 @@ mod input_tests {
 
     #[test]
     fn escape_is_inert_while_no_game_is_running() {
-        RUNNING.store(false, Ordering::Relaxed);
+        // `stop()` is the public verb that clears RUNNING — the same one the
+        // Escape path itself calls, so the test drives the real state.
+        stop();
         set_pane_hwnd(1234);
         assert!(!escape_pressed(), "Escape belongs to the shell when idle");
         stop();
@@ -312,7 +314,12 @@ mod input_tests {
 
     #[test]
     fn stop_clears_running_and_unpublishes_the_pane() {
-        RUNNING.store(true, Ordering::Relaxed);
+        // RUNNING is set the way a game sets it: `run` emits StartLoop into
+        // the sink. No test-only back door into the static.
+        use macvm::embed::{GameCommand, GameSink};
+        let mut sink = crate::game::WinGameSink;
+        sink.emit(GameCommand::StartLoop);
+        assert!(is_running(), "StartLoop must set RUNNING");
         set_pane_hwnd(4321);
         stop();
         assert!(!is_running());

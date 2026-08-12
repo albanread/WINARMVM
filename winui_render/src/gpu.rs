@@ -103,7 +103,11 @@ Texture2D<float4> planeTex : register(t0);
 SamplerState pointSamp : register(s0);
 
 float4 ps_plane(VOut i) : SV_Target {
-    return float4(planeTex.Sample(pointSamp, i.uv).rgb, 1.0);
+    // The sampled alpha rides along for the W11 shader case, where the plane
+    // BLENDS over the background and the host writes alpha-0 for index 0.
+    // Everywhere else the pass draws with blending off, so a guest that
+    // writes 0x00RRGGBB words straight into the ring still shows opaque.
+    return planeTex.Sample(pointSamp, i.uv);
 }
 
 // ── pass 1b: the INDEXED plane (SM4, on the GPU) ────────────────────────
@@ -179,6 +183,41 @@ float4 ps_text(VOut i) : SV_Target {
     return float4(col, 1.0);
 }
 "#;
+
+/// **WG11-W11: the runtime shader's header** — what the engine supplies around
+/// the game's translated `fmain` body. The same contract as upstream's Metal
+/// header in `MacGamePane/graphics/src/shader_pane.rs` (a `VOut` with `.uv`,
+/// uniforms `time`/`aspect`/`p[0..7]`), spelled in HLSL the way the sister
+/// Dart port spelled it (WINDARTTALK `gp_engine_d3d.cpp`, `kShaderHeaderHlsl`):
+/// the struct is named `GVOut` because the entry translator renames the
+/// stage_in parameter (MSL bodies call it `in`, an HLSL keyword), and the
+/// uniforms become GLOBALS so `u.time` can translate to plain `time`.
+///
+/// THE PACKING TRAP, inherited solved: `float p[8]` in an HLSL cbuffer is
+/// 128 bytes at 16-byte stride — each element in the `.x` of its own register
+/// — NOT Metal's tightly-packed 32. The Rust side writes `[f32; 36]` (144
+/// bytes) with `p[i]` at float offset `4 + i*4` to match.
+///
+/// No vertex shader here: the runtime pass reuses `vs_main` above, whose
+/// `VOut` carries the same `SV_Position` + `TEXCOORD0` semantics `GVOut`
+/// declares — D3D links stages by semantics, not by struct name.
+const SHADER_HEADER: &str = r#"
+cbuffer ShaderUniforms : register(b0) {
+    float time; float aspect; float2 _pad_shader; float p[8];
+};
+struct GVOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
+"#;
+
+/// **WG11-W11: the layer-0 background shader**, compiled at runtime from the
+/// game's Metal source (`GamePane>>shader:`). `start` is the time base:
+/// upstream's `ShaderPane::new` stamps `Instant::now()`, so `u.time` is
+/// seconds since THIS shader compiled and a recompile resets it to zero.
+pub struct ShaderLayer {
+    ps: ID3D11PixelShader,
+    cbuf: ID3D11Buffer,
+    pub params: [f32; 8],
+    start: std::time::Instant,
+}
 
 /// The cbuffer, mirrored exactly. 48 bytes, three 16-byte registers.
 #[repr(C)]
@@ -274,6 +313,9 @@ pub struct Pipe {
     pal_tex: Option<(ID3D11Texture2D, ID3D11ShaderResourceView)>,
     /// Scratch for the cell translation, kept to avoid a per-frame alloc.
     scratch: Vec<[u32; 4]>,
+
+    /// W11: the layer-0 background shader, `None` until a game sets one.
+    pub shader: Option<ShaderLayer>,
 }
 
 impl Pipe {
@@ -420,8 +462,49 @@ impl Pipe {
                 idx_tex: None,
                 pal_tex: None,
                 scratch: Vec::new(),
+                shader: None,
             })
         }
+    }
+
+    /// **W11.** Compile `src` — Metal, GLSL-flavoured, or already-HLSL — into
+    /// the layer-0 background shader. On failure the PREVIOUS shader (or none)
+    /// stays in force and the error text is returned: upstream's Cocoa host
+    /// does exactly this (`Err(e) => eprintln!(...)`, the `Ok` arm being the
+    /// only assignment), so a game with a typo degrades to what it had, never
+    /// to a dead pane.
+    pub fn set_shader(&mut self, src: &str) -> Result<(), String> {
+        let body = crate::msl::to_hlsl_body(src);
+        let full = format!("{SHADER_HEADER}\n{body}");
+        let blob = compile(&full, "fmain", "ps_5_0")?;
+        unsafe {
+            let mut ps = None;
+            self.device
+                .CreatePixelShader(blob_bytes(&blob), None, Some(&mut ps))
+                .map_err(|e| format!("CreatePixelShader fmain: {e}"))?;
+            let cb_desc = D3D11_BUFFER_DESC {
+                // 36 floats: time, aspect, two pads, then p[8] at 16-byte
+                // stride — see SHADER_HEADER's packing note.
+                ByteWidth: 144,
+                Usage: D3D11_USAGE_DYNAMIC,
+                BindFlags: D3D11_BIND_CONSTANT_BUFFER.0 as u32,
+                CPUAccessFlags: D3D11_CPU_ACCESS_WRITE.0 as u32,
+                ..Default::default()
+            };
+            let mut cbuf = None;
+            self.device
+                .CreateBuffer(&cb_desc, None, Some(&mut cbuf))
+                .map_err(|e| format!("CreateBuffer shader cbuf: {e}"))?;
+            self.shader = Some(ShaderLayer {
+                ps: ps.unwrap(),
+                cbuf: cbuf.unwrap(),
+                // Fresh, like upstream's new ShaderPane: params are driven by
+                // `shaderParam:value:` after the compile, not inherited.
+                params: [0.0; 8],
+                start: std::time::Instant::now(),
+            });
+        }
+        Ok(())
     }
 
     /// The slot holding `cp`'s glyph, rasterising it into the atlas on first
@@ -636,6 +719,40 @@ impl Pipe {
             self.dctx.RSSetState(&self.raster);
             self.dctx.VSSetShader(&self.vs, None);
 
+            // ── pass 0 (W11): the layer-0 background shader ───────────────
+            // Drawn first and opaque, covering every pixel; the plane composes
+            // over it (indexed: copper's index-0 `discard`; direct: alpha
+            // blend below). Its cbuffer briefly owns b0 — the shared one is
+            // bound right after, so the plane passes see theirs as always.
+            if let Some(sh) = self.shader.as_ref() {
+                let mut buf = [0f32; 36];
+                buf[0] = sh.start.elapsed().as_secs_f32();
+                // The LOGICAL aspect, like upstream (galaxigans: 640/360),
+                // taken from the plane the game resized; the window's pixel
+                // shape only stands in when no plane exists yet.
+                buf[1] = plane
+                    .map(|p| p.w as f32 / p.h.max(1) as f32)
+                    .unwrap_or(px_w as f32 / px_h.max(1) as f32);
+                for (i, p) in sh.params.iter().enumerate() {
+                    buf[4 + i * 4] = *p;
+                }
+                let mut mapped = Default::default();
+                self.dctx
+                    .Map(&sh.cbuf, 0, D3D11_MAP_WRITE_DISCARD, 0, Some(&mut mapped))
+                    .map_err(|e| format!("Map shader cbuf: {e}"))?;
+                std::ptr::copy_nonoverlapping(
+                    buf.as_ptr() as *const u8,
+                    mapped.pData as *mut u8,
+                    144,
+                );
+                self.dctx.Unmap(&sh.cbuf, 0);
+                self.dctx.OMSetBlendState(None, None, u32::MAX);
+                self.dctx
+                    .PSSetConstantBuffers(0, Some(&[Some(sh.cbuf.clone())]));
+                self.dctx.PSSetShader(&sh.ps, None);
+                self.dctx.Draw(3, 0);
+            }
+
             // The cbuffer, once per frame.
             let u = Uniforms {
                 pane: [px_w as f32, px_h as f32],
@@ -667,7 +784,15 @@ impl Pipe {
 
             // ── pass 1: the plane, if this pane has one ──────────────────
             if let Some(p) = plane {
-                self.dctx.OMSetBlendState(None, None, u32::MAX);
+                // Opaque as always — EXCEPT a direct plane over a background
+                // shader, which blends so the host's alpha-0 index-0 pixels
+                // leave the shader visible (the indexed plane needs nothing:
+                // copper's `discard` is already a real hole).
+                if self.shader.is_some() && !p.indexed {
+                    self.dctx.OMSetBlendState(&self.blend, None, u32::MAX);
+                } else {
+                    self.dctx.OMSetBlendState(None, None, u32::MAX);
+                }
                 if p.indexed {
                     let need = match &self.idx_tex {
                         Some((w, h, _, _)) => *w != p.w || *h != p.h,
@@ -796,6 +921,18 @@ mod tests {
         w: u32,
         h: u32,
     ) -> Vec<u32> {
+        render_and_read_shaded(cols, rows, cells, plane, w, h, None)
+    }
+
+    fn render_and_read_shaded(
+        cols: u32,
+        rows: u32,
+        cells: Vec<Cell>,
+        plane: Option<PixelPlane>,
+        w: u32,
+        h: u32,
+        shader: Option<&str>,
+    ) -> Vec<u32> {
         unsafe {
             let mut device = None;
             let mut hr = D3D11CreateDevice(
@@ -852,6 +989,9 @@ mod tests {
                 .expect("rtv");
 
             let mut pipe = Pipe::new(device.clone(), dctx.clone(), &metrics).expect("pipe");
+            if let Some(src) = shader {
+                pipe.set_shader(src).expect("the game's shader compiles");
+            }
             pipe.render(
                 &rtv.unwrap(),
                 w,
@@ -1061,5 +1201,104 @@ mod tests {
             in_cell1, 0x00_FF00,
             "an opaque bg still covers it, got {in_cell1:08x}"
         );
+    }
+
+    /// WG11-W11: THE shader, end to end. Galaxigans' cosmosShader — the very
+    /// MSL the games ship, read out of the world file so this test compiles
+    /// what production compiles — goes through the dialect shim, D3DCompile,
+    /// and a real render over a copper plane cleared to index 0. Every plane
+    /// pixel is a hole, so the readback IS the shader's output.
+    #[test]
+    fn galaxigans_cosmos_shader_compiles_and_draws() {
+        let world = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../world/49_galaxigans.mst"
+        ))
+        .expect("the world file");
+        let at = world.find("cosmosShader [").expect("the method");
+        let q0 = world[at..].find('\'').expect("its opening quote") + at + 1;
+        let q1 = world[q0..].find('\'').expect("its closing quote") + q0;
+        let msl = &world[q0..q1];
+        // The naive quote scan above is only right while the source contains
+        // no escaped quotes — assert that, so a future edit fails loudly here
+        // instead of feeding half a shader to the compiler.
+        assert!(!msl.contains("''"), "cosmosShader grew an escaped quote");
+        assert!(msl.contains("fragment float4 fmain"), "found the wrong string");
+
+        let mut p = PixelPlane::new(8, 8);
+        p.make_indexed();
+        p.make_copper();
+        // All zero already — every pixel a hole — except one global sprite
+        // colour, to prove the plane still composes OVER the shader.
+        p.indices[0] = 20;
+        let slot = p.palette_slot(0, 20);
+        p.palette[slot] = 0xFFFF_0000;
+
+        let px = render_and_read_shaded(0, 0, Vec::new(), Some(p), 8, 8, Some(msl));
+        assert_eq!(px[0] & 0xFF_FFFF, 0xFF_0000, "index 20 covers the shader");
+        // Scene 0 is the nebula: a blue-tinted field, never the white the
+        // target was cleared to. If the pass hadn't drawn, every hole would
+        // read back pure white.
+        let holes: Vec<u32> = px[1..].iter().map(|w| w & 0xFF_FFFF).collect();
+        assert!(
+            holes.iter().all(|&w| w != 0xFF_FFFF),
+            "holes must show the shader, not the clear"
+        );
+        assert!(
+            holes.iter().any(|&w| w & 0xFF != 0),
+            "the nebula has blue in it"
+        );
+    }
+
+    /// WG11-W11: failure keeps the pane alive AND keeps the previous shader —
+    /// upstream's contract (the `Ok` arm is the only assignment). Degradation
+    /// is to what the game had, never to a black pane.
+    #[test]
+    fn a_bad_shader_keeps_the_previous_one() {
+        let (device, dctx) = unsafe {
+            let mut device = None;
+            let mut hr = D3D11CreateDevice(
+                None,
+                D3D_DRIVER_TYPE_HARDWARE,
+                Default::default(),
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                None,
+                D3D11_SDK_VERSION,
+                Some(&mut device),
+                None,
+                None,
+            );
+            if hr.is_err() {
+                hr = D3D11CreateDevice(
+                    None,
+                    D3D_DRIVER_TYPE_WARP,
+                    Default::default(),
+                    D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                    None,
+                    D3D11_SDK_VERSION,
+                    Some(&mut device),
+                    None,
+                    None,
+                );
+            }
+            hr.expect("a device");
+            let device = device.unwrap();
+            let dctx = device.GetImmediateContext().unwrap();
+            (device, dctx)
+        };
+        let (_, metrics) = crate::mono_face_metrics(9.0, 96.0).expect("metrics");
+        let mut pipe = Pipe::new(device, dctx, &metrics).expect("pipe");
+
+        let good = "fragment float4 fmain(VOut in [[stage_in]], constant Uniforms& u [[buffer(0)]]) {\n\
+                    return float4(in.uv, u.p[0], 1.0); }";
+        pipe.set_shader(good).expect("the good shader compiles");
+        pipe.shader.as_mut().unwrap().params[0] = 0.5;
+
+        let err = pipe
+            .set_shader("this is not a shader at all")
+            .expect_err("garbage must not compile");
+        assert!(!err.is_empty(), "the compiler's reason comes back");
+        let sh = pipe.shader.as_ref().expect("the previous shader survives");
+        assert_eq!(sh.params[0], 0.5, "and it is the SAME one, params intact");
     }
 }

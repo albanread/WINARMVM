@@ -554,6 +554,49 @@ pub extern "C" fn MacvmRenderScroll(hwnd: i64, x: i64, y: i64) -> i64 {
     })
 }
 
+/// **WG11-W11.** Set this pane's layer-0 background shader from `len` bytes of
+/// fragment source at `src` — Metal as the games ship it, translated through
+/// the dialect shim (`msl.rs`) and compiled with `D3DCompile` here and now.
+/// 0 ok; 1 with the compiler's text in the error slot on failure, in which
+/// case the pane KEEPS what it had — the game degrades to its software look,
+/// never to a dead pane. A null/empty source clears the shader.
+///
+/// # Safety
+/// `src` must point to `len` readable bytes (or be null with `len` 0).
+#[no_mangle]
+pub unsafe extern "C" fn MacvmRenderShader(hwnd: i64, src: *const u8, len: i64) -> i64 {
+    if src.is_null() || len <= 0 {
+        return with_pane(hwnd, OK, |r| {
+            r.pipe.shader = None;
+            set_error("");
+            OK
+        });
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(src, len as usize) };
+    let text = String::from_utf8_lossy(bytes).into_owned();
+    finish(with_pane(
+        hwnd,
+        Err("no renderer is attached to that window".to_string()),
+        |r| r.pipe.set_shader(&text),
+    ))
+}
+
+/// **WG11-W11.** Set the background shader's uniform `p[index]`. Silently a
+/// no-op with no live shader or an out-of-range index — upstream's host does
+/// the same (`if let Some(sh) = g.shader.as_mut()`), and a game driving params
+/// sixty times a second must not spam the error channel.
+#[no_mangle]
+pub extern "C" fn MacvmRenderShaderParam(hwnd: i64, index: i64, value: f64) -> i64 {
+    with_pane(hwnd, OK, |r| {
+        if let Some(sh) = r.pipe.shader.as_mut() {
+            if (0..8).contains(&index) {
+                sh.params[index as usize] = value as f32;
+            }
+        }
+        OK
+    })
+}
+
 /// **The SOC fact, reported.** 1 when the device runs unified memory — one
 /// pool shared by CPU and GPU, which is what Snapdragon X is (LPDDR5x on
 /// package, Adreno on die) — 0 on a discrete adapter, -1 when this window has

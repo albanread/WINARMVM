@@ -1755,17 +1755,28 @@ mod app {
             );
         }
 
-        /// The allowlist is six messages and `WM_PAINT` is not one of them.
+        /// The allowlist is a CLOSED set and this test is its second signature.
         /// Asserted from THIS side of the crate boundary as well, because the
-        /// number six is the design decision — "do not route every message" —
-        /// and a seventh appearing silently is how that decision gets lost.
+        /// count is the design decision — "do not route every message" — and
+        /// an entry appearing silently is how that decision gets lost.
+        ///
+        /// The set has grown with the sprints, deliberately each time: WG2's
+        /// six, WG3's five (WM_NOTIFY and the four modal-loop transitions),
+        /// then WG4's WM_PAINT and WM_DRAWITEM, and the mouse trio plus
+        /// WM_MOUSEWHEEL that FreeCell's dragging and the editor's scrolling
+        /// asked for — all under flag-and-drain, where a storm of arrivals
+        /// coalesces into one drain pass instead of one VM entry each.
         #[test]
         fn the_allowlist_is_the_messages_d1_names() {
             use macvm::runtime::win_wndproc as door;
-            // WG2's six, plus WG3's five: WM_NOTIFY (D3, how list/tree views
-            // speak) and the four modal-loop transitions D2 suppresses on.
-            assert_eq!(door::ALLOWLIST.len(), 11);
+            assert_eq!(door::ALLOWLIST.len(), 17);
             for m in [
+                door::WM_DRAWITEM,
+                door::WM_PAINT,
+                door::WM_MOUSEWHEEL,
+                door::WM_LBUTTONDOWN,
+                door::WM_LBUTTONUP,
+                door::WM_MOUSEMOVE,
                 door::WM_CLOSE,
                 door::WM_DESTROY,
                 door::WM_SIZE,
@@ -1780,10 +1791,9 @@ mod app {
             ] {
                 assert!(door::ALLOWLIST.contains(&m));
             }
-            assert!(!door::ALLOWLIST.contains(&0x000F), "WM_PAINT is WG4's");
             assert!(
-                !door::ALLOWLIST.contains(&0x0200),
-                "WM_MOUSEMOVE arrives in storms and must never cross"
+                !door::ALLOWLIST.contains(&0x0020),
+                "WM_SETCURSOR arrives in storms and must never cross"
             );
             // The drain's own plumbing is handled by the trampoline BEFORE the
             // allowlist and must never be routed to `WinShell`: a heartbeat

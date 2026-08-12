@@ -35,7 +35,7 @@
 //! arrives with the shader rewrite; until then a copper index renders as a flat
 //! colour rather than wrongly, and no game in the target set asks for one.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use macvm::embed::{GameCommand, GameSink};
@@ -470,6 +470,86 @@ static OVERSCAN: AtomicUsize = AtomicUsize::new(0);
 static SCROLL_X: AtomicUsize = AtomicUsize::new(0);
 static SCROLL_Y: AtomicUsize = AtomicUsize::new(0);
 
+// ── WG11-W11: the layer-0 background shader ─────────────────────────────────
+//
+// The sink runs on the primary's thread; the D3D device lives on the UI
+// thread's `thread_local` state. So the arms below only STASH — the pump
+// compiles the source and pushes the params at present time, the same hand-off
+// the copper palette already makes. One consequence, accepted: upstream's
+// Cocoa host compiles synchronously in the command arm, so here a compile
+// error surfaces one frame later and on stderr rather than at the send site.
+// The GAME sees no difference either way — `shader:` answers self on both
+// platforms, and a bad shader leaves the previous one (or none) in force.
+static SHADER_SRC: Mutex<Option<String>> = Mutex::new(None);
+static SHADER_PARAMS: [AtomicU32; 8] = {
+    #[allow(clippy::declare_interior_mutable_const)]
+    const Z: AtomicU32 = AtomicU32::new(0);
+    [Z; 8]
+};
+/// True once a source COMPILED — what gates the copper treatment below, so a
+/// failed compile leaves the pane's software look entirely untouched.
+static SHADER_LIVE: AtomicBool = AtomicBool::new(false);
+/// Set by `stop()`: the pump must drop the renderer's shader before the next
+/// game's first frame, or that game inherits this one's cosmos.
+static SHADER_CLEAR: AtomicBool = AtomicBool::new(false);
+
+/// WG11-W11: `linePaletteAt:` (261) overrides, `(h, h*16 words)`, 0 = unset —
+/// safe as a sentinel because every SET word carries FF alpha. Kept apart from
+/// the SM4 palette plane (`PAL`): that one is guest memory with its own
+/// all-or-nothing copper contract, and a game that only sends commands (as
+/// galaxigans does, for its tractor beam) must not be mistaken for a guest
+/// that took ownership of the whole table.
+static LINE_PAL: Mutex<Option<(u32, Vec<u32>)>> = Mutex::new(None);
+
+fn line_pal_set(h: u32, line: u32, index: u8, word: u32) {
+    if index == 0 || index > 15 || line >= h {
+        return;
+    }
+    if let Ok(mut g) = LINE_PAL.lock() {
+        let entry = g.get_or_insert_with(|| (h, vec![0u32; h as usize * 16]));
+        if entry.0 != h {
+            *entry = (h, vec![0u32; h as usize * 16]);
+        }
+        entry.1[line as usize * 16 + index as usize] = word;
+    }
+}
+
+/// The copper table this frame renders through, or `None` for the flat 256.
+///
+/// Three ways in, in priority order: a guest that wrote SM4 palette memory
+/// owns the whole table (`copper_palette`); a game that sent `linePaletteAt:`
+/// gets its overrides laid over the flat palette's defaults; and a LIVE SHADER
+/// forces the copper layout by itself — upstream's pane always has it, and it
+/// is precisely what makes index 0 a hole the shader can show through.
+fn effective_copper(h: u32, flat: &[u32], shader_live: bool) -> Option<Vec<u32>> {
+    if let Some(cp) = copper_palette() {
+        return Some(cp);
+    }
+    let lp = match LINE_PAL.lock().ok().and_then(|g| g.clone()) {
+        Some((lh, v)) if lh == h => Some(v),
+        _ => None,
+    };
+    if lp.is_none() && !shader_live {
+        return None;
+    }
+    let gb = h as usize * 16;
+    let mut out = vec![0u32; gb + 240];
+    for y in 0..h as usize {
+        for i in 1..16usize {
+            let over = lp.as_ref().map(|v| v[y * 16 + i]).unwrap_or(0);
+            out[y * 16 + i] = if over != 0 {
+                over
+            } else {
+                flat.get(i).copied().unwrap_or(0xFF00_0000)
+            };
+        }
+    }
+    for j in 0..240usize {
+        out[gb + j] = flat.get(16 + j).copied().unwrap_or(0xFF00_0000);
+    }
+    Some(out)
+}
+
 pub fn is_running() -> bool {
     RUNNING.load(Ordering::Relaxed)
 }
@@ -647,6 +727,35 @@ impl GameSink for WinGameSink {
                     }
                 });
             }
+            GameCommand::Shader { src } => {
+                // Fresh params, like upstream's new ShaderPane: they are
+                // driven by `shaderParam:value:` AFTER the compile, and a
+                // recompile must not inherit the last game's scene number.
+                for p in SHADER_PARAMS.iter() {
+                    p.store(0, Ordering::Relaxed);
+                }
+                if let Ok(mut g) = SHADER_SRC.lock() {
+                    *g = Some(src);
+                }
+            }
+            GameCommand::ShaderParam { index, value } => {
+                SHADER_PARAMS[index.min(7)].store(value.to_bits(), Ordering::Relaxed);
+            }
+            GameCommand::LinePalette {
+                line,
+                index,
+                r,
+                g: gg,
+                b,
+            } => {
+                let h = f.h;
+                line_pal_set(
+                    h,
+                    line,
+                    index,
+                    0xFF00_0000 | ((r as u32) << 16) | ((gg as u32) << 8) | b as u32,
+                );
+            }
             GameCommand::StartLoop => RUNNING.store(true, Ordering::Relaxed),
             GameCommand::StopLoop => RUNNING.store(false, Ordering::Relaxed),
             GameCommand::SetFrameRate { fps } => {
@@ -706,6 +815,20 @@ pub fn take_frame() -> Option<(u32, u32, Vec<u8>, Vec<u32>, Option<Vec<u32>>)> {
 pub fn stop() {
     RUNNING.store(false, Ordering::Relaxed);
     TEXT_MODE.store(false, Ordering::Relaxed);
+    // W11: the NEXT game must not inherit this one's cosmos. The renderer's
+    // copy is dropped by the pump (which owns the D3D thread) on the next
+    // frame it uploads — SHADER_CLEAR is that instruction.
+    SHADER_LIVE.store(false, Ordering::Relaxed);
+    SHADER_CLEAR.store(true, Ordering::Relaxed);
+    if let Ok(mut g) = SHADER_SRC.lock() {
+        *g = None;
+    }
+    for p in SHADER_PARAMS.iter() {
+        p.store(0, Ordering::Relaxed);
+    }
+    if let Ok(mut g) = LINE_PAL.lock() {
+        *g = None;
+    }
 }
 
 /// The size the pane currently is, for the input driver's pixel scaling.
@@ -739,6 +862,12 @@ struct RenderApi {
     // W9: the copper contract and the viewport's pan.
     make_copper: unsafe extern "C" fn(i64) -> i64,
     scroll: unsafe extern "C" fn(i64, i64, i64) -> i64,
+    // W11: the layer-0 background shader, and the compiler's reason when it
+    // refuses one — read immediately, printed once, never per frame.
+    shader: unsafe extern "C" fn(i64, *const u8, i64) -> i64,
+    shader_param: unsafe extern "C" fn(i64, i64, f64) -> i64,
+    last_error: unsafe extern "C" fn() -> *const u16,
+    last_error_len: unsafe extern "C" fn() -> i64,
 }
 
 /// Which shape this module last left the renderer's plane in: `true` indexed,
@@ -792,6 +921,18 @@ fn render_api() -> Option<&'static RenderApi> {
                 scroll: std::mem::transmute::<u64, unsafe extern "C" fn(i64, i64, i64) -> i64>(
                     sym("MacvmRenderScroll")?,
                 ),
+                shader: std::mem::transmute::<u64, unsafe extern "C" fn(i64, *const u8, i64) -> i64>(
+                    sym("MacvmRenderShader")?,
+                ),
+                shader_param: std::mem::transmute::<u64, unsafe extern "C" fn(i64, i64, f64) -> i64>(
+                    sym("MacvmRenderShaderParam")?,
+                ),
+                last_error: std::mem::transmute::<u64, unsafe extern "C" fn() -> *const u16>(sym(
+                    "MacvmRenderLastError",
+                )?),
+                last_error_len: std::mem::transmute::<u64, unsafe extern "C" fn() -> i64>(sym(
+                    "MacvmRenderLastErrorLen",
+                )?),
             })
         }
     })
@@ -817,6 +958,36 @@ pub fn upload_and_present(hwnd: i64) -> bool {
         TEXT_MODE.store(true, Ordering::Relaxed);
     }
     let want_indexed = !TEXT_MODE.load(Ordering::Relaxed);
+    // ── W11: the shader hand-off, on the thread that owns the device ──────
+    if SHADER_CLEAR.swap(false, Ordering::Relaxed) {
+        let _ = unsafe { (api.shader)(hwnd, std::ptr::null(), 0) };
+    }
+    if let Some(src) = SHADER_SRC.lock().ok().and_then(|mut g| g.take()) {
+        let ok = unsafe { (api.shader)(hwnd, src.as_ptr(), src.len() as i64) } == 0;
+        SHADER_LIVE.store(ok, Ordering::Relaxed);
+        if !ok {
+            // Once, at compile time — never per frame. The pane keeps its
+            // software look; the compiler's reason goes to whoever is porting
+            // the shader, which is the only party who can act on it.
+            let reason = unsafe {
+                let n = (api.last_error_len)().max(0) as usize;
+                let p = (api.last_error)();
+                if p.is_null() || n == 0 {
+                    String::new()
+                } else {
+                    String::from_utf16_lossy(std::slice::from_raw_parts(p, n))
+                }
+            };
+            eprintln!("macvm-win: game shader failed to compile: {reason}");
+        }
+    }
+    let shader_live = SHADER_LIVE.load(Ordering::Relaxed);
+    if shader_live {
+        for (i, p) in SHADER_PARAMS.iter().enumerate() {
+            let v = f32::from_bits(p.load(Ordering::Relaxed));
+            unsafe { (api.shader_param)(hwnd, i as i64, v as f64) };
+        }
+    }
     // SAFETY: the renderer's own contract — ask for the plane (which creates or
     // resizes it), then for whichever buffers this mode uses, and write within
     // the sizes just requested. Addresses are re-asked every frame because a
@@ -843,7 +1014,9 @@ pub fn upload_and_present(hwnd: i64) -> bool {
             // W9: a guest that wrote a palette gets the COPPER contract —
             // index 0 transparent, 1..15 per-scanline, 16..255 global — and the
             // shader's own scroll. Otherwise the flat 256 path is untouched.
-            let copper = copper_palette();
+            // W11 widened "gets the copper contract" to line-palette commands
+            // and to a live shader, whose holes are the whole point.
+            let copper = effective_copper(h, &palette, shader_live);
             if copper.is_some() {
                 (api.make_copper)(hwnd);
                 (api.scroll)(
@@ -880,14 +1053,19 @@ pub fn upload_and_present(hwnd: i64) -> bool {
             // per-scanline here its bars came out black while its HUD read
             // fine. The arithmetic is PixelPlane::palette_slot's, in the one
             // other place that has to agree with it.
-            if let Some(cp) = copper_palette() {
+            if let Some(cp) = effective_copper(h, &palette, shader_live) {
                 let gb = h as usize * 16;
                 let dst = std::slice::from_raw_parts_mut(base as *mut u32, w as usize * h as usize);
                 for y in 0..h as usize {
                     for x in 0..w as usize {
                         let ci = indices[y * w as usize + x];
                         let word = if ci == 0 {
-                            0xFF00_0000
+                            // W11: over a live shader, index 0 is written as
+                            // TRANSPARENT and the renderer blends this plane —
+                            // the CPU-resolved twin of `ps_indexed`'s discard.
+                            // With no shader it stays opaque black, upstream's
+                            // own backdrop behind an empty pane.
+                            if shader_live { 0x0000_0000 } else { 0xFF00_0000 }
                         } else if ci < 16 {
                             cp.get(y * 16 + ci as usize).copied().unwrap_or(0xFF00_0000)
                         } else {
@@ -898,6 +1076,15 @@ pub fn upload_and_present(hwnd: i64) -> bool {
                 }
                 draw_sprites(dst, w, h);
                 draw_text_plane(dst, w, h, &palette);
+                // The legacy 5x7 overlay tops the stack, exactly as in the
+                // non-copper branch below — upstream's galaxigans writes its
+                // whole HUD through it, and W11's copper treatment routed that
+                // game HERE, where the overlay had never been composited
+                // because the Copper demo (this branch's author) uses the SM1
+                // cell grid instead.
+                if let Some(ov) = overlay.as_deref() {
+                    crate::text_overlay::composite_over(dst, ov);
+                }
                 let _ = (api.clear)(hwnd, 0x00FF_FFFF, 0x0100_0000);
                 return (api.present)(hwnd) == 0;
             }

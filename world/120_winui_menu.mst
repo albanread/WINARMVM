@@ -118,6 +118,9 @@ Object subclass: WinShell [
             add: (Array with: 2026 with: 'Plasma' with: #menuPlasma with: true);
             add: (Array with: 2027 with: 'Text Pages' with: #menuTextPages with: true);
             add: (Array with: 2028 with: 'Copper' with: #menuCopper with: true);
+            "W10 landed sprites, W11 the layer-0 shader: the full games run."
+            add: (Array with: 2030 with: 'Breakout' with: #menuBreakout with: true);
+            add: (Array with: 2031 with: 'Galaxigans' with: #menuGalaxigans with: true);
             add: (Array with: 0 with: '-' with: nil with: true);
             add: (Array with: 2029 with: 'Stop Demo' with: #menuStopDemo with: true);
             yourself).
@@ -241,6 +244,8 @@ Object subclass: WinShell [
     WinShell class >> menuPlasma    [ ^self launchDemo: 'GamePane reset. Plasma launch. 1' named: 'Plasma' ]
     WinShell class >> menuCopper    [ ^self launchDemo: 'GamePane reset. Copper launch. 1' named: 'Copper' ]
     WinShell class >> menuTextPages [ ^self launchDemo: 'GamePane reset. TextPages launch. 1' named: 'Text Pages' ]
+    WinShell class >> menuBreakout  [ ^self launchDemo: 'GamePane reset. Breakout launch. 1' named: 'Breakout' ]
+    WinShell class >> menuGalaxigans [ ^self launchDemo: 'GamePane reset. Galaxigans launch. 1' named: 'Galaxigans' ]
 
     WinShell class >> menuStopDemo [
         "`GamePane reset` is the same verb Escape sends, and the host stops the
