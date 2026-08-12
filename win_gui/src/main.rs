@@ -708,7 +708,7 @@ mod app {
                                 l,
                                 world_dir(),
                                 std::sync::Arc::new(wake_ui_thread),
-                                None,
+                                crate::boot::PrimarySeed::none(),
                             ) {
                                 Ok(()) => {
                                     format!("OK restart hosted_id {} -> {}", before, l.hosted_id)
@@ -1080,7 +1080,7 @@ mod app {
                                 l,
                                 world_dir(),
                                 std::sync::Arc::new(wake_ui_thread),
-                                Some(path.clone()),
+                                crate::boot::PrimarySeed::file(path.clone()),
                             ) {
                                 Ok(()) => format!("filed in {}", path.display()),
                                 Err(e) => format!("file-in FAILED: {}", e.msg),
@@ -1089,6 +1089,31 @@ mod app {
                         let _ = guarded_exec(
                             vm,
                             &format!("WinShell appendTranscript: 'editor: {msg}'."),
+                        );
+                    }
+                    // WG9-2: LOAD THE TEST CORPUS — a fresh world, then the
+                    // world's own SUnit classes, so the Tests view has the real
+                    // 8000-assertion corpus to run rather than an empty image.
+                    // Same door and the same reason as file-in: it joins the
+                    // primary's thread.
+                    if macvm::runtime::win_wndproc::take_loadtests_requested() {
+                        let vm: &mut VmHandle = unsafe { &mut *vmp };
+                        let msg = match link.as_mut() {
+                            None => "loading tests needs the two-VM path".to_string(),
+                            Some(l) => match crate::boot::restart_primary(
+                                vm,
+                                l,
+                                world_dir(),
+                                std::sync::Arc::new(wake_ui_thread),
+                                crate::boot::PrimarySeed::tests(),
+                            ) {
+                                Ok(()) => "test corpus loaded into a fresh world".to_string(),
+                                Err(e) => format!("loading the test corpus FAILED: {}", e.msg),
+                            },
+                        };
+                        let _ = guarded_exec(
+                            vm,
+                            &format!("WinShell testCorpusArrived: 'tests: {msg}'."),
                         );
                     }
                     if crate::debugger::take_halt_arrived() {

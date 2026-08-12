@@ -38,7 +38,27 @@ Object subclass: TestRunner [
         out := OrderedCollection new.
         ClassMirror allClasses do: [ :c |
             (c ~~ TestCase and: [ self class: c inheritsFrom: TestCase ])
-                ifTrue: [ out add: c ] ].
+                ifTrue: [
+                    "AND IT MUST WANT TO RUN HERE. `isEnabled` is how a class
+                     declines an image it cannot survive — the POSIX I/O tests
+                     on Windows call `Posix close: -1`, which does not fail,
+                     it ENDS THE PROCESS. Discovery that ignored this took the
+                     GUI down the first time it ran the world's own corpus."
+                    ([ c isEnabled ] on: Error do: [ :e | true ])
+                        ifTrue: [ out add: c ] ] ].
+        ^out
+    ]
+
+    TestRunner class >> disabledTestClasses ^ <OrderedCollection> [
+        "The ones that declined, so a Tests view can SAY which and why rather
+         than silently showing a shorter list than the image contains."
+        | out |
+        out := OrderedCollection new.
+        ClassMirror allClasses do: [ :c |
+            (c ~~ TestCase and: [ self class: c inheritsFrom: TestCase ])
+                ifTrue: [
+                    ([ c isEnabled ] on: Error do: [ :e | true ])
+                        ifFalse: [ out add: c ] ] ].
         ^out
     ]
 

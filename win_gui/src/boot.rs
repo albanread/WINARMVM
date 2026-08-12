@@ -133,7 +133,7 @@ pub struct PrimaryLink {
 fn spawn_primary(
     world_dir: PathBuf,
     wake: InboxWakeFn,
-    extra: Option<PathBuf>,
+    seed: PrimarySeed,
 ) -> Result<(u32, HostedInbox, InboxSender, JoinHandle<()>, MetricsSnapshot, Arc<AtomicBool>), VmError>
 {
     let (ready_tx, ready_rx) = mpsc::channel::<Result<(u32, HostedInbox, InboxSender), VmError>>();
@@ -151,7 +151,7 @@ fn spawn_primary(
                 ready_tx,
                 metrics_for_primary,
                 stop_for_primary,
-                extra,
+                seed,
             )
         })
         .map_err(|e| VmError {
@@ -196,7 +196,7 @@ pub fn restart_primary(
     link: &mut PrimaryLink,
     world_dir: PathBuf,
     wake: InboxWakeFn,
-    extra: Option<PathBuf>,
+    seed: PrimarySeed,
 ) -> Result<(), VmError> {
     // 1. Ask the old beat to finish, and WAIT for it. `pumpInbox:` returns
     //    every beat by design (that is the seam D1 kept for exactly this), so
@@ -208,7 +208,7 @@ pub fn restart_primary(
 
     // 2. A fresh primary, wired the same way a boot wires one.
     let (hosted_id, inbox, to_primary, thread, metrics, stop) =
-        spawn_primary(world_dir, wake, extra)?;
+        spawn_primary(world_dir, wake, seed)?;
 
     // 3. Point the UI worker at it. Anything still holding the OLD id or the
     //    OLD sender is now stale by construction, which is the point: a
@@ -230,7 +230,7 @@ pub fn handshake_wire_vms(
     wake: InboxWakeFn,
 ) -> Result<WiredVms, VmError> {
     let (hosted_id, hosted_inbox, to_primary, primary_thread, metrics, stop) =
-        spawn_primary(world_dir.clone(), wake, None)?;
+        spawn_primary(world_dir.clone(), wake, PrimarySeed::none())?;
 
     // Boot the UI worker VM IN PLACE on THIS thread — boot must run on the
     // driving thread, because its foreign-fault handler (P2's VEH) and its
@@ -272,7 +272,7 @@ fn primary_thread_main(
     ready_tx: mpsc::Sender<Result<(u32, HostedInbox, InboxSender), VmError>>,
     metrics: MetricsSnapshot,
     stop: Arc<AtomicBool>,
-    extra: Option<PathBuf>,
+    seed: PrimarySeed,
 ) {
     // The persistent primary — the environment's state, the VM a user would
     // call "their image". `ExitThread` (boot's default) is right here: a
@@ -296,10 +296,17 @@ fn primary_thread_main(
     // down with it — the whole point of file-in is iterating on code that does
     // not compile yet, and a GUI that vanished on a syntax error would be
     // useless for exactly the case it exists for.
-    if let Some(path) = extra.as_ref() {
+    if let Some(path) = seed.file.as_ref() {
         match primary.run_file(path) {
             Ok(()) => eprintln!("macvm-winui: filed in {}", path.display()),
             Err(e) => eprintln!("macvm-winui: file-in FAILED for {}: {}", path.display(), e.msg),
+        }
+    }
+    // WG9-2: THE TEST CORPUS, on the same "fresh world, then ..." principle.
+    if seed.test_corpus {
+        match load_test_corpus(&mut primary, &world_dir) {
+            Ok(n) => eprintln!("macvm-winui: test corpus loaded, {n} files"),
+            Err(e) => eprintln!("macvm-winui: test corpus FAILED: {e}"),
         }
     }
 
@@ -422,3 +429,79 @@ fn primary_thread_main(
 /// idle cadence at which the loop returns to Rust so a supervisor can observe
 /// liveness, and the cadence on which service deadlines are swept.
 const BEAT_MS: u64 = 250;
+
+/// What a freshly booted primary loads ON TOP of `world.list`.
+///
+/// One value rather than two positional `Option`s because the two reasons to
+/// re-seed a primary — File In (WG6c-3) and the test corpus (WG9-2) — are
+/// otherwise indistinguishable at the call site, and a boolean argument at a
+/// `restart_primary(...)` call reads as noise exactly where it decides what the
+/// user's image contains.
+#[derive(Clone, Debug, Default)]
+pub struct PrimarySeed {
+    /// A single file to run after boot — File In's "a fresh world, THEN your
+    /// file". Reported and survived on error: iterating on code that does not
+    /// compile yet is precisely what File In is for.
+    pub file: Option<PathBuf>,
+    /// Load `world/tests/tests.list`'s classes, so the image contains the
+    /// world's own SUnit corpus and the Tests view has something real to run.
+    pub test_corpus: bool,
+}
+
+impl PrimarySeed {
+    pub fn none() -> Self {
+        Self::default()
+    }
+    pub fn file(path: PathBuf) -> Self {
+        Self {
+            file: Some(path),
+            test_corpus: false,
+        }
+    }
+    pub fn tests() -> Self {
+        Self {
+            file: None,
+            test_corpus: true,
+        }
+    }
+}
+
+/// Load the world's own test corpus into `vm`, answering how many files loaded.
+///
+/// **`tests.list` MINUS its runner.** The list's last entry is
+/// `99_run_all.mst`, which ends in `TestRunner report` → `Smalltalk quit:` —
+/// right for a `cargo test` run and fatal here, where it would take the
+/// primary (and with it the user's image) down the moment the corpus finished
+/// loading. The classes are what this wants; running them is the Tests view's
+/// job, through `TestRunner runAllReporting`, which answers instead of exiting
+/// (`world/86_sunit_runner.mst`).
+///
+/// ONE LIST REMAINS THE SOURCE OF TRUTH. A second `corpus.list` would be a copy
+/// to keep in step with every test file anyone adds, and the first time it
+/// drifted the Tests view would quietly stop running something.
+///
+/// A FILE THAT FAILS IS REPORTED AND SURVIVED, like File In's: a broken test
+/// file must not cost the user their image, and the count answered here is the
+/// honest number that loaded.
+fn load_test_corpus(vm: &mut VmHandle, world_dir: &std::path::Path) -> Result<usize, String> {
+    let dir = world_dir.join("tests");
+    let list = dir.join("tests.list");
+    let src = std::fs::read_to_string(&list)
+        .map_err(|e| format!("cannot read {}: {e}", list.display()))?;
+    let mut n = 0usize;
+    for raw in src.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') || line == "99_run_all.mst" {
+            continue;
+        }
+        // Entries are relative to the list's own directory, and `../` entries
+        // (the winui layer) resolve into `world/` — the same rule `load_list`
+        // follows, restated here because this loop is not `load_list`.
+        let path = dir.join(line);
+        match vm.run_file(&path) {
+            Ok(()) => n += 1,
+            Err(e) => eprintln!("macvm-winui: test corpus: {line} FAILED: {}", e.msg),
+        }
+    }
+    Ok(n)
+}

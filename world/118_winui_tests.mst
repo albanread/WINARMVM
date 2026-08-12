@@ -91,6 +91,51 @@ Object subclass: WinShell [
         ^true
     ]
 
+    "── the corpus ───────────────────────────────────────────────────────
+     The primary boots `world.list`, which has TestCase and the runner in it but
+     no test CLASSES — those live in `world/tests/`, which only the cargo
+     harness ever loaded. So a freshly booted shell honestly reports `no test
+     classes in the image`, and the Tests view had nothing real to run.
+
+     THE CORPUS IS LOADED BY RESTARTING, on File In's contract: a fresh world,
+     then `tests.list`'s classes on top. Not by shipping source over the seam —
+     ninety-odd files through a doit would be slow, would leave the image
+     half-loaded if one failed, and would put the load order in this file
+     instead of in the list that already owns it.
+
+     WHY IT IS A VERB and not automatic: a shell that always carried the corpus
+     would put seventy classes nobody asked for into every image, and slow every
+     boot and every File In to do it."
+
+    WinShell class >> loadTestCorpus ^ <Boolean> [
+        "POSTED, not sent — the host joins the primary's thread to do this, and
+         a SendMessage would run it inside this VM entry. Same door as File In,
+         one message number along."
+        self isOpen ifFalse: [ ^false ].
+        self appendTranscript: 'tests: loading the world corpus (fresh world + tests.list)'.
+        TestPending := true.
+        self renderTests.
+        ^WinApi asBool: (WinApi
+            postMessage: self hwndValue
+            message: (16r8000 + 9)
+            wParam: 0
+            lParam: 0)
+    ]
+
+    WinShell class >> testCorpusArrived: aString <String> [
+        "The host is done restarting. The image is NEW, so anything this view
+         remembered about the old one is gone with it — clear the rows rather
+         than leave a report describing classes that no longer exist."
+        TestPending := false.
+        TestRows := OrderedCollection new.
+        TestRuns := 0.
+        self appendTranscript: aString.
+        self activeView == self testsViewName
+            ifTrue: [ self runTests ]
+            ifFalse: [ self renderTests ].
+        ^self
+    ]
+
     WinShell class >> testReplyArrived: aString <String> [
         TestPending := false.
         TestRuns := self testRuns + 1.
@@ -249,6 +294,13 @@ Object subclass: WinShell [
         out := OrderedCollection new.
         #(
             'No run yet. WinShell runTests runs every TestCase in the image.'
+            ''
+            'For the WORLD''s own corpus - ~70 classes, 8000+ assertions -'
+            'evaluate:    WinShell loadTestCorpus'
+            'It restarts the primary from a fresh world with world/tests/ on'
+            'top, then runs them. A verb, not automatic: a shell that always'
+            'carried the corpus would put 70 classes nobody asked for into'
+            'every image.'
             ''
             'Tests run in the PRIMARY VM, where your objects live - not in the'
             'VM drawing this window. That is why the suite can take its time'

@@ -219,6 +219,25 @@ const _WM_APP_DRAIN_IS_PRIVATE: () = assert!(WM_APP_DRAIN >= 0x8000);
 pub const WM_APP_FILEIN: u32 = 0x8000 + 8;
 const _WM_APP_FILEIN_IS_PRIVATE: () = assert!(WM_APP_FILEIN >= 0x8000);
 
+/// WINARM (WG9-2): **Load the test corpus** — the guest asking the host to
+/// restart the primary with `world/tests/tests.list`'s classes loaded on top of
+/// the world.
+///
+/// A private message for the same reason [`WM_APP_FILEIN`] is: the work is
+/// "join the primary's thread and boot a new one", which a wndproc must never
+/// do. It carries no payload — the corpus's location is derived on the host
+/// side from the world directory, exactly as file-in's path is.
+pub const WM_APP_LOADTESTS: u32 = 0x8000 + 9;
+const _WM_APP_LOADTESTS_IS_PRIVATE: () = assert!(WM_APP_LOADTESTS >= 0x8000);
+
+/// Set by the trampoline when a `WM_APP_LOADTESTS` arrives; taken by the pump.
+static LOADTESTS_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Taken by the pump between dispatches, like [`take_filein_requested`].
+pub fn take_loadtests_requested() -> bool {
+    LOADTESTS_REQUESTED.swap(false, Ordering::AcqRel)
+}
+
 /// Set by the trampoline when a `WM_APP_FILEIN` arrives; taken by the pump.
 static FILEIN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
@@ -921,6 +940,10 @@ pub extern "system" fn macvm_wndproc(hwnd: isize, msg: u32, wparam: usize, lpara
     // while it waits on another VM.
     if msg == WM_APP_FILEIN {
         FILEIN_REQUESTED.store(true, Ordering::Release);
+        return 0;
+    }
+    if msg == WM_APP_LOADTESTS {
+        LOADTESTS_REQUESTED.store(true, Ordering::Release);
         return 0;
     }
     if msg == WM_TIMER {

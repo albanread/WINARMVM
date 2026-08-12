@@ -117,6 +117,26 @@ Object subclass: TestCase [
         Transcript cr.
         [ aBlock value ] ensure: [ ]
     ]
+    TestCase class >> isEnabled ^ <Boolean> [
+        "Should this class run IN THIS IMAGE? True unless a subclass says
+         otherwise.
+
+         WG9-2, and it exists because discovery found a real hole. The world's
+         platform gating lived in `99_run_all.mst` as guards around each
+         `TestRunner run:` line — bookkeeping a SCRIPT can see and a DISCOVERY
+         cannot. `TestRunner allTestClasses` sweeps the image by superclass
+         chain, found `PosixIoTests` on Windows, and ran `Posix close: -1`,
+         which took the whole process down: a GUI that vanished when you
+         clicked Run Tests.
+
+         So the condition belongs ON THE CLASS, where anything that can find
+         the class can also find its answer — a script, a Tests view, a future
+         runner nobody has written. The runner script's guards stay as they
+         are; they are now a second expression of the same fact rather than the
+         only one."
+        ^true
+    ]
+
     TestCase class >> runWith: aResult [
         | c |
         c := self new.

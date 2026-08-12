@@ -22,6 +22,13 @@
  above this file."
 
 TestCase subclass: WinUiShellWg4Tests [
+    WinUiShellWg4Tests class >> isEnabled ^ <Boolean> [
+        "WG9-2: the gate that used to live only in
+         `99_run_all.mst`'s guards, moved here so DISCOVERY can see
+         it too (`TestRunner allTestClasses`). platform-gated; see 99_run_all.mst's bookkeeping note."
+        ^Smalltalk platformName == #windows
+    ]
+
 
     runAll [
         "Layout first: it is what the WG4 row is actually about, and it is the

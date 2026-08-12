@@ -132,6 +132,13 @@ Object subclass: NativeBuffer [
 ]
 
 TestCase subclass: WinIoTests [
+    WinIoTests class >> isEnabled ^ <Boolean> [
+        "WG9-2: the gate that used to live only in
+         `99_run_all.mst`'s guards, moved here so DISCOVERY can see
+         it too (`TestRunner allTestClasses`). platform-gated; see 99_run_all.mst's bookkeeping note."
+        ^Smalltalk platformName == #windows
+    ]
+
     runAll [
         self runTest: #testCreateWriteReadRoundTrip do: [ self testCreateWriteReadRoundTrip ].
         self runTest: #testLseekEndReportsSize do: [ self testLseekEndReportsSize ].
