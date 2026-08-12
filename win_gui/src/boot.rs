@@ -371,6 +371,10 @@ fn primary_thread_main(
     // here, on this thread — and the UI thread is free to keep pumping while it
     // happens. That is §2.2's whole point, and D1's second gate claim.
     let mut beats: u64 = 0;
+    // WG11-W3: the frame deadline. The Mac's equivalent is a main-thread
+    // NSTimer at the requested fps; on Windows it belongs on this thread,
+    // because this is the one that can `exec` on the primary.
+    let mut next_frame = std::time::Instant::now();
     loop {
         // WG7-3: the ONE way this loop ends. It is `loop {}` by design — the
         // primary parks for the process lifetime — so a restart needs a seam,
@@ -419,12 +423,36 @@ fn primary_thread_main(
             }
             continue;
         }
-        if let Err(e) = primary.exec(&format!("Worker pumpInbox: {BEAT_MS}.")) {
+        // WG11-W3: ESCAPE, THEN THE FRAME. This is the only thread that may
+        // `exec` on the primary, and `GamePane`/`Life` exist only in the
+        // PRIMARY's image — a step sent from the UI pump would not merely be
+        // slow, it would be a doesNotUnderstand. So the frame clock lives here
+        // rather than on a WM_TIMER.
+        if crate::game::escape_pressed() {
+            // Host-side stop, because `GamePane class >> reset` sends no
+            // primitive and therefore emits no StopLoop, and instance-side
+            // `GamePane>>stop` is not something the class understands.
+            crate::game::stop();
+            let _ = primary.exec("GamePane reset");
+        } else if crate::game::is_running() && std::time::Instant::now() >= next_frame {
+            // SINGLE-OUTSTANDING, in two halves. SNAP, never accumulate: the
+            // deadline is set from NOW, so a slow frame DROPS the ticks it
+            // missed instead of queueing them. And `exec` is SYNCHRONOUS, so
+            // the next step cannot even be asked for until this one's `present`
+            // has been emitted.
+            next_frame = std::time::Instant::now() + crate::game::frame_period();
+            let _ = primary.exec(&crate::game::step_doit());
+        }
+        // A RUNNING GAME GETS A FAST BEAT. Parking for BEAT_MS between frames
+        // would cap the rate at the beat regardless of how quick a frame is;
+        // the Mac spins fast for the same reason while a pane is active.
+        let beat = if crate::game::is_running() { 4 } else { BEAT_MS };
+        if let Err(e) = primary.exec(&format!("Worker pumpInbox: {beat}.")) {
             // An ordinary guest `error:` inside a served request is recovered
             // by the default policy and never reaches here; anything that does
             // is worth saying out loud rather than spinning silently.
             eprintln!("macvm-winui: primary beat: {e}");
-            std::thread::sleep(std::time::Duration::from_millis(BEAT_MS));
+            std::thread::sleep(std::time::Duration::from_millis(beat));
         }
     }
 }

@@ -40,6 +40,12 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use macvm::embed::{GameCommand, GameSink};
 
+use crate::text_overlay::TextOverlay;
+
+// WG11-W3: the input driver lives in its own module; re-exported here so
+// the pump and the primary's loop have one name for "the game host".
+pub use crate::game_input::{escape_pressed, frame_period, set_pane_hwnd, step_doit};
+
 /// Upstream's default pane. `resizeTo:by:` changes it; every game in the
 /// corpus opens at this size.
 const DEF_W: u32 = 320;
@@ -53,6 +59,10 @@ pub struct GameFrame {
     pub indices: Vec<u8>,
     /// 256 BGRA words — the renderer's format, so the upload is a memcpy.
     pub palette: Vec<u32>,
+    /// **W4.** The retained 5x7 RGB text layer, drawn ABOVE the indexed pane.
+    /// It lives INSIDE the frame, under the same lock, so a game's HUD update
+    /// cannot tear across a frame the pump is presenting.
+    pub text: TextOverlay,
     /// Bumped by `Present`; the pump uploads when it moves.
     pub generation: u64,
 }
@@ -66,6 +76,7 @@ impl GameFrame {
             // Opaque black, so an index nobody set is visibly empty rather
             // than whatever the allocator left behind.
             palette: vec![0xFF00_0000u32; 256],
+            text: TextOverlay::new(w, h),
             generation: 0,
         }
     }
@@ -143,6 +154,9 @@ impl GameFrame {
         self.w = w;
         self.h = h;
         self.indices = vec![0u8; (w * h) as usize];
+        // A real resize LOSES the ink, matching upstream: rebuilding the pane
+        // there drops the whole NativeGame and builds a fresh TextOverlay.
+        self.text.resize(w, h);
     }
 }
 
@@ -224,9 +238,34 @@ impl GameSink for WinGameSink {
                 let n = data.len().min(f.indices.len());
                 f.indices[..n].copy_from_slice(&data[..n]);
             }
+            // ── W4: the retained 5x7 text overlay ────────────────────────
+            // Primitive 254 packs its colour as one 0xRRGGBB SmallInteger (to
+            // stay inside MAX_PRIMITIVE_ARGS) and unpacks it before emitting,
+            // so the command already carries separate bytes.
+            GameCommand::Text {
+                x,
+                y,
+                text,
+                r,
+                g: gg,
+                b,
+                scale,
+            } => f.text.draw_text(x, y, &text, r, gg, b, scale),
+            // The ONLY eraser. `Present` must never clear it: retention is the
+            // contract `45a_life.mst`'s HUD depends on.
+            GameCommand::TextClear => f.text.clear(),
             GameCommand::Present => {
                 PRESENTED.fetch_add(1, Ordering::Release);
                 f.generation += 1;
+                // Never post while holding the frame the pump is about to take.
+                drop(f);
+                // WAKE THE PUMP. Without this it sits in `GetMessageW` and the
+                // upload is paced by the shell's 50 ms heartbeat — 20 fps by
+                // accident, with up to 50 ms of latency. The Mac wakes main on
+                // every emit; waking on Present is the right adaptation here,
+                // because this host buffers the whole frame on the CPU and only
+                // Present makes it showable.
+                crate::app::wake_ui_thread();
             }
             GameCommand::StartLoop => RUNNING.store(true, Ordering::Relaxed),
             GameCommand::StopLoop => RUNNING.store(false, Ordering::Relaxed),
@@ -244,7 +283,7 @@ impl GameSink for WinGameSink {
 }
 
 /// Copy the current frame out for the pump. Answers `(w, h, indices, palette)`.
-pub fn take_frame() -> Option<(u32, u32, Vec<u8>, Vec<u32>)> {
+pub fn take_frame() -> Option<(u32, u32, Vec<u8>, Vec<u32>, Option<Vec<u32>>)> {
     let presented = PRESENTED.load(Ordering::Acquire);
     if presented == UPLOADED.load(Ordering::Relaxed) {
         return None;
@@ -252,7 +291,26 @@ pub fn take_frame() -> Option<(u32, u32, Vec<u8>, Vec<u32>)> {
     let g = shared();
     let f = g.lock().ok()?;
     UPLOADED.store(presented, Ordering::Relaxed);
-    Some((f.w, f.h, f.indices.clone(), f.palette.clone()))
+    // The overlay is snapshotted under the SAME lock as the pixels, and only
+    // when it has ink — a game that never draws text pays nothing for it.
+    let overlay = if f.text.has_ink() {
+        Some(f.text.pixels().to_vec())
+    } else {
+        None
+    };
+    Some((f.w, f.h, f.indices.clone(), f.palette.clone(), overlay))
+}
+
+/// End the session host-side, the way the Mac's `close_window` does.
+///
+/// LOAD-BEARING. `GamePane class >> reset` runs the reset block and nils the
+/// step block, but it sends no primitive — so it emits no `StopLoop`, and
+/// `StopLoop` comes only from INSTANCE-side `GamePane>>stop`, which the class
+/// does not understand. Without this, Escape leaves `RUNNING` true and the
+/// primary steps a nil block at 60 Hz forever on the fast beat.
+pub fn stop() {
+    RUNNING.store(false, Ordering::Relaxed);
+    TEXT_MODE.store(false, Ordering::Relaxed);
 }
 
 /// The size the pane currently is, for the input driver's pixel scaling.
@@ -279,7 +337,22 @@ struct RenderApi {
     palette: unsafe extern "C" fn(i64) -> i64,
     present: unsafe extern "C" fn(i64) -> i64,
     clear: unsafe extern "C" fn(i64, i64, i64) -> i64,
+    // W4: the three the text path needs.
+    drop_plane: unsafe extern "C" fn(i64) -> i64,
+    stride: unsafe extern "C" fn(i64) -> i64,
+    palette_len: unsafe extern "C" fn(i64) -> i64,
 }
+
+/// Which shape this module last left the renderer's plane in: `true` indexed,
+/// `false` direct BGRA. A plane is indexed XOR direct and `make_indexed` is
+/// one-way, so a change of mind costs a drop first. A stale belief is harmless:
+/// dropping a plane that is already gone is a no-op, and `MacvmRenderPixelPlane`
+/// always rebuilds non-indexed.
+static PLANE_INDEXED: AtomicBool = AtomicBool::new(true);
+/// Once a session has drawn text it keeps the direct path for the rest of the
+/// session. Sticky because the mode belongs to the GAME, not to a frame — a HUD
+/// that blinked would otherwise reallocate the plane twice a blink.
+static TEXT_MODE: AtomicBool = AtomicBool::new(false);
 
 #[allow(unsafe_code)]
 fn render_api() -> Option<&'static RenderApi> {
@@ -306,6 +379,15 @@ fn render_api() -> Option<&'static RenderApi> {
                 clear: std::mem::transmute::<u64, unsafe extern "C" fn(i64, i64, i64) -> i64>(
                     sym("MacvmRenderClear")?,
                 ),
+                drop_plane: std::mem::transmute::<u64, unsafe extern "C" fn(i64) -> i64>(sym(
+                    "MacvmRenderDropPixelPlane",
+                )?),
+                stride: std::mem::transmute::<u64, unsafe extern "C" fn(i64) -> i64>(sym(
+                    "MacvmRenderPixelStride",
+                )?),
+                palette_len: std::mem::transmute::<u64, unsafe extern "C" fn(i64) -> i64>(sym(
+                    "MacvmRenderPaletteLen",
+                )?),
             })
         }
     })
@@ -322,35 +404,69 @@ pub fn upload_and_present(hwnd: i64) -> bool {
         return false;
     }
     let Some(api) = render_api() else { return false };
-    let Some((w, h, indices, palette)) = take_frame() else {
+    let Some((w, h, indices, palette, overlay)) = take_frame() else {
         return false;
     };
+    if overlay.is_some() {
+        TEXT_MODE.store(true, Ordering::Relaxed);
+    }
+    let want_indexed = !TEXT_MODE.load(Ordering::Relaxed);
     // SAFETY: the renderer's own contract — ask for the plane (which creates or
-    // resizes it), then for the index buffer and the palette, and write within
+    // resizes it), then for whichever buffers this mode uses, and write within
     // the sizes just requested. Addresses are re-asked every frame because a
     // resize reallocates them; caching one across a resize is the dangling
     // pointer this contract exists to prevent.
     unsafe {
-        if (api.plane)(hwnd, w as i64, h as i64) == 0 {
+        if PLANE_INDEXED.swap(want_indexed, Ordering::Relaxed) != want_indexed {
+            // A plane cannot change shape in place, so it is dropped and
+            // rebuilt. Once per session, not once per frame.
+            let _ = (api.drop_plane)(hwnd);
+        }
+        let base = (api.plane)(hwnd, w as i64, h as i64);
+        if base == 0 {
             return false;
         }
-        let ix = (api.index_plane)(hwnd);
-        if ix == 0 {
-            return false;
+        if want_indexed {
+            // THE FAST PATH: the GPU expands indices through the palette, so a
+            // palette cycle stays a 1KB upload.
+            let ix = (api.index_plane)(hwnd);
+            if ix == 0 {
+                return false;
+            }
+            std::ptr::copy_nonoverlapping(indices.as_ptr(), ix as *mut u8, indices.len());
+            let pal = (api.palette)(hwnd);
+            if pal == 0 {
+                return false;
+            }
+            // ASKED, not assumed — W2 made a copper table `h*16+240` entries and
+            // added this entry point precisely so a caller cannot write its
+            // globals into scanline 16's per-line colours.
+            let n = ((api.palette_len)(hwnd).max(0) as usize).min(palette.len());
+            std::ptr::copy_nonoverlapping(palette.as_ptr(), pal as *mut u32, n);
+        } else {
+            // THE TEXT PATH. The overlay is RGB and the plane is indices, and an
+            // indexed plane's `bytes` is dead memory — so the resolve the
+            // renderer would do happens HERE, with the glyphs composited on top,
+            // and the result is handed over as direct BGRA. One pass over w*h
+            // words. Rejected alternative: rasterising glyphs into the index
+            // buffer against reserved palette slots — collision-free for Life,
+            // but it caps text at N colours and diverges from upstream, where
+            // Text is true RGB.
+            let stride = (api.stride)(hwnd);
+            if stride <= 0 {
+                return false;
+            }
+            crate::text_overlay::resolve_composite_into(
+                base as *mut u8,
+                stride as usize,
+                w,
+                h,
+                &indices,
+                &palette,
+                overlay.as_deref(),
+            );
         }
-        std::ptr::copy_nonoverlapping(indices.as_ptr(), ix as *mut u8, indices.len());
-        let pal = (api.palette)(hwnd);
-        if pal == 0 {
-            return false;
-        }
-        std::ptr::copy_nonoverlapping(palette.as_ptr(), pal as *mut u32, palette.len());
-        // A GAME OWNS THE WHOLE PANE. The Canvas's own demos leave a cell grid
-        // behind — the plasma HUD sat over the first game frame ever presented
-        // here, which is the shell talking over the guest. Clearing to
-        // BG_TRANSPARENT (0x0100_0000) makes every cell skip its background
-        // fill and draw a blank glyph, so the grid is present and invisible
-        // and the game's pixels are all there is. Cheap: a memset of
-        // cols*rows*12 bytes, once a frame.
+        // A GAME OWNS THE WHOLE PANE.
         let _ = (api.clear)(hwnd, 0x00FF_FFFF, 0x0100_0000);
         (api.present)(hwnd) == 0
     }

@@ -116,6 +116,8 @@ fn main() {
 mod boot;
 mod debugger;
 mod game;
+mod game_input;
+mod text_overlay;
 
 #[cfg(windows)]
 #[path = "../../gui/src/control.rs"]
@@ -442,7 +444,7 @@ mod app {
     /// and setting them from here would mark the wrong thread. The cost is that
     /// a chatty primary posts more than the latch would allow; the WORK still
     /// coalesces in the drain, which is the property that matters.
-    fn wake_ui_thread() {
+    pub(crate) fn wake_ui_thread() {
         let h = UI_HWND.load(std::sync::atomic::Ordering::Acquire);
         if h == 0 {
             return; // no window yet — the heartbeat will find the work
@@ -1110,7 +1112,11 @@ mod app {
                     // The pane's hwnd is CACHED and re-asked only while it is
                     // zero: a `guarded_eval` per frame would be sixty VM entries
                     // a second to learn a number that changes once.
-                    if crate::game::frame_pending() {
+                    // Learn the pane as soon as the game is RUNNING, not only
+                    // once a frame is pending: the input driver needs the hwnd
+                    // to scale the pointer, and waiting for the first Present
+                    // would make the first steps report (0,-1,-1,0).
+                    if crate::game::is_running() || crate::game::frame_pending() {
                         let vm: &mut VmHandle = unsafe { &mut *vmp };
                         if game_pane_hwnd == 0 {
                             game_pane_hwnd = guarded_eval(vm, "WinShell canvasPaneHwnd")
@@ -1125,7 +1131,20 @@ mod app {
                             // per frame.
                             if !game_mode_set {
                                 let _ = guarded_exec(vm, "WinShell canvasMode: #game.");
+                                // The input driver cannot see this local, and
+                                // needs the pane to scale the pointer into
+                                // game pixels.
+                                crate::game::set_pane_hwnd(game_pane_hwnd);
                                 game_mode_set = true;
+                            }
+                            // HAND THE CANVAS BACK when the game ends, and clear
+                            // the latch — otherwise a second launch never
+                            // re-issues #game and the shell keeps the pane.
+                            if game_mode_set && !crate::game::is_running()
+                                && !crate::game::frame_pending()
+                            {
+                                let _ = guarded_exec(vm, "WinShell canvasMode: #plasma.");
+                                game_mode_set = false;
                             }
                             crate::game::upload_and_present(game_pane_hwnd);
                         }
