@@ -265,7 +265,13 @@ impl Renderer {
             rt.BeginDraw();
             rt.Clear(Some(&colorref_to_d2d(0x00FF_FFFF)));
         }
-        if let Some(plane) = self.plane.as_ref() {
+        if let Some(plane) = self.plane.as_mut() {
+            // SM4: an indexed plane is expanded through its palette HERE, on
+            // the renderer's side, once per presented frame. That placement is
+            // the whole saving — the guest that cycled the palette wrote 256
+            // words, and this is what turns them into a screenful.
+            plane.resolve();
+            let plane = &*plane;
             if let Err(e) = draw_pixel_plane(&rt, plane, self.px_w as f32, self.px_h as f32) {
                 let _ = unsafe { rt.EndDraw(None, None) };
                 return Err(e);
@@ -471,6 +477,71 @@ pub extern "C" fn MacvmRenderPixelStride(hwnd: i64) -> i64 {
     with_pane(hwnd, 0, |r| {
         r.plane.as_ref().map(|p| p.stride as i64).unwrap_or(0)
     })
+}
+
+/// **SM4.** Turn this pane's plane INDEXED and answer the index buffer's
+/// address, or 0. One byte per pixel, each naming a slot in the palette.
+///
+/// The plane must exist already — `MacvmRenderPixelPlane` first, then this.
+/// Two calls rather than a mode flag on the first, so the direct-BGRA path
+/// stays exactly what it was and an indexed plane is visibly a DECISION at the
+/// call site rather than an argument someone has to remember the meaning of.
+#[no_mangle]
+pub extern "C" fn MacvmRenderIndexPlane(hwnd: i64) -> i64 {
+    let got = with_pane(hwnd, 0i64, |r| match r.plane.as_mut() {
+        Some(p) => {
+            p.make_indexed();
+            p.indices.as_mut_ptr() as i64
+        }
+        None => 0,
+    });
+    if got == 0 {
+        set_error("that window has no pixel plane to index");
+    } else {
+        set_error("");
+    }
+    got
+}
+
+/// The index buffer's stride in BYTES, 0 when the plane is not indexed.
+#[no_mangle]
+pub extern "C" fn MacvmRenderIndexStride(hwnd: i64) -> i64 {
+    with_pane(hwnd, 0, |r| {
+        r.plane
+            .as_ref()
+            .filter(|p| p.indexed)
+            .map(|p| p.index_stride() as i64)
+            .unwrap_or(0)
+    })
+}
+
+/// **The palette itself, as memory** — the address of `PALETTE_LEN` BGRA words
+/// the guest stores into directly, or 0.
+///
+/// This is the whole of SM4 in one entry point. A guest that re-colours the
+/// screen by writing 256 words here, rather than `w * h` words into the plane,
+/// is doing the thing the design exists for: an effect whose per-frame cost is
+/// the PALETTE's size and not the SCREEN's.
+#[no_mangle]
+pub extern "C" fn MacvmRenderPalette(hwnd: i64) -> i64 {
+    let got = with_pane(hwnd, 0i64, |r| match r.plane.as_mut() {
+        Some(p) => p.palette.as_mut_ptr() as i64,
+        None => 0,
+    });
+    if got == 0 {
+        set_error("that window has no pixel plane to hold a palette");
+    } else {
+        set_error("");
+    }
+    got
+}
+
+/// How many slots that palette has. Answered, never assumed — same discipline
+/// as `MacvmRenderPixelStride`, and the reason a guest cannot write an index
+/// that reads off the end.
+#[no_mangle]
+pub extern "C" fn MacvmRenderPaletteLen(_hwnd: i64) -> i64 {
+    crate::PALETTE_LEN as i64
 }
 
 /// Drop this pane's pixel plane. A pane with none draws only its cell grid.

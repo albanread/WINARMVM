@@ -1839,7 +1839,8 @@ gate-wg8:
     # BUILD FIRST — WG6d-2 lost an afternoon to a gate that passed against a
     # binary predating the change it was gating.
     cargo build --quiet -p win_gui -p winui_host -p winui_render
-    rm -f /tmp/wg8_exit /tmp/wg8_app.txt /tmp/wg8_gate.txt target/winui-wg8.png
+    rm -f /tmp/wg8_exit /tmp/wg8_app.txt /tmp/wg8_gate.txt \
+        target/winui-wg8.png target/winui-wg8-palette.png
     ( MACVM_WINUI_CTL=7716 ./target/debug/macvm-winui.exe > /tmp/wg8_app.txt 2>&1; \
         echo $? > /tmp/wg8_exit ) &
     for i in $(seq 1 90); do
@@ -1882,7 +1883,37 @@ gate-wg8:
     PF=$(grep -E '^WG8 present-frames ' /tmp/wg8_gate.txt | awk '{print $NF}')
     test "$PF" -ge "$F2"
 
+    # 5. SM4 — THE PALETTE AS MEMORY. Two shapes, and they must differ: the
+    #    index buffer is ONE byte per pixel (stride 160), the BGRA plane is four
+    #    (stride 640). A guest that confused them would draw a quarter-width
+    #    smear, which looks like a stride bug and is not one.
+    grep -q 'WG8 mode #palette'    /tmp/wg8_gate.txt
+    grep -q 'WG8 pal-render true'  /tmp/wg8_gate.txt
+    grep -q 'WG8 pal-addr true'    /tmp/wg8_gate.txt
+    grep -q "WG8 pal-error ''"     /tmp/wg8_gate.txt
+    IXS=$(grep -E '^WG8 ix-stride ' /tmp/wg8_gate.txt | awk '{print $NF}')
+    PLEN=$(grep -E '^WG8 pal-len '  /tmp/wg8_gate.txt | awk '{print $NF}')
+    echo "palette: index stride $IXS, $PLEN slots"
+    test "$IXS" -eq 160
+    test "$IXS" -eq "$((STRIDE / 4))"
+    test "$PLEN" -eq 256
+
+    # 6. AND THE FIELD IS WRITTEN ONCE. Three palette frames, one field. This is
+    #    the assertion no screenshot can make: a demo that rewrote every index
+    #    every frame would look exactly the same and would be the design SM4
+    #    exists to replace.
+    grep -q 'WG8 pal-render-2 true' /tmp/wg8_gate.txt
+    grep -q 'WG8 pal-render-3 true' /tmp/wg8_gate.txt
+    grep -q 'WG8 field-once true'   /tmp/wg8_gate.txt
+    PF2=$(grep -E '^WG8 pal-frames ' /tmp/wg8_gate.txt | awk '{print $NF}')
+    #    AT LEAST three, not exactly three: a `gui snap` forces a WM_PAINT of
+    #    its own, so the window contributes frames the driver did not ask for.
+    #    The claim is that our three happened, and `-eq` would be asserting
+    #    that nothing else ever repaints — which is not true and not the point.
+    test "$PF2" -ge "$((F2 + 3))"
+
     test -s target/winui-wg8.png
+    test -s target/winui-wg8-palette.png
     for i in $(seq 1 60); do [ -f /tmp/wg8_exit ] && break || sleep 0.5; done
     test "$(cat /tmp/wg8_exit)" = "0"
     echo "gate-wg8: PASS"

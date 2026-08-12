@@ -382,6 +382,57 @@ mod tests {
     /// metrics, HEADLESS — no window, no DC, no paint. If this passes, the
     /// grid's numbers exist before any pane does, and nothing about them can
     /// depend on when the first WM_PAINT arrived.
+    /// SM4's claim, checked without a window: a palette write re-colours pixels
+    /// the guest never touched again.
+    ///
+    /// The assertion that matters is the SECOND one. Writing indices then
+    /// resolving proves only that a lookup table works; writing the SAME
+    /// indices, changing one palette slot, and resolving again is the actual
+    /// design — the screen changes because 4 bytes changed, and no pixel was
+    /// stored twice. If `resolve` ever cached, or the palette were copied
+    /// rather than shared, this is the line that would fail.
+    #[test]
+    fn a_palette_write_recolours_pixels_the_guest_never_touched() {
+        let mut p = PixelPlane::new(4, 2);
+        p.make_indexed();
+        assert_eq!(p.index_stride(), 4, "one byte per pixel, no padding");
+        // Slot 1 across the top row, slot 2 across the bottom. Written ONCE.
+        for x in 0..4 {
+            p.indices[x] = 1;
+            p.indices[4 + x] = 2;
+        }
+        p.palette[1] = 0xFFFF_0000; // red
+        p.palette[2] = 0xFF00_00FF; // blue
+        p.resolve();
+        // A free function, not a closure: the closure would hold `p` borrowed
+        // across the palette write below, which is the very thing under test.
+        fn px(p: &PixelPlane, x: usize, y: usize) -> u32 {
+            let o = y * p.stride as usize + x * 4;
+            u32::from_le_bytes([p.bytes[o], p.bytes[o + 1], p.bytes[o + 2], p.bytes[o + 3]])
+        }
+        assert_eq!(px(&p, 0, 0), 0xFFFF_0000);
+        assert_eq!(px(&p, 3, 1), 0xFF00_00FF);
+
+        // ONE palette store, no index store at all — and the whole top row
+        // turns green. This is the frame a cycling demo actually costs.
+        p.palette[1] = 0xFF00_FF00;
+        p.resolve();
+        assert_eq!(px(&p, 0, 0), 0xFF00_FF00, "the top row follows its palette slot");
+        assert_eq!(px(&p, 2, 0), 0xFF00_FF00);
+        assert_eq!(px(&p, 3, 1), 0xFF00_00FF, "and the bottom row did not move");
+
+        // An unwritten palette is BLACK and opaque, not whatever was in the
+        // allocator: an indexed plane with no palette yet must look empty
+        // rather than look like a bug that happens to be colourful.
+        let mut q = PixelPlane::new(2, 1);
+        q.make_indexed();
+        q.resolve();
+        assert_eq!(
+            u32::from_le_bytes([q.bytes[0], q.bytes[1], q.bytes[2], q.bytes[3]]),
+            0xFF00_0000
+        );
+    }
+
     #[test]
     fn metrics_exist_with_no_window_and_scale_with_dpi() {
         let (face, m96) = mono_face_metrics(9.0, 96.0).expect("Cascadia Mono at 96dpi");
@@ -512,16 +563,32 @@ mod tests {
 
 /// One pane's pixel plane: BGRA bytes the GUEST writes and the renderer draws.
 ///
-/// **The Windows shape of upstream's SM0**, and the one honest difference is
-/// worth stating rather than glossed. Metal's `MTLStorageModeShared` gives a
-/// PERSISTENT CPU pointer whose bytes the GPU samples directly — zero copies.
-/// D3D11 has no equivalent for a texture: `D3D11_USAGE_DYNAMIC` hands out a
-/// pointer only between `Map` and `Unmap`, which cannot be given to the guest
-/// to hold across frames.
+/// **The Windows shape of upstream's SM0**, and the one difference is worth
+/// stating precisely, because the imprecise version blames the wrong thing.
 ///
-/// So this is ONE copy per presented frame — a `CopyFromMemory` into a D2D
-/// bitmap — where the Mac has none. It still deletes what SM0's design
-/// actually indicts:
+/// It is an API difference, NOT a silicon one. Snapdragon X is a unified-memory
+/// part exactly as Apple silicon is: one LPDDR5x pool on package, Adreno on
+/// die, no discrete VRAM and no bus to cross — D3D12 reports both `UMA` and
+/// `CacheCoherentUMA` TRUE on it. What Metal has that D3D11 lacks is the API
+/// that ADMITS this: `MTLStorageModeShared` hands out a persistent CPU pointer
+/// whose bytes the GPU samples. D3D11's texture contract is `Map`/`Unmap` with
+/// `WRITE_DISCARD`, and the pointer may not be held across frames — so it
+/// cannot be given to the guest, whatever the memory underneath is doing.
+///
+/// So this is ONE copy per presented frame AT THE CONTRACT LEVEL — a
+/// `CopyFromMemory` into a D2D bitmap — where the Mac has none. On a UMA part
+/// the driver is likely renaming a buffer rather than physically staging it,
+/// which makes that count pessimistic in practice; it is quoted as one copy
+/// because one copy is what the API guarantees, and code should be built
+/// against the guarantee.
+///
+/// **The gap is closable and the route is known**: D3D12 on a UMA adapter
+/// permits a `CUSTOM` heap (CPU write-combine, GPU readable) mapped once and
+/// never unmapped, which is the Metal shared-storage shape exactly. That is a
+/// device change under this same seam, not a redesign — the guest-facing
+/// contract here is already "ask for an address and a stride".
+///
+/// Even at one copy it deletes what SM0's design actually indicts:
 ///
 /// * the marshalling (`ByteArray` → `copy_bytes_out` → a fresh `Vec`),
 /// * the per-frame ALLOCATION,
@@ -537,7 +604,24 @@ pub struct PixelPlane {
     /// guest computes an address, so the SHAPE must come from this side.
     pub stride: u32,
     pub bytes: Vec<u8>,
+    /// **SM4: the palette as memory.** When present, `bytes` is not what the
+    /// guest writes — `indices` is, one byte per pixel, and each byte names a
+    /// slot in `palette`. `resolve` expands the two into `bytes` before a draw.
+    ///
+    /// The point is not compression, it is the COST OF A FRAME. Cycling a
+    /// palette re-colours every pixel on screen for 256 stores; the direct BGRA
+    /// path needs `w * h`. At 160x120 that is 256 words against 19,200 — the
+    /// difference between an effect a Smalltalk loop can drive at frame rate
+    /// and one it cannot.
+    pub indexed: bool,
+    pub indices: Vec<u8>,
+    /// Fixed 256 BGRA words. `PALETTE_LEN` is handed to the guest rather than
+    /// assumed by it, for the same reason `stride` is.
+    pub palette: Vec<u32>,
 }
+
+/// Slots in a plane's palette. Answered to the guest, never assumed by it.
+pub const PALETTE_LEN: u32 = 256;
 
 impl PixelPlane {
     pub fn new(w: u32, h: u32) -> Self {
@@ -547,6 +631,50 @@ impl PixelPlane {
             h,
             stride,
             bytes: vec![0u8; (stride as usize) * (h as usize)],
+            indexed: false,
+            indices: Vec::new(),
+            // A palette that starts BLACK, not undefined. An indexed plane
+            // whose palette was never written should be a black rectangle —
+            // visibly empty — rather than whatever the allocator left behind.
+            palette: vec![0xFF00_0000; PALETTE_LEN as usize],
+        }
+    }
+
+    /// Turn this plane indexed, allocating the index buffer. Idempotent.
+    pub fn make_indexed(&mut self) {
+        if !self.indexed {
+            self.indices = vec![0u8; (self.w as usize) * (self.h as usize)];
+            self.indexed = true;
+        }
+    }
+
+    /// The index buffer's stride. `w` today — handed out anyway, because the
+    /// guest asking is the discipline, not the number being interesting.
+    pub fn index_stride(&self) -> u32 {
+        self.w
+    }
+
+    /// Expand `indices` through `palette` into `bytes`.
+    ///
+    /// Runs on the RENDERER's side of the seam, once per presented frame, so a
+    /// guest that cycles its palette pays 256 stores and this pass — never
+    /// `w * h` stores of its own. A plane that is not indexed is already in its
+    /// final form and this does nothing.
+    pub fn resolve(&mut self) {
+        if !self.indexed {
+            return;
+        }
+        for y in 0..self.h as usize {
+            let src = y * self.w as usize;
+            let dst = y * self.stride as usize;
+            for x in 0..self.w as usize {
+                // `& 0xFF` is free here (u8 index into a 256-entry table) and
+                // is what makes the palette length a fact rather than a
+                // promise: there is no index the guest can write that reads
+                // off the end.
+                let c = self.palette[self.indices[src + x] as usize];
+                self.bytes[dst + x * 4..dst + x * 4 + 4].copy_from_slice(&c.to_le_bytes());
+            }
         }
     }
 }

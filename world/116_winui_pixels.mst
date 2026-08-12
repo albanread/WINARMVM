@@ -70,6 +70,75 @@ Object subclass: WinPixels [
         ^self
     ]
 
+    "── SM4: the palette, as memory ──────────────────────────────────────
+     An INDEXED plane stores one byte per pixel naming a slot in a 256-entry
+     table, and the renderer expands the two on its own side of the seam.
+
+     WHY THIS IS A DESIGN and not a compression trick: the cost of re-colouring
+     the screen stops depending on the screen. A cycling effect writes 256 words
+     a frame instead of `w * h` — 256 against 19,200 at 160x120 — which is the
+     difference between something a Smalltalk loop can drive at frame rate and
+     something it cannot. Upstream's copper bars are the same claim with a
+     per-scanline palette; this is the flat version, and the one WG8 needs.
+
+     TWO CALLS, not a flag: `planeFor:` makes a plane, `indexPlaneFor:` turns it
+     indexed. So the direct-BGRA path is untouched by SM4 existing, and choosing
+     indices is visible at the call site rather than hidden in an argument."
+
+    WinPixels class >> rawIndexPlane: hwnd <Integer> ^ <Integer> [
+        <primitive: FFI function: #MacvmRenderIndexPlane library: #'winui_render.dll' ret: #g args: #(g)>
+        ^self primitiveFailed: 'MacvmRenderIndexPlane'
+    ]
+    WinPixels class >> rawIndexStride: hwnd <Integer> ^ <Integer> [
+        <primitive: FFI function: #MacvmRenderIndexStride library: #'winui_render.dll' ret: #g args: #(g)>
+        ^self primitiveFailed: 'MacvmRenderIndexStride'
+    ]
+    WinPixels class >> rawPalette: hwnd <Integer> ^ <Integer> [
+        <primitive: FFI function: #MacvmRenderPalette library: #'winui_render.dll' ret: #g args: #(g)>
+        ^self primitiveFailed: 'MacvmRenderPalette'
+    ]
+    WinPixels class >> rawPaletteLen: hwnd <Integer> ^ <Integer> [
+        <primitive: FFI function: #MacvmRenderPaletteLen library: #'winui_render.dll' ret: #g args: #(g)>
+        ^self primitiveFailed: 'MacvmRenderPaletteLen'
+    ]
+
+    WinPixels class >> indexPlaneFor: hwnd <Integer> ^ <Integer> [
+        "The index buffer's address, or 0 if this pane has no plane yet."
+        (self available not or: [ hwnd = 0 ]) ifTrue: [ ^0 ].
+        ^[ self rawIndexPlane: hwnd ] on: Error do: [ :e | 0 ]
+    ]
+
+    WinPixels class >> indexStrideFor: hwnd <Integer> ^ <Integer> [
+        (self available not or: [ hwnd = 0 ]) ifTrue: [ ^0 ].
+        ^[ self rawIndexStride: hwnd ] on: Error do: [ :e | 0 ]
+    ]
+
+    WinPixels class >> paletteFor: hwnd <Integer> ^ <Integer> [
+        (self available not or: [ hwnd = 0 ]) ifTrue: [ ^0 ].
+        ^[ self rawPalette: hwnd ] on: Error do: [ :e | 0 ]
+    ]
+
+    WinPixels class >> paletteLenFor: hwnd <Integer> ^ <Integer> [
+        "ASKED FOR, like the stride. There is no index a guest can write that
+         reads off the end of the table, and this is how it stays that way when
+         the table's size one day is not 256."
+        (self available not or: [ hwnd = 0 ]) ifTrue: [ ^0 ].
+        ^[ self rawPaletteLen: hwnd ] on: Error do: [ :e | 0 ]
+    ]
+
+    WinPixels class >> indexAt: base <Integer> x: x <Integer> y: y <Integer>
+                       stride: stride <Integer> put: slot <Integer> [
+        "ONE BYTE, not a word — an index plane is `w` bytes per row, so a `u32`
+         store here would write four pixels and look like a stripe."
+        WinArena u8At: base + (y * stride) + x put: (slot bitAnd: 255).
+        ^self
+    ]
+
+    WinPixels class >> palette: base <Integer> at: slot <Integer> put: bgra <Integer> [
+        WinArena u32At: base + (slot * 4) put: bgra.
+        ^self
+    ]
+
     "── one pixel ───────────────────────────────────────────────────────
      Written through `WinArena u32At:put:` — a store into foreign memory, the
      same mechanism `Alien forAddress:size:` gives and the same one the cell
@@ -108,7 +177,7 @@ Object subclass: WinPixels [
 ]
 
 Object subclass: WinShell [
-    <classVars: PlasmaPhase CanvasFrames>
+    <classVars: PlasmaPhase CanvasFrames CanvasMode IndexFieldDrawn>
 
     "-- the CANVAS view, which is where pixels belong --------------------
      The first version of this demo drew plasma into the EDITOR's pane, and the
@@ -200,6 +269,72 @@ Object subclass: WinShell [
         ^true
     ]
 
+    "── SM4's demo: the palette, cycling ────────────────────────────────
+     The index field is written ONCE. Every frame after that changes nothing but
+     256 palette words, and the whole screen moves. That is the claim SM4 makes,
+     and running it beside the plasma — which stores every pixel, every frame —
+     is what makes the difference visible rather than asserted."
+
+    WinShell class >> canvasMode ^ <Symbol> [
+        ^CanvasMode isNil ifTrue: [ #plasma ] ifFalse: [ CanvasMode ] ]
+
+    WinShell class >> indexFieldDrawn ^ <Boolean> [
+        "Read by `gate-wg8`. That the field is written ONCE is the whole of
+         SM4's claim, and it is the one part a picture cannot show — a demo
+         that rewrote every index every frame would look identical."
+        ^IndexFieldDrawn == true ]
+
+    WinShell class >> canvasMode: aSymbol <Symbol> ^ <Symbol> [
+        "Switching modes DROPS the plane, because the two modes disagree about
+         what the buffer contains — an indexed plane reinterpreted as BGRA is a
+         quarter-width smear, which looks like a stride bug and is not one."
+        aSymbol = self canvasMode ifFalse: [
+            WinPixels dropFor: self canvasPaneHwnd.
+            IndexFieldDrawn := false.
+            CanvasMode := aSymbol ].
+        ^self canvasMode
+    ]
+
+    WinShell class >> paintIndexFieldOn: hwnd <Integer> width: w <Integer> height: h <Integer> ^ <Boolean> [
+        "The field, ONCE. Slots rather than colours — nothing here decides what
+         anything looks like, which is exactly why the palette can."
+        | ix stride |
+        IndexFieldDrawn == true ifTrue: [ ^true ].
+        ix := WinPixels indexPlaneFor: hwnd.
+        ix = 0 ifTrue: [ ^false ].
+        stride := WinPixels indexStrideFor: hwnd.
+        stride = 0 ifTrue: [ ^false ].
+        0 to: h - 1 do: [ :y |
+            0 to: w - 1 do: [ :x |
+                "Concentric-ish rings from the middle, in integer arithmetic —
+                 `dx*dx + dy*dy` shifted down until it lands inside a byte."
+                | dx dy |
+                dx := x - (w // 2).
+                dy := (y - (h // 2)) * 2.
+                WinPixels indexAt: ix x: x y: y stride: stride
+                    put: (((dx * dx) + (dy * dy)) // 24) ] ].
+        IndexFieldDrawn := true.
+        ^true
+    ]
+
+    WinShell class >> cyclePaletteOn: hwnd <Integer> ^ <Boolean> [
+        "256 stores. THE ENTIRE COST OF A FRAME — the field is untouched and
+         every pixel on screen changes colour anyway."
+        | pal n ph |
+        pal := WinPixels paletteFor: hwnd.
+        pal = 0 ifTrue: [ ^false ].
+        n := WinPixels paletteLenFor: hwnd.
+        n = 0 ifTrue: [ ^false ].
+        ph := self plasmaPhase.
+        0 to: n - 1 do: [ :i |
+            | v |
+            v := (i * 8 + ph) bitAnd: 255.
+            WinPixels palette: pal at: i put:
+                (WinPixels bgraR: v g: ((v * 2) bitAnd: 255) b: 255 - v) ].
+        PlasmaPhase := ph + 3.
+        ^true
+    ]
+
     WinShell class >> renderCanvas ^ <Boolean> [
         "BOTH PLANES, which is the claim WG8 actually makes: pixels underneath,
          a text HUD over them, neither knowing about the other.
@@ -216,7 +351,15 @@ Object subclass: WinShell [
         (WinRender cellWidthFor: hwnd) = 0 ifTrue: [
             (WinRender attach: hwnd points: 9 dpi: self editorMetricsDpi)
                 ifFalse: [ ^false ] ].
-        (self drawPlasmaOn: hwnd width: 160 height: 120) ifFalse: [ ^false ].
+        self canvasMode == #palette
+            ifTrue: [
+                "The plane must exist before it can be indexed — SM4 is a second
+                 call on an SM0 plane, never a replacement for one."
+                (WinPixels planeFor: hwnd width: 160 height: 120) = 0 ifTrue: [ ^false ].
+                (self paintIndexFieldOn: hwnd width: 160 height: 120) ifFalse: [ ^false ].
+                (self cyclePaletteOn: hwnd) ifFalse: [ ^false ] ]
+            ifFalse: [
+                (self drawPlasmaOn: hwnd width: 160 height: 120) ifFalse: [ ^false ] ].
         cw := WinRender cellWidthFor: hwnd.
         ch := WinRender cellHeightFor: hwnd.
         (cw = 0 or: [ ch = 0 ]) ifTrue: [ ^false ].
@@ -225,15 +368,27 @@ Object subclass: WinShell [
         base := WinRender gridFor: hwnd cols: cols rows: rows.
         base = 0 ifTrue: [ ^false ].
         WinRender clear: hwnd to: 16rFFFFFF on: WinPixels transparentBackground.
-        label := 'CANVAS - the VM writes these pixels directly - frame '
-            , (self canvasFrames + 1) printString.
+        "The HUD names the COST, because that is what the two modes differ in
+         and it is not visible from the picture. `WinShell canvasMode: #palette`
+         in the Workspace switches; both draw the same 160x120 plane."
+        label := self canvasMode == #palette
+            ifTrue: [ 'CANVAS palette - 256 stores/frame, 19200 pixels move - frame '
+                , (self canvasFrames + 1) printString ]
+            ifFalse: [ 'CANVAS plasma - 19200 stores/frame, direct BGRA - frame '
+                , (self canvasFrames + 1) printString ].
+        "The label's OWN cells are opaque; every other cell in the grid is not.
+         White-on-transparent was legible over the plasma and unreadable over a
+         cycling palette — there is no ink colour that contrasts with a field
+         whose colours are the thing moving. So the HUD gets a strip, which is
+         what a HUD normally is, and the composition claim is unchanged: one row
+         of the grid is opaque and every other row lets the plane through."
         col := 0.
         label do: [ :chr |
             col < cols ifTrue: [
                 WinRender at: base col: col row: 0 cols: cols
                     put: chr asInteger
                     fg: 16rFFFFFF
-                    bg: WinPixels transparentBackground ].
+                    bg: 16r303030 ].
             col := col + 1 ].
         WinRender caretFor: hwnd col: 0 row: 0 visible: false.
         CanvasFrames := self canvasFrames + 1.

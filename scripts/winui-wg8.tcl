@@ -42,4 +42,24 @@ puts "WG8 present-frames [gui eval {WinRender framesFor: WinShell canvasPaneHwnd
 puts "WG8 last-error [gui eval {WinRender lastError}]"
 
 puts "WG8 snap [gui snap C:/projects/WINARM/target/winui-wg8.png]"
+
+# SM4 — THE PALETTE AS MEMORY. Switching modes drops the plane, so every
+# address is re-asked; the index buffer is one byte per pixel (stride w, not
+# w*4) and the palette is a table whose LENGTH the guest asks for.
+puts "WG8 mode [gui eval {WinShell canvasMode: #palette}]"
+puts "WG8 pal-render [gui eval {WinShell renderCanvas}]"
+puts "WG8 ix-stride [gui eval {WinPixels indexStrideFor: WinShell canvasPaneHwnd}]"
+puts "WG8 pal-len [gui eval {WinPixels paletteLenFor: WinShell canvasPaneHwnd}]"
+puts "WG8 pal-addr [gui eval {(WinPixels paletteFor: WinShell canvasPaneHwnd) > 0}]"
+
+# THE FIELD IS WRITTEN ONCE. Three more frames and it is still the same field —
+# what moved was 256 palette words. If `paintIndexFieldOn:` ever stopped being
+# idempotent this would still LOOK right, so the flag is read rather than the
+# picture judged.
+puts "WG8 pal-render-2 [gui eval {WinShell renderCanvas}]"
+puts "WG8 pal-render-3 [gui eval {WinShell renderCanvas}]"
+puts "WG8 field-once [gui eval {WinShell indexFieldDrawn}]"
+puts "WG8 pal-frames [gui eval {WinShell canvasFrames}]"
+puts "WG8 pal-error [gui eval {WinRender lastError}]"
+puts "WG8 snap-palette [gui snap C:/projects/WINARM/target/winui-wg8-palette.png]"
 gui quit
