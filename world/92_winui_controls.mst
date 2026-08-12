@@ -352,6 +352,11 @@ Object subclass: WinShell [
     ]
 
     WinShell class >> ownsControlId: anId <Integer> ^ <Boolean> [
+        "WG12: a MENU id counts too. This answer decides whether the door
+         returns 0 (handled) or falls through to DefWindowProcW, so a menu the
+         shell owns but does not claim would work by accident today and break
+         the moment anything else wanted that message."
+        (self ownsMenuId: anId) ifTrue: [ ^true ].
         ^(self controlWithId: anId) notNil
     ]
 

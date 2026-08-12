@@ -1063,6 +1063,10 @@ Object subclass: WinShell [
              Before ShowWindow, so the window's first frame is already laid out
              rather than a flash of empty client area."
         self buildControls.
+        "WG12: the menu bar, before the first layout — SetMenu changes the
+         client area's height, and building it after the layout would leave
+         every control one menu-bar too low until the next resize."
+        self buildMenuBar.
         PendingLayout := true.
         self drainPass.
         self startHeartbeat.
@@ -1690,6 +1694,10 @@ Object subclass: WinShell [
     WinShell class >> runTests [ ^false ]
     WinShell class >> testRuns [ ^0 ]
     WinShell class >> testsViewName [ ^#tests ]
+    "WG12: the menu bar; 120 overrides."
+    WinShell class >> ownsMenuId: anId [ ^false ]
+    WinShell class >> serviceMenu: anId [ ^false ]
+    WinShell class >> buildMenuBar [ ^false ]
     WinShell class >> loadTestCorpus [ ^false ]
     WinShell class >> testCorpusArrived: aString [ ^self ]
     "WG6c-2b's clipboard; 108 overrides. Declared here because 107 DISPATCHES

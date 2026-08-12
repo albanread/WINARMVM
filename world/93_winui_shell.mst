@@ -825,6 +825,11 @@ Object subclass: WinShell [
          is synchronous Win32 work — which is precisely why it is here and
          not in the door."
         | c name |
+        "WG12: THE MENU FIRST. Menu ids live above every control id, so this
+         cannot shadow a button, and a menu command arrives with lParam 0 and
+         no control to look up —  would answer nil and the
+         command would fall through to WG3's handler as an unknown."
+        (self serviceMenu: anId) ifTrue: [ ^self ].
         c := self controlWithId: anId.
         c isNil ifTrue: [ ^self wg3ServiceCommand: anId code: aCode from: aHandle ].
         name := c name.

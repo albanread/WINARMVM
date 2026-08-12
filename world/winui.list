@@ -150,3 +150,8 @@
 # one — the demos that prove WG8 rather than decorate it. Loads after 116,
 # whose `drawGalleryOn:` hook it fills in.
 119_winui_demos.mst
+
+# WG12: the menu bar — File, World, Demos, View, Help. Built in Smalltalk
+# through the same WinApi FFI as everything else and serviced by the same
+# flag-and-drain; WM_COMMAND has been allowlisted since WG3.
+120_winui_menu.mst

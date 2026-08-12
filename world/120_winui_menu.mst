@@ -1,0 +1,257 @@
+"── 120_winui_menu.mst — WG12: the menu bar ──────────────────────────────
+ The shell has had a view bar since WG4 and no MENU, which is the one piece of
+ Windows chrome every user looks for first. This is it: File, World, Demos,
+ View, Help, built in Smalltalk through the same `WinApi` FFI everything else
+ uses, and serviced by the same flag-and-drain the buttons use.
+
+ IT COSTS NO NEW DOOR. `WM_COMMAND` has been allowlisted since WG3 and
+ `onCommand:lParam:` already reads its low word as an id and its high word as a
+ notification code — its own comment says `or, later, a menu` and `lParam is the
+ control's own HWND, or 0 for a menu`. The architecture anticipated this; all
+ that was missing was the menu.
+
+ IDS LIVE ABOVE THE CONTROLS, at 2000. Controls are minted from 100 upward by
+ `addControl:`, so a menu id in that range would be indistinguishable from a
+ button's — and `ownsControlId:` answers whether the shell handled a command,
+ which decides whether the door returns 0 or falls through to `DefWindowProcW`.
+ Getting that wrong does not misroute one click; it breaks every accelerator and
+ the system menu at once.
+
+ A GREYED ITEM SAYS WHY, IN ITS LABEL. `docs/SPRINTS.md`'s standing rule is that
+ the Demos menu `greys with a reason naming the design doc, never silently` — so
+ the demos that need primitives this port has not built yet are listed, disabled,
+ with what they are waiting for written into the item. A menu that hid them would
+ be claiming the port is smaller than it is; one that enabled them would crash."
+
+Object subclass: WinApi [
+
+    "── the six menu calls, and nothing more ─────────────────────────────"
+
+    WinApi class >> createMenu ^ <Integer> [
+        <primitive: FFI function: #CreateMenu ret: #g args: #()>
+    ]
+    WinApi class >> createPopupMenu ^ <Integer> [
+        <primitive: FFI function: #CreatePopupMenu ret: #g args: #()>
+    ]
+    WinApi class >> appendMenu: hMenu <Integer> flags: f <Integer> id: id <Integer> text: textPtr <Integer> ^ <Integer> [
+        <primitive: FFI function: #AppendMenuW ret: #g args: #(g g g g)>
+    ]
+    WinApi class >> setMenu: hwnd <Integer> menu: hMenu <Integer> ^ <Integer> [
+        <primitive: FFI function: #SetMenu ret: #g args: #(g g)>
+    ]
+    WinApi class >> drawMenuBar: hwnd <Integer> ^ <Integer> [
+        <primitive: FFI function: #DrawMenuBar ret: #g args: #(g)>
+    ]
+    WinApi class >> enableMenuItem: hMenu <Integer> item: id <Integer> flags: f <Integer> ^ <Integer> [
+        <primitive: FFI function: #EnableMenuItem ret: #g args: #(g g g)>
+    ]
+
+    "MF_* flags. Named here rather than fetched from `WinApi constant:` because
+     they are not in winkb's database and they are stable ABI constants a
+     reader can check against WinUser.h in one look."
+    WinApi class >> mfString    ^ <Integer> [ ^16r0000 ]
+    WinApi class >> mfPopup     ^ <Integer> [ ^16r0010 ]
+    WinApi class >> mfSeparator ^ <Integer> [ ^16r0800 ]
+    WinApi class >> mfGrayed    ^ <Integer> [ ^16r0001 ]
+    WinApi class >> mfByCommand ^ <Integer> [ ^16r0000 ]
+]
+
+Object subclass: WinShell [
+    <classVars: MenuBar MenuCommands>
+
+    "── the id space ────────────────────────────────────────────────────"
+
+    WinShell class >> firstMenuId ^ <Integer> [
+        "Above the controls, which start at 100 and are minted upward. See the
+         file note: an overlap would make `ownsControlId:` answer for the wrong
+         thing, and that decides whether the door handles a command or hands it
+         to DefWindowProcW."
+        ^2000
+    ]
+
+    WinShell class >> menuCommands ^ <Dictionary> [
+        ^MenuCommands isNil ifTrue: [ MenuCommands := Dictionary new ] ifFalse: [ MenuCommands ] ]
+
+    WinShell class >> ownsMenuId: anId <Integer> ^ <Boolean> [
+        ^self menuCommands includesKey: anId ]
+
+    "── the table ───────────────────────────────────────────────────────
+     One place the menu is described, so the bar, the ids and the actions
+     cannot drift apart. Each entry is
+        {id. label. selector-or-nil. enabled}
+     and a nil selector with a label of '-' is a separator."
+
+    WinShell class >> menuSpec ^ <OrderedCollection> [
+        | out menu |
+        out := OrderedCollection new.
+        menu := [ :title :items | out add: (Array with: title with: items) ].
+
+        menu value: 'File' value: (OrderedCollection new
+            add: (Array with: 2001 with: 'File In' with: #fileIn with: true);
+            add: (Array with: 2002 with: 'Add to World' with: #addToWorld with: true);
+            add: (Array with: 0 with: '-' with: nil with: true);
+            add: (Array with: 2009 with: 'Exit' with: #menuExit with: true);
+            yourself).
+
+        menu value: 'World' value: (OrderedCollection new
+            add: (Array with: 2011 with: 'Load Test Corpus' with: #loadTestCorpus with: true);
+            add: (Array with: 2012 with: 'Run Tests' with: #menuRunTests with: true);
+            add: (Array with: 0 with: '-' with: nil with: true);
+            add: (Array with: 2013 with: 'Restart Primary' with: #menuRestartPrimary with: true);
+            yourself).
+
+        "THE DEMOS, and the disabled ones say what they are waiting for. Life,
+         FreeCell and Minesweeper need only what WG11 W1-W6 built; the rest need
+         the shared-memory primitives (W7-W9), and Minesweeper draws but is
+         sheared until overscan/scroll land."
+        menu value: 'Demos' value: (OrderedCollection new
+            add: (Array with: 2021 with: 'Life' with: #menuLife with: true);
+            add: (Array with: 2022 with: 'FreeCell' with: #menuFreeCell with: true);
+            add: (Array with: 2023 with: 'Minesweeper (no HUD until WG11-W8)'
+                        with: #menuMinesweeper with: true);
+            add: (Array with: 0 with: '-' with: nil with: true);
+            add: (Array with: 2024 with: 'Plasma - needs screen memory (WG11-W7)'
+                        with: nil with: false);
+            add: (Array with: 2025 with: 'Julia - needs screen memory (WG11-W7)'
+                        with: nil with: false);
+            add: (Array with: 2026 with: 'Attractor - needs screen memory (WG11-W7)'
+                        with: nil with: false);
+            add: (Array with: 2027 with: 'Text Pages - needs the text plane (WG11-W8)'
+                        with: nil with: false);
+            add: (Array with: 2028 with: 'Copper - needs the palette memory (WG11-W9)'
+                        with: nil with: false);
+            add: (Array with: 0 with: '-' with: nil with: true);
+            add: (Array with: 2029 with: 'Stop Demo' with: #menuStopDemo with: true);
+            yourself).
+
+        menu value: 'View' value: (self viewMenuItems).
+
+        menu value: 'Help' value: (OrderedCollection new
+            add: (Array with: 2091 with: 'About MACVM' with: #menuAbout with: true);
+            yourself).
+        ^out
+    ]
+
+    WinShell class >> viewMenuItems ^ <OrderedCollection> [
+        "Built from the VIEW REGISTRY rather than listed, so a view added in a
+         later sprint appears here without anyone remembering to add it — the
+         same reason the view bar is a registry and not a switch statement."
+        | out id |
+        out := OrderedCollection new.
+        id := 2040.
+        self views do: [ :v |
+            out add: (Array with: id with: (v at: 2) with: nil with: true).
+            self menuCommands at: id put: (Array with: #switchToView: with: (v at: 1)).
+            id := id + 1 ].
+        ^out
+    ]
+
+    "── building it ─────────────────────────────────────────────────────"
+
+    WinShell class >> buildMenuBar ^ <Boolean> [
+        | bar |
+        self isOpen ifFalse: [ ^false ].
+        MenuBar isNil ifFalse: [ ^true ].
+        MenuCommands := Dictionary new.
+        bar := WinApi createMenu.
+        bar = 0 ifTrue: [ ^false ].
+        self menuSpec do: [ :m |
+            | popup |
+            popup := WinApi createPopupMenu.
+            popup = 0 ifTrue: [ ^false ].
+            (m at: 2) do: [ :item | self appendItem: item to: popup ].
+            WinApi appendMenu: bar
+                flags: (WinApi mfString bitOr: WinApi mfPopup)
+                id: popup
+                text: (WinArena scratchUtf16: (m at: 1)) ].
+        WinApi setMenu: self hwndValue menu: bar.
+        WinApi drawMenuBar: self hwndValue.
+        MenuBar := bar.
+        ^true
+    ]
+
+    WinShell class >> appendItem: item <Array> to: popup <Integer> [
+        "`{id. label. selector. enabled}`, or a separator when the label is '-'."
+        | flags |
+        (item at: 2) = '-' ifTrue: [
+            ^WinApi appendMenu: popup flags: WinApi mfSeparator id: 0 text: 0 ].
+        flags := WinApi mfString.
+        (item at: 4) ifFalse: [ flags := flags bitOr: WinApi mfGrayed ].
+        WinApi appendMenu: popup
+            flags: flags
+            id: (item at: 1)
+            text: (WinArena scratchUtf16: (item at: 2)).
+        "A DISABLED ITEM IS STILL REGISTERED, with no action. It has to be, or
+         `ownsControlId:` would answer false for it and the door would hand a
+         click on a greyed item to DefWindowProcW — harmless today, and exactly
+         the kind of gap that becomes a mystery later."
+        (item at: 3) isNil
+            ifTrue: [ self menuCommands at: (item at: 1) put: nil ]
+            ifFalse: [ self menuCommands at: (item at: 1)
+                            put: (Array with: (item at: 3)) ].
+        ^self
+    ]
+
+    "── acting on it ────────────────────────────────────────────────────"
+
+    WinShell class >> serviceMenu: anId <Integer> ^ <Boolean> [
+        "Called from the DRAIN, never from the door — a menu item that files in
+         restarts the primary, and a menu item that launches a demo evaluates in
+         it. Neither may happen inside a wndproc."
+        | action |
+        (self menuCommands includesKey: anId) ifFalse: [ ^false ].
+        action := self menuCommands at: anId.
+        action isNil ifTrue: [ ^true ].   "a greyed item: owned, but does nothing"
+        action size = 1
+            ifTrue: [ self perform: (action at: 1) ]
+            ifFalse: [ self perform: (action at: 1) with: (action at: 2) ].
+        ^true
+    ]
+
+    "── the verbs the menu needs that nothing else provides ─────────────"
+
+    WinShell class >> menuExit [ ^self close ]
+
+    WinShell class >> menuRunTests [
+        self switchToView: self testsViewName.
+        ^self runTests
+    ]
+
+    WinShell class >> menuRestartPrimary [
+        "The same request File In makes, without a file — a fresh world."
+        self appendTranscript: 'world: restarting the primary'.
+        ^WinApi asBool: (WinApi
+            postMessage: self hwndValue message: (16r8000 + 8) wParam: 0 lParam: 0)
+    ]
+
+    WinShell class >> launchDemo: source <String> named: aName <String> ^ <Boolean> [
+        "Demos run in the PRIMARY, where GamePane and the games live. The Canvas
+         is switched to first so the frames have somewhere to land, and its own
+         animation is stopped — the pane cannot belong to two owners."
+        self switchToView: self canvasViewName.
+        self canvasAnimating: false.
+        self appendTranscript: 'demo: ' , aName.
+        Worker uiDoit: source onReply: [ :r | WinShell appendTranscript: 'demo: ' , aName , ' up' ].
+        ^true
+    ]
+
+    WinShell class >> menuLife        [ ^self launchDemo: 'Life launch. 1' named: 'Life' ]
+    WinShell class >> menuFreeCell    [ ^self launchDemo: 'FreeCell launch. 1' named: 'FreeCell' ]
+    WinShell class >> menuMinesweeper [ ^self launchDemo: 'Minesweeper launch. 1' named: 'Minesweeper' ]
+
+    WinShell class >> menuStopDemo [
+        "`GamePane reset` is the same verb Escape sends, and the host stops the
+         loop on its own side — see `win_gui/src/game.rs`'s `stop`, which exists
+         because the class-side reset emits no StopLoop."
+        Worker uiDoit: 'GamePane reset. 1' onReply: [ :r | WinShell appendTranscript: 'demo: stopped' ].
+        ^true
+    ]
+
+    WinShell class >> menuAbout [
+        self switchToView: #transcript.
+        self appendTranscript: 'MACVM - a Smalltalk VM on Windows/ARM64.'.
+        self appendTranscript: 'The same Smalltalk runs on mac, windows, arm and x64.'.
+        self appendTranscript: 'Demos menu: upstream game files, loaded unedited.'.
+        ^self
+    ]
+]
