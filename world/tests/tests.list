@@ -193,5 +193,9 @@ tier1.mst
 # report, so what the pane would show is checkable here with no window, no
 # primary and no real test.
 ../118_winui_tests.mst
+
+# WG10: the gallery. Life's rules and Julia's escape test are PURE over
+# integers, so both are checkable here with no window, no plane and no GPU.
+../119_winui_demos.mst
 67_winui_editor_tests.mst
 99_run_all.mst

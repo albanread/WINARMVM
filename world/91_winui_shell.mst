@@ -1572,6 +1572,16 @@ Object subclass: WinShell [
         "WG5c D5: show or hide the Workspace's hint. Idempotent and cheap —
          one WM_GETTEXTLENGTH and a compare on a pass where nothing changed."
         self serviceGhost.
+        "WG10: one animation frame, if a view wants one. A no-op hook until
+         116 defines it, and a no-op on every pass where nothing is animating —
+         it costs one nil test, the same bargain `serviceColourIdle` makes.
+
+         WHY IT IS HERE AND NOT ON A TIMER OF ITS OWN. The drain is the one
+         place in this shell that runs OUTSIDE every wndproc entry, so a frame
+         drawn here cannot re-enter the door. A `WM_TIMER` that rendered
+         directly would be drawing from inside a message dispatch, which is
+         exactly the arrangement §2.4a exists to prevent."
+        self serviceCanvasAnimation.
         ReaskOnce == true ifTrue: [
             "The guest's own escape hatch, and `tests_wg3.md` item 5's whole
              mechanism: work discovered DURING a pass. Answering non-zero
@@ -1669,6 +1679,8 @@ Object subclass: WinShell [
     WinShell class >> canvasPaneHwnd [ ^0 ]
     WinShell class >> renderCanvas [ ^false ]
     WinShell class >> canvasViewName [ ^#canvas ]
+    WinShell class >> serviceCanvasAnimation [ ^self ]
+    WinShell class >> canvasAnimating [ ^false ]
     "WG9's Tests view — SUnit fronted natively; 118 overrides."
     WinShell class >> buildTestsPane [ ^self ]
     WinShell class >> showTestsPane: aBool [ ^self ]

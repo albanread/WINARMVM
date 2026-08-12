@@ -145,3 +145,8 @@
 # PRIMARY through the worker seam and renders the result on a cell grid.
 # `world/86_sunit_runner.mst` is the far half and loads from world.list.
 118_winui_tests.mst
+
+# WINARM (WG10): the gallery. Life on the INDEXED plane, Julia on the direct
+# one — the demos that prove WG8 rather than decorate it. Loads after 116,
+# whose `drawGalleryOn:` hook it fills in.
+119_winui_demos.mst

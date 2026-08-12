@@ -72,7 +72,107 @@ TestCase subclass: WinUiEditorWg6cTests [
         self runTest: #testAReplyIsUnquotedBeforeItIsParsed
              do: [ self testAReplyIsUnquotedBeforeItIsParsed ].
         self runTest: #testTheVerdictLineCountsAndAgrees
-             do: [ self testTheVerdictLineCountsAndAgrees ]
+             do: [ self testTheVerdictLineCountsAndAgrees ].
+        self runTest: #testLifeObeysConwayAndNotSomethingNearby
+             do: [ self testLifeObeysConwayAndNotSomethingNearby ].
+        self runTest: #testLifeStepsIntoAFreshGrid
+             do: [ self testLifeStepsIntoAFreshGrid ].
+        self runTest: #testJuliaSeparatesInsideFromOutside
+             do: [ self testJuliaSeparatesInsideFromOutside ]
+    ]
+
+    "── WG10: the gallery's rules, checked with no window ────────────────"
+
+    testLifeObeysConwayAndNotSomethingNearby [
+        "A BLINKER, which is the smallest pattern that can tell Conway from a
+         rule that is nearly Conway: three in a row must become three in a
+         column and then three in a row again. An off-by-one in the neighbour
+         count, or a survive-on-4, and it dies or explodes on the first step —
+         either of which reads as `Life is broken` rather than as one wrong
+         comparison.
+
+         5x5 with a dead border, so the edge rule is exercised too: the blinker
+         sits at the middle and its vertical form reaches within one cell of the
+         top and bottom."
+        | g w h |
+        w := 5. h := 5.
+        g := WinLife emptyGridWidth: w height: h.
+        "Row 2 (0-based), columns 1..3 — a horizontal blinker."
+        g at: (2 * w) + 1 + 1 put: 1.
+        g at: (2 * w) + 2 + 1 put: 1.
+        g at: (2 * w) + 3 + 1 put: 1.
+        self assert: (WinLife population: g) equals: 3.
+        g := WinLife stepGrid: g width: w height: h.
+        self assert: (WinLife population: g) equals: 3
+            description: 'a blinker keeps three cells; it became '
+                , (WinLife population: g) printString.
+        "Now VERTICAL: column 2, rows 1..3."
+        self assert: (WinLife at: g x: 2 y: 1 width: w) equals: 1.
+        self assert: (WinLife at: g x: 2 y: 2 width: w) equals: 1.
+        self assert: (WinLife at: g x: 2 y: 3 width: w) equals: 1.
+        self assert: (WinLife at: g x: 1 y: 2 width: w) equals: 0.
+        "And back again, which is what makes it a period-2 oscillator rather
+         than a pattern that happened to have three cells twice."
+        g := WinLife stepGrid: g width: w height: h.
+        self assert: (WinLife at: g x: 1 y: 2 width: w) equals: 1.
+        self assert: (WinLife at: g x: 3 y: 2 width: w) equals: 1.
+        self assert: (WinLife at: g x: 2 y: 1 width: w) equals: 0.
+        "OFF THE EDGE IS DEAD, not wrapped. A count that wrapped on one axis
+         and clamped on the other gives a Life that looks almost right."
+        self assert: (WinLife at: g x: 0 - 1 y: 2 width: w) equals: 0.
+        self assert: (WinLife at: g x: w y: 2 width: w) equals: 0.
+        self assert: (WinLife at: g x: 2 y: h width: w) equals: 0
+    ]
+
+    testLifeStepsIntoAFreshGrid [
+        "Stepping IN PLACE makes a cell's fate depend on whether its neighbour
+         was visited yet — a cellular automaton nobody has a name for, which
+         looks enough like Life to be believed. Asserted by checking the INPUT
+         is untouched, because that is the property the bug would break."
+        | g before after |
+        g := WinLife emptyGridWidth: 5 height: 5.
+        g at: (2 * 5) + 1 + 1 put: 1.
+        g at: (2 * 5) + 2 + 1 put: 1.
+        g at: (2 * 5) + 3 + 1 put: 1.
+        before := WinLife population: g.
+        after := WinLife stepGrid: g width: 5 height: 5.
+        self assert: (WinLife population: g) equals: before
+            description: 'stepGrid must not mutate the grid it was given'.
+        self assert: (WinLife at: g x: 1 y: 2 width: 5) equals: 1.
+        self assert: (WinLife at: after x: 1 y: 2 width: 5) equals: 0
+    ]
+
+    testJuliaSeparatesInsideFromOutside [
+        "The whole of Julia in one property: the origin does not escape for
+         this c, and a point far outside escapes almost at once. A fixed-point
+         mistake collapses the two — every point escaping on iteration 0, or
+         none ever escaping — and both render as a flat rectangle that looks
+         like a stride bug.
+
+         INTEGER ONLY, at the 12-bit scale the demo uses: 4096 is 1.0."
+        | inside outside edge |
+        inside := WinJulia escapeAtX: 0 y: 0 cx: 0 - 3236 cy: 614.
+        self assert: inside equals: WinJulia maxIter
+            description: 'the origin should not escape, but escaped at '
+                , inside printString.
+        outside := WinJulia escapeAtX: 4096 * 4 y: 4096 * 4 cx: 0 - 3236 cy: 614.
+        self assert: outside equals: 0
+            description: 'a point well outside |z|=2 escapes immediately'.
+        "And SOMETHING in between, or the function is a two-valued step and the
+         colouring has nothing to colour."
+        "z = 1.5, which is inside |z|=2 and so cannot escape on iteration 0,
+         but is outside this c's filled set and so must escape eventually.
+         z = 1.0 does NOT work here and the first version of this test used it:
+         the origin's basin for c = -0.79 + 0.15i reaches past 1.0, so it
+         answered maxIter and looked like a broken escape test."
+        edge := WinJulia escapeAtX: 4096 * 3 // 2 y: 0 cx: 0 - 3236 cy: 614.
+        self assert: (edge > 0 and: [ edge < WinJulia maxIter ]) equals: true
+            description: 'z=1.5 should take a few iterations, took '
+                , edge printString.
+        "Inside the set is BLACK — the one region where the iteration said
+         nothing, and colouring it would invent a value it never produced."
+        self assert: (WinJulia colourForEscape: WinJulia maxIter phase: 7)
+            equals: (WinPixels bgraR: 0 g: 0 b: 0)
     ]
 
     "── WG9: the Tests view, checked without a primary ───────────────────

@@ -548,6 +548,67 @@ Three notes from building it, each a defect the gate or an existing test caught:
 - The glyph table's own uniqueness test caught `#tests` colliding with
   `#transcript` before it ever reached a screen.
 
+### WG10 + WG10a — the gallery, and the renderer it forced (2026-08-12)
+
+WG10's demos (Life on the indexed plane, Julia in fixed point on the direct
+one, `world/119_winui_demos.mst`) did their job in the way the review predicted
+— **they were the reason to build SM0, and they broke the renderer into being
+built properly.** Running them surfaced, in order:
+
+1. **Tier-up counts method entries, not loop back-edges** — no OSR. 460k Julia
+   iterations as 19,200 method calls: 11 ms. The identical iterations as one
+   loop in one method entry: 119 ms. Every per-pixel loop now lives in a ROW
+   method entered `h` times a frame. The rule, worth carrying anywhere in this
+   world: *a hot loop must live in a method that is entered often.*
+2. **A free-running animation loop saturates the UI thread** — 200 fps of
+   frames the panel drops, a busy cursor, and eventually a starved control
+   port. Frames are now *requested*: a dedicated ~16 ms timer, a due-check at
+   `canvasFpsTarget` (30), and no posted wake. Between frames the thread idles
+   in `GetMessage`, where an interactive thread belongs.
+3. **The D2D present path was a CPU pipe wearing a GPU device** — a fresh D2D
+   bitmap per frame for the plane, per-glyph `DrawGlyphRun` for the text, and
+   SM4's palette expanded by the CPU. Named by the author and replaced.
+
+**WG10a is the replacement** (`winui_render/src/gpu.rs`), ported from
+upstream's Metal renderer (`MacGamePane/graphics`), Snapdragon-first:
+
+- One fullscreen-triangle vertex shader; three pixel shaders.
+- **Indexed plane**: `R8_UINT` texture + 256×1 palette texture, and the lookup
+  happens IN the shader — upstream's `fmain` verbatim. A palette cycle is a
+  1KB upload; the Adreno re-colours the screen. The CPU `resolve()` is gone.
+- **Direct plane**: `B8G8R8A8` dynamic texture, point-sampled (interpolation
+  would invent pixels the guest never wrote).
+- **Text**: the cell grid as a `cols×rows` `RGBA32_UINT` texture + a
+  DirectWrite-rasterised glyph atlas (`IDWriteGlyphRunAnalysis`, once per new
+  glyph); one draw call composites every glyph, `BG_TRANSPARENT` is a blend,
+  and the caret is two shader pixels.
+- **Unified memory, asked not assumed**: every per-frame upload is
+  `Map(WRITE_DISCARD)` — a driver rename into the one LPDDR5x pool on a UMA
+  part — and `MacvmRenderIsUma` reports `CheckFeatureSupport`'s answer to the
+  guest. This machine answers **1**.
+- `Present(1)`: presents ride the panel's refresh.
+
+Two defects the rewrite caught, both now pinned by headless GPU readback tests
+(`gpu::tests`, rendering the real pipeline into an offscreen target):
+
+- The fullscreen triangle is counter-clockwise and **D3D11's default
+  rasterizer culled it** — every counter green over a silently white pane.
+  Metal has no default cull, which is why upstream never met this.
+  `CULL_NONE` is load-bearing.
+- The WG8 gate asserted a hard-coded stride (160) rather than the
+  relationship (`indexStride = stride/4`); the resolution change broke the
+  constant, not the claim.
+
+Measured after: plasma ~34 fps at the 30 fps target, Julia ~13 fps
+(CPU-bound in fixed point at 160×120 — its plane is smaller per mode because
+per-pixel *iteration* does not belong on the UI thread), and the control port
+answers instantly while both run.
+
+**Still open (WG11 candidate):** the demo AS a shader — upstream's
+`GamePane>>shader:` (prim 259) lets the guest supply fragment-shader source;
+the D3D11 twin would run Julia on the Adreno at any resolution for zero
+UI-thread cost, which is the full SOC showcase.
+
 ---
 
 ## Standing rules

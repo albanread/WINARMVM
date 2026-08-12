@@ -1894,8 +1894,11 @@ gate-wg8:
     IXS=$(grep -E '^WG8 ix-stride ' /tmp/wg8_gate.txt | awk '{print $NF}')
     PLEN=$(grep -E '^WG8 pal-len '  /tmp/wg8_gate.txt | awk '{print $NF}')
     echo "palette: index stride $IXS, $PLEN slots"
-    test "$IXS" -eq 160
+    #    The RELATIONSHIP, not a constant (WG2 Δ 14): the index plane is one
+    #    byte per pixel where BGRA is four, whatever the plane's width is —
+    #    a hard-coded 160 broke the day the canvas went to 320x240.
     test "$IXS" -eq "$((STRIDE / 4))"
+    test "$IXS" -ge 160
     test "$PLEN" -eq 256
 
     # 6. AND THE FIELD IS WRITTEN ONCE. Three palette frames, one field. This is

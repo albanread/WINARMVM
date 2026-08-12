@@ -8,42 +8,37 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::mem::ManuallyDrop;
 
-use windows::core::Interface;
 use windows::Win32::Foundation::HWND;
-use windows::Win32::Graphics::Direct2D::{
-    D2D1CreateFactory, ID2D1Bitmap1, ID2D1DeviceContext, ID2D1Factory1, ID2D1RenderTarget,
-    ID2D1SolidColorBrush, D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_TARGET,
-    D2D1_BITMAP_PROPERTIES1, D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_FACTORY_TYPE_SINGLE_THREADED,
-};
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP};
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11CreateDevice, ID3D11Device, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION,
+    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11RenderTargetView,
+    ID3D11Texture2D, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION,
 };
-use windows::Win32::Graphics::DirectWrite::IDWriteFontFace;
+use windows::Win32::Graphics::DirectWrite::{
+    DWriteCreateFactory, IDWriteFactory, IDWriteFontFace, DWRITE_FACTORY_TYPE_SHARED,
+};
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_FORMAT_B8G8R8A8_UNORM as FMT, DXGI_SAMPLE_DESC,
 };
 use windows::Win32::Graphics::Dxgi::{
-    CreateDXGIFactory2, IDXGIDevice, IDXGIFactory2, IDXGISurface, IDXGISwapChain1,
-    DXGI_SCALING_NONE, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
-    DXGI_USAGE_RENDER_TARGET_OUTPUT,
+    CreateDXGIFactory2, IDXGIFactory2, IDXGISwapChain1, DXGI_SCALING_NONE, DXGI_SWAP_CHAIN_DESC1,
+    DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, DXGI_USAGE_RENDER_TARGET_OUTPUT,
 };
 
-use crate::{
-    client_size, colorref_to_d2d, draw_grid, draw_pixel_plane, mono_face_metrics, rt_props, Cell,
-    CellMetrics, PixelPlane,
-};
+use crate::gpu::Pipe;
+use crate::{client_size, mono_face_metrics, Cell, CellMetrics, PixelPlane};
 
 struct Renderer {
     hwnd: HWND,
+    dw_factory: IDWriteFactory,
     face: IDWriteFontFace,
     metrics: CellMetrics,
-    ctx: ID2D1DeviceContext,
+    /// WG10a: the shader pipeline — every colour on this pane is decided by a
+    /// pixel shader on the device. `gpu.rs` is the design note.
+    pipe: Pipe,
     swap: IDXGISwapChain1,
-    brush: ID2D1SolidColorBrush,
-    target: Option<ID2D1Bitmap1>,
+    rtv: Option<ID3D11RenderTargetView>,
     px_w: u32,
     px_h: u32,
     cols: u32,
@@ -142,7 +137,6 @@ fn build(hwnd: HWND, pt: f32, dpi: f32) -> Result<Renderer, String> {
         }
         hr.map_err(|e| format!("D3D11CreateDevice: {e}"))?;
         let device = device.ok_or("D3D11CreateDevice answered no device")?;
-        let dxgi_dev: IDXGIDevice = device.cast().map_err(|e| format!("cast IDXGIDevice: {e}"))?;
 
         let dxgi_factory: IDXGIFactory2 =
             CreateDXGIFactory2(Default::default()).map_err(|e| format!("CreateDXGIFactory2: {e}"))?;
@@ -177,30 +171,23 @@ fn build(hwnd: HWND, pt: f32, dpi: f32) -> Result<Renderer, String> {
             .CreateSwapChainForHwnd(&device, hwnd, &desc, None, None)
             .map_err(|e| format!("CreateSwapChainForHwnd: {e}"))?;
 
-        let d2d: ID2D1Factory1 = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)
-            .map_err(|e| format!("D2D1CreateFactory: {e}"))?;
-        let d2d_dev = d2d
-            .CreateDevice(&dxgi_dev)
-            .map_err(|e| format!("ID2D1Factory1::CreateDevice: {e}"))?;
-        let ctx = d2d_dev
-            .CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)
-            .map_err(|e| format!("CreateDeviceContext: {e}"))?;
-        // DPI PINNED TO 96 so a DIP is a pixel — see `rt_props`. The cell
-        // metrics are already physical pixels; a second scale here would be
-        // the two-authorities mistake again, somewhere much harder to see.
-        ctx.SetDpi(96.0, 96.0);
-        let brush = ctx
-            .CreateSolidColorBrush(&colorref_to_d2d(0), None)
-            .map_err(|e| format!("CreateSolidColorBrush: {e}"))?;
+        // The immediate context, for the pipe's uploads and draws.
+        let dctx: ID3D11DeviceContext = device
+            .GetImmediateContext()
+            .map_err(|e| format!("GetImmediateContext: {e}"))?;
+
+        let dw_factory: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)
+            .map_err(|e| format!("DWriteCreateFactory: {e}"))?;
+        let pipe = Pipe::new(device, dctx, &metrics)?;
 
         let mut r = Renderer {
             hwnd,
+            dw_factory,
             face,
             metrics,
-            ctx,
+            pipe,
             swap,
-            brush,
-            target: None,
+            rtv: None,
             px_w,
             px_h,
             cols: 0,
@@ -216,30 +203,23 @@ fn build(hwnd: HWND, pt: f32, dpi: f32) -> Result<Renderer, String> {
 }
 
 impl Renderer {
-    /// Point the device context at the swapchain's current back buffer.
+    /// A render-target view of the swapchain's current back buffer.
     fn bind_backbuffer(&mut self) -> Result<(), String> {
         unsafe {
-            let surface: IDXGISurface =
+            let tex: ID3D11Texture2D =
                 self.swap.GetBuffer(0).map_err(|e| format!("GetBuffer: {e}"))?;
-            let props = D2D1_BITMAP_PROPERTIES1 {
-                pixelFormat: rt_props().pixelFormat,
-                dpiX: 96.0,
-                dpiY: 96.0,
-                bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
-                colorContext: ManuallyDrop::new(None),
-            };
-            let bmp = self
-                .ctx
-                .CreateBitmapFromDxgiSurface(&surface, Some(&props))
-                .map_err(|e| format!("CreateBitmapFromDxgiSurface: {e}"))?;
-            self.ctx.SetTarget(&bmp);
-            self.target = Some(bmp);
+            let mut rtv = None;
+            self.pipe
+                .device
+                .CreateRenderTargetView(&tex, None, Some(&mut rtv))
+                .map_err(|e| format!("CreateRenderTargetView: {e}"))?;
+            self.rtv = rtv;
             Ok(())
         }
     }
 
     /// Follow the pane's client size. `ResizeBuffers` FAILS while the old back
-    /// buffer is still referenced, so the target bitmap is released first and
+    /// buffer is still referenced, so the view is released first and
     /// re-created after — the classic, named here so it is not re-discovered.
     fn resize_if_needed(&mut self) -> Result<(), String> {
         let (w, h) = client_size(self.hwnd)?;
@@ -247,8 +227,8 @@ impl Renderer {
             return Ok(());
         }
         unsafe {
-            self.ctx.SetTarget(None);
-            self.target = None;
+            self.rtv = None;
+            self.pipe.dctx.OMSetRenderTargets(None, None);
             self.swap
                 .ResizeBuffers(0, w, h, FMT, Default::default())
                 .map_err(|e| format!("ResizeBuffers: {e}"))?;
@@ -260,39 +240,25 @@ impl Renderer {
 
     fn present(&mut self) -> Result<(), String> {
         self.resize_if_needed()?;
-        let rt: ID2D1RenderTarget = self.ctx.cast().map_err(|e| format!("cast rt: {e}"))?;
-        unsafe {
-            rt.BeginDraw();
-            rt.Clear(Some(&colorref_to_d2d(0x00FF_FFFF)));
-        }
-        if let Some(plane) = self.plane.as_mut() {
-            // SM4: an indexed plane is expanded through its palette HERE, on
-            // the renderer's side, once per presented frame. That placement is
-            // the whole saving — the guest that cycled the palette wrote 256
-            // words, and this is what turns them into a screenful.
-            plane.resolve();
-            let plane = &*plane;
-            if let Err(e) = draw_pixel_plane(&rt, plane, self.px_w as f32, self.px_h as f32) {
-                let _ = unsafe { rt.EndDraw(None, None) };
-                return Err(e);
-            }
-        }
-        let drew = draw_grid(
-            &rt,
-            &self.brush,
+        let rtv = self.rtv.as_ref().ok_or("no back buffer view")?.clone();
+        self.pipe.render(
+            &rtv,
+            self.px_w,
+            self.px_h,
+            &self.dw_factory,
             &self.face,
             &self.metrics,
             self.cols,
             self.rows,
             &self.cells,
             self.caret,
-        );
-        // EndDraw runs on EVERY path, including a failed draw — the same rule
-        // `EndPaint` and `CloseClipboard` follow elsewhere in this port.
-        let end = unsafe { rt.EndDraw(None, None) };
-        drew?;
-        end.map_err(|e| format!("EndDraw: {e}"))?;
+            self.plane.as_ref(),
+        )?;
         unsafe {
+            // Sync interval 1: presents ride the display's own refresh, which
+            // is the frame pacing the design asks for — a free-running loop
+            // upstairs is throttled HERE, by the swapchain, at the rate the
+            // panel actually shows frames.
             self.swap
                 .Present(1, Default::default())
                 .ok()
@@ -542,6 +508,18 @@ pub extern "C" fn MacvmRenderPalette(hwnd: i64) -> i64 {
 #[no_mangle]
 pub extern "C" fn MacvmRenderPaletteLen(_hwnd: i64) -> i64 {
     crate::PALETTE_LEN as i64
+}
+
+/// **The SOC fact, reported.** 1 when the device runs unified memory — one
+/// pool shared by CPU and GPU, which is what Snapdragon X is (LPDDR5x on
+/// package, Adreno on die) — 0 on a discrete adapter, -1 when this window has
+/// no renderer. Asked of the DEVICE via `CheckFeatureSupport`, never assumed
+/// of the machine: the same binary on a discrete-GPU box answers 0 and every
+/// design decision in `gpu.rs` still holds, just with a real copy where the
+/// UMA driver renames.
+#[no_mangle]
+pub extern "C" fn MacvmRenderIsUma(hwnd: i64) -> i64 {
+    with_pane(hwnd, -1, |r| if r.pipe.uma { 1 } else { 0 })
 }
 
 /// Drop this pane's pixel plane. A pane with none draws only its cell grid.

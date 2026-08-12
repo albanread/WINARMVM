@@ -38,6 +38,10 @@ features = [
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Direct3D",
     "Win32_Graphics_Direct3D11",
+    # WG10a: the shader pipeline. Fxc is the runtime HLSL compiler — the
+    # shaders are compiled at attach, which keeps them readable source in
+    # this crate rather than checked-in bytecode.
+    "Win32_Graphics_Direct3D_Fxc",
     "Win32_Graphics_Imaging",
     "Win32_System_Com",
     "Win32_UI_WindowsAndMessaging",

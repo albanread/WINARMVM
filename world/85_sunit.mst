@@ -95,6 +95,19 @@ Object subclass: TestCase [
         a = b ifFalse: [
             result fail: current , ': expected ' , b printString , ' got ' , a printString ]
     ]
+    assert: a equals: b description: aString [
+        "WG10. `assert:equals:` reports what it got, which is most of what you
+         want; this adds what you were CHECKING, which is the rest. Written the
+         moment a Life test wanted to say `a blinker keeps three cells` and had
+         to choose between the value and the reason.
+
+         Both, and in that order: the description first because it says what
+         broke, the numbers after because they say how."
+        result ranOne.
+        a = b ifFalse: [
+            result fail: current , ': ' , aString
+                , ' (expected ' , b printString , ', got ' , a printString , ')' ]
+    ]
     deny: aBool [
         self assert: aBool == false
     ]

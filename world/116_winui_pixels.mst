@@ -39,6 +39,10 @@ Object subclass: WinPixels [
         <primitive: FFI function: #MacvmRenderPixelStride library: #'winui_render.dll' ret: #g args: #(g)>
         ^self primitiveFailed: 'MacvmRenderPixelStride'
     ]
+    WinPixels class >> rawIsUma: hwnd <Integer> ^ <Integer> [
+        <primitive: FFI function: #MacvmRenderIsUma library: #'winui_render.dll' ret: #g args: #(g)>
+        ^self primitiveFailed: 'MacvmRenderIsUma'
+    ]
     WinPixels class >> rawDrop: hwnd <Integer> ^ <Integer> [
         <primitive: FFI function: #MacvmRenderDropPixelPlane library: #'winui_render.dll' ret: #g args: #(g)>
         ^self primitiveFailed: 'MacvmRenderDropPixelPlane'
@@ -62,6 +66,15 @@ Object subclass: WinPixels [
     WinPixels class >> strideFor: hwnd <Integer> ^ <Integer> [
         (self available not or: [ hwnd = 0 ]) ifTrue: [ ^0 ].
         ^[ self rawStride: hwnd ] on: Error do: [ :e | 0 ]
+    ]
+
+    WinPixels class >> unifiedMemory: hwnd <Integer> ^ <Integer> [
+        "1 on a unified-memory device — Snapdragon X says 1 — 0 on a discrete
+         adapter, -1 with no renderer. The fact comes from CheckFeatureSupport
+         on the DEVICE, so it is true of the machine actually drawing, not of
+         the machine the code was written on."
+        (self available not or: [ hwnd = 0 ]) ifTrue: [ ^0 - 1 ].
+        ^[ self rawIsUma: hwnd ] on: Error do: [ :e | 0 - 1 ]
     ]
 
     WinPixels class >> dropFor: hwnd <Integer> [
@@ -177,7 +190,7 @@ Object subclass: WinPixels [
 ]
 
 Object subclass: WinShell [
-    <classVars: PlasmaPhase CanvasFrames CanvasMode IndexFieldDrawn>
+    <classVars: PlasmaPhase CanvasFrames CanvasMode IndexFieldDrawn CanvasAnimating LastFrameMs>
 
     "-- the CANVAS view, which is where pixels belong --------------------
      The first version of this demo drew plasma into the EDITOR's pane, and the
@@ -236,8 +249,95 @@ Object subclass: WinShell [
             with: (((r at: 4) - (r at: 2)) max: 1)
     ]
 
+    WinShell class >> canvasPlaneWidth ^ <Integer> [
+        "PER MODE, because the plane's size is a budget and the modes spend
+         differently. Plasma and the palette write cheap pixels — 320x240.
+         Julia ITERATES per pixel; at 320x240 a frame cost ~100ms of UI-thread
+         time, which is longer than the 33ms frame budget — the thread never
+         idled and the control port starved. At 160x120 it fits, and the GPU's
+         point-sampler stretches it to the pane; big pixels are what a
+         computed plane honestly looks like.
+
+         The durable fix is the next sprint: the demo AS a shader on the
+         Adreno (upstream's GamePane>>shader:), where per-pixel work belongs."
+        ^self canvasMode == #julia ifTrue: [ 160 ] ifFalse: [ 320 ] ]
+    WinShell class >> canvasPlaneHeight ^ <Integer> [
+        ^self canvasMode == #julia ifTrue: [ 120 ] ifFalse: [ 240 ] ]
+
+
     WinShell class >> canvasFrames ^ <Integer> [
         ^CanvasFrames isNil ifTrue: [ 0 ] ifFalse: [ CanvasFrames ] ]
+
+    "── the animation loop ──────────────────────────────────────────────
+     Until WG10 there was none. The Canvas rendered on `WM_PAINT` and when
+     something evaluated `renderCanvas`, which means a demo whose whole point is
+     that it MOVES sat still — and a still plasma is indistinguishable from a
+     broken one, which is the failure `plasmaFrame` was written to avoid and
+     then reintroduced by having nothing drive it.
+
+     ONE FRAME PER DRAIN PASS, and then ASK FOR ANOTHER PASS. The heartbeat is
+     50 ms, so animating on the heartbeat alone caps at 20 fps regardless of how
+     fast a frame is; `ReaskOnce` makes the pump come straight back once the
+     message queue is empty, so the rate is the frame time and input still wins.
+     A `while true` here would be the same frames and a dead window."
+
+    WinShell class >> canvasAnimating ^ <Boolean> [
+        ^CanvasAnimating == true ]
+
+    WinShell class >> canvasTimerId ^ <Integer> [ ^55458 ]
+
+    WinShell class >> canvasFpsTarget ^ <Integer> [
+        "30, and it is a REQUEST RATE, not a speed limit the loop tries to
+         beat. The author's words when the first loop ran free at 200 fps and
+         saturated the UI thread: we are meant to request the frame at 30 or
+         60 fps. A demo that renders faster than anyone can see it is spending
+         the interactive thread on frames the panel will drop."
+        ^30 ]
+
+    WinShell class >> canvasAnimating: aBool <Boolean> ^ <Boolean> [
+        "A DEDICATED TIMER, not a spin. `askForAnotherPass` + a posted wake
+         re-enters the drain the moment the queue is empty — measured saturating
+         the UI thread so thoroughly the control port timed out. The timer fires
+         WM_TIMER at ~16ms; the drain runs only when the request flag is armed;
+         and `serviceCanvasAnimation` renders only when a frame is DUE. Between
+         frames the thread is genuinely idle, which is what the busy indicator
+         was reporting the absence of."
+        CanvasAnimating := aBool.
+        self isOpen ifTrue: [
+            aBool
+                ifTrue: [
+                    WinApi setTimer: self hwndValue id: self canvasTimerId
+                        elapse: 16 proc: 0.
+                    self askForAnotherPass ]
+                ifFalse: [
+                    WinApi killTimer: self hwndValue id: self canvasTimerId ] ].
+        ^self canvasAnimating
+    ]
+
+    WinShell class >> serviceCanvasAnimation [
+        "One frame IF ONE IS DUE, then re-arm and go idle. Cheapest possible
+         no on every pass where nothing is animating — three tests and out.
+
+         THE SHAPE: the canvas timer ticks at ~16ms; every tick runs a drain
+         pass because the request flag below stays armed; and the clock check
+         here turns ticks into frames at `canvasFpsTarget`. No posted wake —
+         a posted wake re-enters the drain the instant the queue empties,
+         which is a spin wearing a schedule, and it saturated the UI thread
+         until the control port timed out. Between frames the thread idles in
+         GetMessage, which is where an interactive thread belongs."
+        | now due |
+        self canvasAnimating ifFalse: [ ^self ].
+        self activeView == self canvasViewName ifFalse: [ ^self ].
+        self canvasPaneHwnd = 0 ifTrue: [ ^self ].
+        now := Time millisecondClockValue.
+        due := LastFrameMs isNil
+            or: [ now - LastFrameMs >= (1000 // self canvasFpsTarget) ].
+        due ifTrue: [
+            LastFrameMs := now.
+            self renderCanvas ].
+        self askForAnotherPass.
+        ^self
+    ]
 
     "-- the demo ---------------------------------------------------------
      Plasma: cheap, obviously wrong if the arithmetic is wrong, and it MOVES —
@@ -257,14 +357,13 @@ Object subclass: WinShell [
         stride := WinPixels strideFor: hwnd.
         stride = 0 ifTrue: [ ^false ].
         ph := self plasmaPhase.
+        "ROW BY ROW, and the row is a METHOD. Tier-up counts method entries
+         rather than loop back-edges, so a 19,200-iteration loop inside a method
+         entered once a frame never compiles — measured at eleven times slower
+         than the same arithmetic split across many calls. See the note in
+         `119_winui_demos.mst`, which is where it was found."
         0 to: h - 1 do: [ :y |
-            0 to: w - 1 do: [ :x |
-                | v |
-                "Integer-only: a per-pixel Float would allocate on a
-                 tagged-integer VM, and this loop runs w*h times a frame."
-                v := ((x * 3) + (y * 2) + ph) bitAnd: 255.
-                WinPixels at: base x: x y: y stride: stride
-                    put: (WinPixels bgraR: v g: 255 - v b: ((x + y + ph) bitAnd: 255)) ] ].
+            self plasmaRow: y base: base stride: stride width: w phase: ph ].
         PlasmaPhase := ph + 4.
         ^true
     ]
@@ -335,6 +434,53 @@ Object subclass: WinShell [
         ^true
     ]
 
+    WinShell class >> drawCanvasContentOn: hwnd <Integer> ^ <Boolean> [
+        "ONE PLACE THE MODE IS DECIDED. `renderCanvas` owns the pane, the grid
+         and the HUD; what goes in the plane is chosen here and nowhere else,
+         which is what lets WG10 add demos without touching the render path.
+
+         Anything this file does not know is handed to `drawGalleryOn:` — a
+         no-op until `119_winui_demos.mst` defines it, so the Canvas works with
+         or without the gallery loaded."
+        self canvasMode == #palette ifTrue: [
+            "The plane must exist before it can be indexed — SM4 is a second
+             call on an SM0 plane, never a replacement for one."
+            (WinPixels planeFor: hwnd width: self canvasPlaneWidth height: self canvasPlaneHeight) = 0 ifTrue: [ ^false ].
+            (self paintIndexFieldOn: hwnd width: self canvasPlaneWidth height: self canvasPlaneHeight) ifFalse: [ ^false ].
+            ^self cyclePaletteOn: hwnd ].
+        self canvasMode == #plasma ifTrue: [
+            ^self drawPlasmaOn: hwnd width: self canvasPlaneWidth height: self canvasPlaneHeight ].
+        ^self drawGalleryOn: hwnd
+    ]
+
+    WinShell class >> drawGalleryOn: hwnd <Integer> ^ <Boolean> [
+        "WG10 overrides. Answering false here means an unknown mode draws
+         nothing rather than drawing the last mode's buffer, which would be a
+         stale frame presented as a current one."
+        ^false
+    ]
+
+    WinShell class >> canvasLabel ^ <String> [
+        "The HUD names the COST, because that is what the modes differ in and it
+         is not visible from the picture."
+        self canvasMode == #palette ifTrue: [
+            ^'CANVAS palette - 256 stores/frame, 19200 pixels move' ].
+        ^'CANVAS plasma - 19200 stores/frame, direct BGRA'
+    ]
+
+    WinShell class >> plasmaRow: y <Integer> base: base <Integer> stride: stride <Integer>
+                      width: w <Integer> phase: ph <Integer> [
+        "Integer-only: a per-pixel Float would allocate on a tagged-integer VM,
+         and this runs w times a row, h rows a frame."
+        | v b2 |
+        b2 := (y * 2) + ph.
+        0 to: w - 1 do: [ :x |
+            v := ((x * 3) + b2) bitAnd: 255.
+            WinPixels at: base x: x y: y stride: stride
+                put: (WinPixels bgraR: v g: 255 - v b: ((x + y + ph) bitAnd: 255)) ].
+        ^self
+    ]
+
     WinShell class >> renderCanvas ^ <Boolean> [
         "BOTH PLANES, which is the claim WG8 actually makes: pixels underneath,
          a text HUD over them, neither knowing about the other.
@@ -351,15 +497,7 @@ Object subclass: WinShell [
         (WinRender cellWidthFor: hwnd) = 0 ifTrue: [
             (WinRender attach: hwnd points: 9 dpi: self editorMetricsDpi)
                 ifFalse: [ ^false ] ].
-        self canvasMode == #palette
-            ifTrue: [
-                "The plane must exist before it can be indexed — SM4 is a second
-                 call on an SM0 plane, never a replacement for one."
-                (WinPixels planeFor: hwnd width: 160 height: 120) = 0 ifTrue: [ ^false ].
-                (self paintIndexFieldOn: hwnd width: 160 height: 120) ifFalse: [ ^false ].
-                (self cyclePaletteOn: hwnd) ifFalse: [ ^false ] ]
-            ifFalse: [
-                (self drawPlasmaOn: hwnd width: 160 height: 120) ifFalse: [ ^false ] ].
+        (self drawCanvasContentOn: hwnd) ifFalse: [ ^false ].
         cw := WinRender cellWidthFor: hwnd.
         ch := WinRender cellHeightFor: hwnd.
         (cw = 0 or: [ ch = 0 ]) ifTrue: [ ^false ].
@@ -368,14 +506,9 @@ Object subclass: WinShell [
         base := WinRender gridFor: hwnd cols: cols rows: rows.
         base = 0 ifTrue: [ ^false ].
         WinRender clear: hwnd to: 16rFFFFFF on: WinPixels transparentBackground.
-        "The HUD names the COST, because that is what the two modes differ in
-         and it is not visible from the picture. `WinShell canvasMode: #palette`
-         in the Workspace switches; both draw the same 160x120 plane."
-        label := self canvasMode == #palette
-            ifTrue: [ 'CANVAS palette - 256 stores/frame, 19200 pixels move - frame '
-                , (self canvasFrames + 1) printString ]
-            ifFalse: [ 'CANVAS plasma - 19200 stores/frame, direct BGRA - frame '
-                , (self canvasFrames + 1) printString ].
+        "`WinShell canvasMode: #plasma | #palette | #life | #julia` in the
+         Workspace switches; each mode owns its own line via `canvasLabel`."
+        label := self canvasLabel , ' - frame ' , (self canvasFrames + 1) printString.
         "The label's OWN cells are opaque; every other cell in the grid is not.
          White-on-transparent was legible over the plasma and unreadable over a
          cycling palette — there is no ink colour that contrasts with a field
