@@ -123,3 +123,7 @@
 # `WinIo` never shipped: it lives in the TEST file, written to prove the P5
 # resolver rather than to be a facility.
 113_winui_file.mst
+# WINARM (WG7-1): the Debugger — the native face of the VM's HALT loop. The
+# primary parks and publishes; this renders. Loads after 110 (the renderer it
+# draws on) and 93 (the view it registers into).
+114_winui_debugger.mst

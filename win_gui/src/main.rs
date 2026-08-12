@@ -114,6 +114,7 @@ fn main() {
 // copy would have to grow a platform switch inside it.
 #[cfg(windows)]
 mod boot;
+mod debugger;
 
 #[cfg(windows)]
 #[path = "../../gui/src/control.rs"]
@@ -672,6 +673,21 @@ mod app {
                 // HERE, on the control drain between dispatches, because
                 // joining a thread from inside the door would be a VM entry
                 // waiting on another VM.
+                // WG7-1: one command line into the parked halt loop —
+                // `step`, `over`, `finish`, `continue`, `abort`. Answers
+                // whether it was ACCEPTED, because a command sent while
+                // nothing is halted is dropped on purpose (see `send_command`).
+                "dbg" => {
+                    let ok = crate::debugger::send_command(arg.to_string());
+                    let _ = req.reply.send(if ok {
+                        format!("OK dbg {arg}")
+                    } else {
+                        "ERR dbg: nothing is halted".to_string()
+                    });
+                }
+                "dbgreport" => {
+                    let _ = req.reply.send(format!("OK {}", crate::debugger::report()));
+                }
                 "restart" => {
                     let reply = match link.as_mut() {
                         None => "ERR no primary to restart (single-VM path)".to_string(),
@@ -1033,6 +1049,20 @@ mod app {
                         let vm: &mut VmHandle = unsafe { &mut *vmp };
                         ui_mon.publish(vm.metrics());
                         refresh_monitor(vm);
+                    }
+                    // WG7-1: a fresh halt report. Pushed on the SAME beat and
+                    // for the same reason everything else is — the primary is
+                    // parked inside the halt, so it cannot be asked; it can
+                    // only have told us. That the pump is still running at all
+                    // while the VM it debugs is frozen is WG4 D1's two-VM
+                    // split doing its job.
+                    if crate::debugger::take_halt_arrived() {
+                        let vm: &mut VmHandle = unsafe { &mut *vmp };
+                        let payload = crate::debugger::report().replace('\u{27}', "''");
+                        let _ = guarded_exec(
+                            vm,
+                            &format!("WinShell haltArrived: '{payload}'."),
+                        );
                     }
                     if let Some(inbox) = link.as_ref().map(|l| &l.inbox) {
                         // SAFETY: as above — between dispatches, on the one

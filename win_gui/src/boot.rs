@@ -294,6 +294,7 @@ fn primary_thread_main(
     // because its thread is main and it is already there. WG1's Δ 1 is the
     // warning this call answers: minting a hosted entry requires a primary to
     // host it, and until this sprint there was none.
+    let wake_for_debugger = wake.clone();
     let Some((id, hosted_inbox, to_primary)) = primary.register_hosted_worker(wake) else {
         let _ = ready_tx.send(Err(VmError {
             msg: "register_hosted_worker failed (not a primary, or the fleet is at its cap)".into(),
@@ -309,6 +310,12 @@ fn primary_thread_main(
     // right after registration, so broken wiring fails fast and loudly rather
     // than at the first real request. Empty bytes = a bare nudge.
     primary.send_to_worker(id, 0, Vec::new());
+
+    // WG7-1: the GUI debugger frontend, installed on THIS generation. Re-run
+    // for every restart (WG7-3), exactly as the Mac re-installs on respawn —
+    // a frontend belongs to the VM that halts, and a restarted primary is a
+    // different VM.
+    crate::debugger::install(&mut primary, wake_for_debugger);
 
     // WG7-2: join the Monitor's roster. `monitor_register` REUSES a dead slot
     // with the same label, so a restarted primary (WG7-3) keeps ONE row and

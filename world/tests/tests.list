@@ -176,5 +176,8 @@ tier1.mst
 # WG7-2: the Monitor. Its column-shedding rule and its table formatting are
 # PURE over (rows, width), so 67 checks both with no window and no host.
 ../112_winui_monitor.mst
+# WG7-1: the Debugger. Its report parsing is PURE, so 67 checks it with no
+# primary and nothing halted.
+../114_winui_debugger.mst
 67_winui_editor_tests.mst
 99_run_all.mst

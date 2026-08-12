@@ -587,6 +587,15 @@ fn verb_gui(_vm: &mut Vm<'_>, args: &[Value]) -> TclResult<Value> {
         // proof that a restart really happened — a fresh registry mints a fresh
         // id, so an unchanged one means nothing was replaced.
         "restart" => gui_request(ctx, "restart").map(Value::new),
+        // WINARM (WG7-1): one command line into the primary's parked halt
+        // loop, and the current report. `dbg` answers whether the command was
+        // ACCEPTED — one sent while nothing is halted is dropped on purpose,
+        // because it would otherwise be eaten by the NEXT halt.
+        "dbg" => {
+            let line = arg.ok_or_else(|| TclError::runtime("usage: gui dbg <command>"))?;
+            gui_request(ctx, &format!("dbg {line}")).map(Value::new)
+        }
+        "dbgreport" => gui_request(ctx, "dbgreport").map(Value::new),
         other => Err(TclError::runtime(format!(
             "gui: unknown subcommand '{other}' (connect/ping/rebuild/game/stopgame/gameclose/eval/doit/view/snap/door/resize/drain/track/burst/send/restart/sleep/quit)"
         ))),

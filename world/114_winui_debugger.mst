@@ -1,0 +1,152 @@
+"── 114_winui_debugger.mst — WG7-1: the Debugger ─────────────────────────
+ docs/sprints/sprint_wg7_detail.md WG7-1. The native face of the VM's HALT
+ loop: the primary parks in `debug::halt`, publishes its FULL report, and this
+ renders it.
+
+ THE ONE THING THAT MAKES IT POSSIBLE was built in WG4 D1 and costs nothing
+ here: the UI is a SEPARATE VM on the main thread, so a primary frozen inside
+ a halt blocks nothing — the pump keeps pumping, the window keeps painting,
+ the metrics cluster keeps ticking. `73_cocoadebugger.mst` records the same of
+ the Mac: *no reentrancy work*. A single-VM GUI would have to solve re-entrancy
+ to have a debugger at all; this one just has one.
+
+ BLAST, DON'T PATCH, again. The halt publishes the whole report and this
+ renders it wholesale — the same rule the Monitor, the metrics cluster and the
+ Editor's viewport all follow, and the same reason 60's note gives for
+ abandoning the incremental alternative.
+
+ ON A CELL PANE, for the reason the Monitor just proved: a stack trace and a
+ source listing are COLUMNS, and a proportional font makes columns that do not
+ line up look like columns that do. It is also the third consumer of WG6d-3's
+ per-window renderers, which is what those were for.
+
+ READ-ONLY THIS SPRINT, decided rather than drifted into. Accepting a method
+ into a frame that is mid-execution is a real feature and a real can of worms;
+ it is not smuggled in behind a pane that happens to be editable."
+
+Object subclass: WinShell [
+    <classVars: HaltReport HaltCount>
+
+    WinShell class >> debuggerViewName ^ <Symbol> [ ^#debugger ]
+    WinShell class >> debuggerPaneName ^ <Symbol> [ ^#debuggerPane ]
+
+    "── arrival ─────────────────────────────────────────────────────────"
+
+    WinShell class >> haltArrived: aReport <String> [
+        "A fresh report from the parked primary. It FRONTS ITSELF on a real
+         halt — a debugger you have to go and find is a debugger that watched
+         your program stop and said nothing — but not on the `RUNNING` report
+         that a restart publishes, which would yank the user out of whatever
+         view they were in every time the primary is replaced."
+        HaltReport := aReport.
+        HaltCount := (HaltCount isNil ifTrue: [ 0 ] ifFalse: [ HaltCount ]) + 1.
+        self isHalted ifTrue: [
+            self activeView == self debuggerViewName
+                ifTrue: [ self renderDebugger ]
+                ifFalse: [
+                    self appendTranscript: 'debugger: halted — ', self haltReason.
+                    self switchToView: self debuggerViewName ] ]
+            ifFalse: [
+                self activeView == self debuggerViewName ifTrue: [ self renderDebugger ] ].
+        ^self
+    ]
+
+    WinShell class >> haltReport ^ <String> [
+        ^HaltReport isNil ifTrue: [ 'RUNNING' ] ifFalse: [ HaltReport ] ]
+    WinShell class >> haltCount ^ <Integer> [
+        ^HaltCount isNil ifTrue: [ 0 ] ifFalse: [ HaltCount ] ]
+
+    WinShell class >> isHalted ^ <Boolean> [
+        "`RUNNING` is the frontend's own word for `nothing is parked`, and it
+         is the FIRST line rather than a flag — so this asks the report rather
+         than keeping a second copy of the truth that could disagree with it."
+        ^(self haltReport startsWith: 'RUNNING') not
+    ]
+
+    WinShell class >> haltReason ^ <String> [
+        "The report's first line, which is what the halt was FOR. Shown in the
+         transcript on arrival so the reason survives the user switching away."
+        | r i |
+        r := self haltReport.
+        i := 1.
+        [ i <= r size and: [ (r at: i) ~= Character nl ] ] whileTrue: [ i := i + 1 ].
+        ^r copyFrom: 1 to: i - 1
+    ]
+
+    "── the pane ────────────────────────────────────────────────────────"
+
+    WinShell class >> debuggerPaneHwnd ^ <Integer> [
+        | c |
+        c := self controlNamed: self debuggerPaneName.
+        ^c isNil ifTrue: [ 0 ] ifFalse: [ c handle ]
+    ]
+
+    WinShell class >> buildDebuggerPane [
+        (self controlNamed: self debuggerPaneName) ifNotNil: [ :x | ^self ].
+        self
+            addControl: self debuggerPaneName
+            class: self className
+            text: ''
+            style: (((WinApi constant: 'WS_CHILD')
+                bitOr: (WinApi constant: 'WS_BORDER'))
+                bitOr: (WinApi constant: 'WS_CLIPSIBLINGS'))
+            exStyle: 0.
+        ^self
+    ]
+
+    WinShell class >> showDebuggerPane: aBool <Boolean> [
+        (self controlNamed: self debuggerPaneName) ifNotNil: [ :c | c show: aBool ].
+        ^self
+    ]
+
+    WinShell class >> layoutDebuggerPane: content <Array> [
+        (self controlNamed: self debuggerPaneName) ifNotNil: [ :c | c moveTo: content ].
+        ^self
+    ]
+
+    WinShell class >> renderDebugger [
+        "The report, on the grid. One colour for the body and a marked first
+         line, because the REASON is the thing you read first and everything
+         else is context for it."
+        | hwnd cw ch c r cols rows base row col |
+        hwnd := self debuggerPaneHwnd.
+        hwnd = 0 ifTrue: [ ^self ].
+        (WinRender cellWidthFor: hwnd) = 0 ifTrue: [
+            (WinRender attach: hwnd points: 9 dpi: self editorMetricsDpi)
+                ifFalse: [ ^self ] ].
+        cw := WinRender cellWidthFor: hwnd.
+        ch := WinRender cellHeightFor: hwnd.
+        (cw = 0 or: [ ch = 0 ]) ifTrue: [ ^self ].
+        c := self controlNamed: self debuggerPaneName.
+        r := [ c screenRect ] on: Error do: [ :e | nil ].
+        r isNil ifTrue: [ ^self ].
+        cols := ((((r at: 3) - (r at: 1)) // cw) max: 1).
+        rows := ((((r at: 4) - (r at: 2)) // ch) max: 1).
+        base := WinRender gridFor: hwnd cols: cols rows: rows.
+        base = 0 ifTrue: [ ^self ].
+        WinRender clear: hwnd to: 16r000000 on: 16rFFFFFF.
+        row := 0.
+        col := 0.
+        self haltReport do: [ :chr |
+            chr = Character nl
+                ifTrue: [ row := row + 1. col := 0 ]
+                ifFalse: [
+                    chr = (Character value: 13) ifFalse: [
+                        (row < rows and: [ col < cols ]) ifTrue: [
+                            "CONTROL CODES BECOME SPACES. The halt report uses
+                             separators the font has no glyph for, and a cell
+                             grid asked to draw one shows a box — which read as
+                             `0[]Exception[]unhandled[]6[]17` where a readable
+                             stack row should be. A grid draws what it is given,
+                             so what it is given has to be printable."
+                            WinRender at: base col: col row: row cols: cols
+                                put: (chr asInteger < 32
+                                    ifTrue: [ 32 ] ifFalse: [ chr asInteger ])
+                                fg: (row = 0 ifTrue: [ 16r0000C0 ] ifFalse: [ 16r000000 ])
+                                bg: 16rFFFFFF ].
+                        col := col + 1 ] ] ].
+        WinRender caretFor: hwnd col: 0 row: 0 visible: false.
+        WinRender present: hwnd.
+        ^self
+    ]
+]

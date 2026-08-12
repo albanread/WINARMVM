@@ -467,6 +467,9 @@ Object subclass: WinShell [
         (hwnd ~= 0 and: [ hwnd = self monitorPaneHwnd ]) ifTrue: [
             ^[ self renderMonitor. 1 ]
                 on: Error do: [ :e | PaintError := e messageText. 0 ] ].
+        (hwnd ~= 0 and: [ hwnd = self debuggerPaneHwnd ]) ifTrue: [
+            ^[ self renderDebugger. 1 ]
+                on: Error do: [ :e | PaintError := e messageText. 0 ] ].
         hwnd = self editorPaneHwnd ifFalse: [ ^0 ].
         self ensureEditorRenderer ifFalse: [ ^0 ].
         ^[ self refreshEditorGrid. 1 ]
