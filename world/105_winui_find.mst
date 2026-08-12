@@ -139,7 +139,39 @@ Object subclass: WinShell [
         self listSet: #findResults
             items: ((FindHits isNil ifTrue: [ OrderedCollection new ] ifFalse: [ FindHits ])
                 collect: [ :f | self findRowLabel: f kind: FindKind ]) asArray.
+        FindHits isNil ifTrue: [ self listSet: #findResults items: self findEmptyState ].
+        (FindHits notNil and: [ FindHits isEmpty ]) ifTrue: [
+            self listSet: #findResults items: self findNoHitsState ].
         ^self
+    ]
+
+    WinShell class >> findEmptyState ^ <Array> [
+        "BEFORE ANY SEARCH. A blank list beside two buttons says nothing about
+         what the buttons do, what belongs in the box, or that a result is
+         clickable — and Find is the view most likely to be someone's first,
+         because it is how you get from a name you half-remember to the code.
+
+         Rows in a list rather than prose in a pane, because that is what this
+         view already has: the teaching arrives through the widget that will
+         later hold the answer, so its shape is familiar by the time it does."
+        ^Array
+            with: 'Type a selector above, then Implementors or Senders.'
+            with: ''
+            with: '  Implementors  every method whose name IS that selector'
+            with: '  Senders       every method that CALLS it'
+            with: '  Double-click  opens the hit in the Browser'
+    ]
+
+    WinShell class >> findNoHitsState ^ <Array> [
+        "A SEARCH THAT FOUND NOTHING is not the same screen as one never run,
+         and showing the same blank list for both is how `it is broken` and `it
+         is empty` become indistinguishable. This one names what was asked."
+        ^Array
+            with: 'No ' , (FindKind isNil ifTrue: [ 'hits' ] ifFalse: [ FindKind printString ])
+                , ' of ' , (FindSelector isNil ifTrue: [ '' ] ifFalse: [ FindSelector ]) , '.'
+            with: ''
+            with: 'Selectors are matched exactly, keyword colons included -'
+            with: 'at:put: will not be found by typing at:.'
     ]
 
     WinShell class >> findHits ^ <OrderedCollection> [
@@ -214,6 +246,10 @@ Object subclass: WinShell [
             exStyle: 0.
         #(#findField #findImpl #findSend #findResults) do: [ :n |
             (self controlNamed: n) ifNotNil: [ :c | c setFont: self guiFont ] ].
+        "FILL IT AT BUILD, or the teaching never shows: `fillFindResults` was
+         only ever reached from `find:`, so the one screen it exists for — the
+         view before any search — was the one screen it could not reach."
+        self fillFindResults.
         ^self
     ]
 

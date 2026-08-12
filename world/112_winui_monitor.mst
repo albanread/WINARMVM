@@ -133,6 +133,21 @@ Object subclass: WinShell [
         ws := WriteStream on: String new.
         shown do: [ :c | ws nextPutAll: (self padded: (c at: 2) to: (c at: 3)); nextPut: $  ].
         ws nextPut: (Character value: 13); nextPut: Character nl.
+        "THE EMPTY STATE. A header row over nothing looks like a Monitor that is
+         broken; it is in fact a Monitor that is early — the host pushes rows on
+         a timer, and before the first push there is genuinely nothing to show.
+         Saying which of those it is takes four lines and saves the reader from
+         debugging a working view."
+        self monitorRows isEmpty ifTrue: [
+            ws nextPutAll: 'No VMs reporting yet.'.
+            ws nextPut: (Character value: 13); nextPut: Character nl.
+            ws nextPutAll: 'The host pushes a row per running VM; the primary registers'.
+            ws nextPut: (Character value: 13); nextPut: Character nl.
+            ws nextPutAll: 'itself at boot, so one row here is the normal quiet case.'.
+            ws nextPut: (Character value: 13); nextPut: Character nl.
+            ws nextPutAll: 'Refreshes seen so far: ' , self monitorRefreshes printString.
+            ws nextPut: (Character value: 13); nextPut: Character nl.
+            ^ws contents ].
         self monitorRows do: [ :row |
             shown do: [ :c |
                 | v |

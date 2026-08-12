@@ -479,8 +479,35 @@ plane borrowed into somebody else's pane demonstrates a texture, not a view.
 `gate-wg8` now leads with three assertions about a view *existing* — registered,
 switchable, built — before it asserts anything about pixels at all.
 
-Still open in WG8: SM4's palette-as-memory, runnable doc examples, and the
-teaching empty states.
+**SM4 landed the same day** — an indexed plane plus a 256-word palette, both
+memory the guest writes. Re-colouring the screen costs the palette's size, not
+the screen's: 256 stores against 19,200 at 160x120. The Canvas runs both modes
+and names the cost in its HUD, because the difference is not visible from the
+picture.
+
+**"Runnable doc examples" is meant literally.** [`winui-cookbook.md`](winui-cookbook.md)'s
+fenced blocks are extracted by `scripts/cookbook-to-tcl.py` and *evaluated*
+against a live window by `just gate-cookbook`. It caught a dead selector on its
+first run, which is the entire argument for it: this port has already renamed a
+call site, changed a stride from assumed to asked-for, and moved the Monitor
+from an EDIT control to a cell grid — prose written before any of those would
+still read plausibly today.
+
+**Empty states now teach** — Debugger, Monitor and Find. The Debugger's was the
+single word `RUNNING`: accurate, and useless to the one person who most needs it,
+someone who opened the view to find out what it is for. Three notes worth
+keeping, because each was a defect the change surfaced:
+
+- `RUNNING` is a **load-bearing sentinel** (`isHalted` reads the report rather
+  than keeping a second copy of the truth), so teaching text goes *after* it.
+- The host pushes `RUNNING\n` at boot, so the guest's nil case never fired. The
+  host states the fact; this side chooses the words.
+- The text must be **ASCII**. A guest String is UTF-8 bytes and the cell grid
+  takes codepoints, so one em-dash arrived as three cells reading `a00` — the
+  fourth time that mismatch has reached a screen here. Now asserted per
+  character rather than remembered.
+
+WG8 is complete.
 
 ---
 

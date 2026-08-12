@@ -60,7 +60,74 @@ TestCase subclass: WinUiEditorWg6cTests [
         self runTest: #testPixelPackingIsBgraNotRgba
              do: [ self testPixelPackingIsBgraNotRgba ].
         self runTest: #testTransparentBackgroundIsNotAColour
-             do: [ self testTransparentBackgroundIsNotAColour ]
+             do: [ self testTransparentBackgroundIsNotAColour ].
+        self runTest: #testAnEmptyDebuggerSaysHowToFillIt
+             do: [ self testAnEmptyDebuggerSaysHowToFillIt ].
+        self runTest: #testAnEmptyMonitorSaysItIsEarlyNotBroken
+             do: [ self testAnEmptyMonitorSaysItIsEarlyNotBroken ]
+    ]
+
+    testAnEmptyDebuggerSaysHowToFillIt [
+        "A view's empty state is the screen it shows most, and the Debugger's
+         was the single word `RUNNING` — accurate, and teaching nothing to the
+         one person who most needs it: someone who opened the Debugger to find
+         out what it is for.
+
+         TWO THINGS AT ONCE, which is why this is a test rather than a look.
+         `isHalted` asks the report rather than keeping a second copy of the
+         truth, so `RUNNING` is a LOAD-BEARING sentinel — teaching text put in
+         front of it would silently make the shell believe it is halted forever.
+         So: it must still start with RUNNING, and it must still say something."
+        | r |
+        r := WinShell runningReport.
+        self assert: (r startsWith: 'RUNNING')
+            description: 'RUNNING is the sentinel isHalted reads; it must lead'.
+        self assert: WinShell isHalted not
+            description: 'and the teaching text must not read as a halt'.
+        self assert: r size > 200
+            description: 'an empty state that teaches is longer than one word'.
+        "It names the KEY, so the reader can act without leaving the view."
+        self assert: (WinShell indexOf: 'F5' in: r) > 0
+            description: 'the resume key belongs in the empty state'.
+        "And it names the two-VM split, which is the fact that makes this whole
+         view possible and is invisible from anywhere else in the shell."
+        self assert: (WinShell indexOf: 'primary' in: r) > 0
+            description: 'the empty state should say WHERE a halt happens'.
+        "ASCII ONLY. A guest String is UTF-8 BYTES and the cell grid takes
+         CODEPOINTS, so one em-dash becomes three cells reading `a00`. This is
+         the fourth time that mismatch has reached a screen in this port — the
+         Monitor's `0Â·0`, the Debugger's `[]` boxes, `ExtTextOut` given byte
+         counts — so the rule is asserted rather than remembered.
+
+         Checked on the WHOLE report, so a well-meant typographic dash added in
+         a later edit fails here rather than on someone's screen."
+        r do: [ :chr |
+            self assert: chr asInteger < 128
+                description: 'non-ASCII byte ' , chr asInteger printString
+                    , ' in the empty state renders as separate cells' ]
+    ]
+
+    testAnEmptyMonitorSaysItIsEarlyNotBroken [
+        "A header row over nothing reads as a broken Monitor. It is in fact an
+         early one — the host pushes rows on a timer — and the distinction is
+         four lines of text and one fewer afternoon spent debugging a view that
+         works.
+
+         Checked on the PURE formatter, so no window and no host are involved."
+        | empty full |
+        empty := WinShell monitorRowsArrived: ''.
+        empty := WinShell monitorTextFor: 100.
+        self assert: (WinShell indexOf: 'No VMs reporting yet' in: empty) > 0
+            description: 'an empty Monitor should say so in words'.
+        self assert: (WinShell indexOf: 'primary registers' in: empty) > 0
+            description: 'and should say what WOULD appear here'.
+        "And the moment there IS a row, the teaching gets out of the way — an
+         empty state that survived its own emptiness would be worse than none."
+        WinShell monitorRowsArrived: 'primary|running|1|2|3'.
+        full := WinShell monitorTextFor: 100.
+        self assert: (WinShell indexOf: 'No VMs reporting yet' in: full) = 0
+            description: 'the empty state must vanish when data arrives'.
+        WinShell monitorRowsArrived: ''
     ]
 
     testTransparentBackgroundIsNotAColour [

@@ -1,0 +1,52 @@
+"── 117_winui_examples.mst — WG8: doc examples that RUN ──────────────────
+ `docs/winui-cookbook.md`'s blocks are extracted and evaluated against a live
+ window by `just gate-cookbook`. This is the ten lines that make the result
+ checkable instead of merely printed.
+
+ WHY A FAILURE LIST rather than letting an error propagate. An unhandled error
+ in example three would abort the run and say nothing about examples four
+ through nine — so the gate would report one broken snippet when there might be
+ five, and the next run would report the next one. Recording and continuing
+ means one run tells you about all of them, which is the difference between a
+ gate you fix in an afternoon and one you fix five times.
+
+ WHY IT LIVES IN THE WORLD rather than in the driver. The driver is Tcl over a
+ socket and can only see what a doit ANSWERS; an example that half-worked would
+ answer fine. The handler is on this side of the seam because that is the only
+ side that can see the exception."
+
+Object subclass: WinShell [
+    <classVars: ExampleFailures>
+
+    WinShell class >> resetExampleFailures [
+        ExampleFailures := OrderedCollection new.
+        ^self
+    ]
+
+    WinShell class >> exampleFailures ^ <OrderedCollection> [
+        ExampleFailures isNil ifTrue: [ self resetExampleFailures ].
+        ^ExampleFailures
+    ]
+
+    WinShell class >> noteExampleFailure: aString <String> [
+        self exampleFailures add: aString.
+        "ALSO to the Transcript, because the gate reports a count and a count
+         does not tell you which line to open. The Transcript is where someone
+         watching the window finds out, and the two never disagree."
+        self appendTranscript: 'cookbook: ' , aString.
+        ^self
+    ]
+
+    WinShell class >> exampleFailureCount ^ <Integer> [
+        ^self exampleFailures size ]
+
+    WinShell class >> exampleFailureReport ^ <String> [
+        "One line per failure, or the empty String. Answered to the gate, which
+         prints it — a gate that failed with a bare `1 != 0` would be true and
+         useless."
+        | s |
+        s := WriteStream on: String new.
+        self exampleFailures do: [ :each | s nextPutAll: each ] separatedBy: [ s nextPutAll: ' | ' ].
+        ^s contents
+    ]
+]

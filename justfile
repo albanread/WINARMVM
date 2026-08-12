@@ -1917,3 +1917,57 @@ gate-wg8:
     for i in $(seq 1 60); do [ -f /tmp/wg8_exit ] && break || sleep 0.5; done
     test "$(cat /tmp/wg8_exit)" = "0"
     echo "gate-wg8: PASS"
+
+# docs/winui-cookbook.md — WG8's "runnable doc examples", meant literally.
+#
+# Every fenced smalltalk block in the cookbook is extracted, wrapped in a
+# handler, and EVALUATED against a live window. Not parsed, not linted — run.
+#
+# WHY THIS EXISTS. Documentation examples rot silently: the API moves, the prose
+# does not, and the first person to discover it is someone typing a snippet that
+# no longer works. This port has already renamed `hwnd` to `hwndValue` at a call
+# site, changed a plane's stride from assumed to asked-for, and moved the
+# Monitor from an EDIT control to a cell grid. Any prose written before those
+# would still read plausibly today. These cannot.
+#
+# WHY EACH BLOCK IS WRAPPED rather than left to raise. An unhandled error in
+# block three aborts the run and says nothing about blocks four onward — so one
+# broken snippet hides four others, and the gate gets fixed once per snippet
+# over five runs. Recording and continuing means one run names them all, which
+# is why `WinShell exampleFailureReport` is printed rather than just counted.
+gate-cookbook:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    taskkill //F //IM macvm-winui.exe > /dev/null 2>&1 || true
+    cargo build --quiet -p win_gui -p winui_host -p winui_render
+    rm -f /tmp/cook_exit /tmp/cook_app.txt /tmp/cook_gate.txt target/winui-cookbook.png
+    python scripts/cookbook-to-tcl.py docs/winui-cookbook.md target/cookbook.tcl
+    ( MACVM_WINUI_CTL=7717 ./target/debug/macvm-winui.exe > /tmp/cook_app.txt 2>&1; \
+        echo $? > /tmp/cook_exit ) &
+    for i in $(seq 1 90); do
+        (exec 3<>/dev/tcp/127.0.0.1/7717) 2>/dev/null && break || sleep 0.5
+    done
+    sleep 3
+    ./target/debug/macvm rusttcl target/cookbook.tcl | tee /tmp/cook_gate.txt
+    cat /tmp/cook_app.txt
+
+    # The cookbook must actually HAVE examples. A regex that quietly matched
+    # nothing would make an empty gate pass forever, which is the failure mode
+    # every extract-and-run harness has.
+    N=$(grep -E '^COOK blocks ' /tmp/cook_gate.txt | awk '{print $NF}')
+    echo "cookbook: $N runnable blocks"
+    test "$N" -ge 6
+
+    # And every one of them ran clean. The REPORT is printed on failure, not
+    # just the count — `1 != 0` would be true and useless.
+    F=$(grep -E '^COOK failures ' /tmp/cook_gate.txt | awk '{print $NF}')
+    if [ "$F" != "0" ]; then
+        echo "cookbook: $F example(s) failed —"
+        grep -E '^COOK report ' /tmp/cook_gate.txt
+        exit 1
+    fi
+
+    test -s target/winui-cookbook.png
+    for i in $(seq 1 60); do [ -f /tmp/cook_exit ] && break || sleep 0.5; done
+    test "$(cat /tmp/cook_exit)" = "0"
+    echo "gate-cookbook: PASS"

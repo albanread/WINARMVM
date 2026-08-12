@@ -135,3 +135,8 @@
 # sending it. Upstream's SM0 in the shape D3D11 allows, on the D3D device
 # `winui_render` already owns. Loads after 110, whose renderer holds the plane.
 116_winui_pixels.mst
+
+# WINARM (WG8): the cookbook's failure list. `docs/winui-cookbook.md`
+# is executed against a live window by `just gate-cookbook`; this is what
+# makes the result checkable rather than merely printed.
+117_winui_examples.mst

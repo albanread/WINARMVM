@@ -52,7 +52,55 @@ Object subclass: WinShell [
     ]
 
     WinShell class >> haltReport ^ <String> [
-        ^HaltReport isNil ifTrue: [ 'RUNNING' ] ifFalse: [ HaltReport ] ]
+        "THE HOST STATES THE FACT, THIS SIDE CHOOSES THE WORDS. `install` pushes
+         the literal `RUNNING\n` on every fresh primary generation, so the nil
+         case almost never happens in a real window — the report is present and
+         says nothing is parked. Both are the same fact and both get the same
+         screen, which is why this asks what the report MEANS rather than
+         whether one arrived."
+        (HaltReport isNil or: [ HaltReport trimSeparators = 'RUNNING' ])
+            ifTrue: [ ^self runningReport ].
+        ^HaltReport
+    ]
+
+    WinShell class >> runningReport ^ <String> [
+        "THE EMPTY STATE, and it is a view's most-read screen rather than its
+         least. A Debugger showing the single word `RUNNING` is accurate and
+         teaches nothing: it does not say what would put something here, so the
+         one person who most needs to know — someone who opened the Debugger
+         hoping to find out what it is for — leaves knowing exactly what they
+         arrived with.
+
+         `RUNNING` STAYS THE FIRST WORD. `isHalted` asks this report rather than
+         keeping a second copy of the truth, so the sentinel is load-bearing and
+         the teaching goes after it, never in front."
+        "ASCII ONLY, and it is not a style preference. A guest String is UTF-8
+         BYTES and the cell grid takes CODEPOINTS, so an em-dash arrives as
+         three cells reading `a00`. The Monitor's table keeps to ASCII for the
+         same reason and the same evidence — this text was written with proper
+         dashes, and they are what the first screenshot showed."
+        | s |
+        s := WriteStream on: String new.
+        s nextPutAll: 'RUNNING - nothing is halted.'; nl; nl.
+        s nextPutAll: 'This view fronts a halt in the PRIMARY VM. The shell you are'; nl.
+        s nextPutAll: 'clicking runs in a second VM on the UI thread, which is why the'; nl.
+        s nextPutAll: 'window stays live while the primary is parked.'; nl; nl.
+        s nextPutAll: 'To park one, evaluate something that fails in the primary.'; nl.
+        s nextPutAll: 'The Editor''s File In runs your buffer there:'; nl; nl.
+        s nextPutAll: '    Object subclass: Boom ['; nl.
+        s nextPutAll: '        Boom class >> go [ ^1/0 ]'; nl.
+        s nextPutAll: '    ]'; nl.
+        s nextPutAll: '    Boom go'; nl; nl.
+        s nextPutAll: 'When it halts, this pane fills with the reason and the stack.'; nl.
+        s nextPutAll: 'F5 resumes, F10 steps over, F11 steps in.'.
+        "The count is REPORTS, not halts — `install` pushes one at boot and on
+         every WG7-3 restart. Printing it unconditionally said `Halts fronted so
+         far: 1` on a window where nothing had ever halted, which is a lie the
+         empty state told about itself. Shown only once a real halt has been."
+        self haltCount > 1 ifTrue: [
+            s nl; nl; nextPutAll: 'Halts fronted so far: ' , (self haltCount - 1) printString ].
+        ^s contents
+    ]
     WinShell class >> haltCount ^ <Integer> [
         ^HaltCount isNil ifTrue: [ 0 ] ifFalse: [ HaltCount ] ]
 
