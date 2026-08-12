@@ -1,0 +1,500 @@
+"121_winui_sounded.mst — the Sound Editor, Windows face (WG13).
+
+ The Mac's is `world/77_sounded.mst`: an NSWindow of twelve NSSliders, four
+ oscillator rows, and an envelope drawn into an NSImageView by base64 blast.
+ THE DOCUMENT IS NOT PORTED, because it never needed porting — `SoundDoc`
+ (`world/44b_sounddoc.mst`) is in `world.list` on every platform, holds every
+ clamp, and owns the flat parameter contract of
+ `docs/asset_editors_design.md` section 3. This file is only a face, and it
+ computes nothing about sound that the document does not already know.
+
+ WHAT CHANGED IN THE PORT, and why it is not a downgrade: this is a CELL GRID
+ driven by the keyboard, not a panel of sliders. Three reasons, in order of
+ weight. A trackbar carries an INTEGER, so twelve sliders over ranges like
+ 0.0..4.0 means twelve fixed-point mappings and twelve chances to round a
+ recipe on the way past. `WM_HSCROLL` is not on the door's allowlist, so
+ slider drags would have to be POLLED against the drain's heartbeat — a
+ continuous control read discontinuously. And the shell already has a cell
+ grid every other view uses, so a keyboard editor is the smaller thing to
+ build and the smaller thing to read. Left and right nudge a value; the
+ document clamps it, exactly as it clamps a slider.
+
+ THE AUDITION IS THE REAL ONE. `Sound playEffect:` is primitive 263, and it
+ renders through the same synth the games use — byte-for-byte upstream's, see
+ `win_gui/src/sound/`. It goes out as a doit to the PRIMARY, because only the
+ primary holds a game sink, which is the same reason the Mac's editor does it
+ that way. No pane is needed: a sound is not a picture.
+
+ EVERY DECISION IS IN A PURE METHOD. `soundDisplayRows` answers rows of
+ {text. colour} and touches no window, so the whole display is checkable
+ headless — the rule `118_winui_tests.mst` set and the reason its own logic
+ could be tested before a pixel existed."
+
+Object subclass: WinShell [
+    <classVars: SndDoc SndSel SndPresetIx SndRng SndStatus>
+
+    "── the view ────────────────────────────────────────────────────────"
+
+    WinShell class >> soundViewName ^ <Symbol> [ ^#sounded ]
+    WinShell class >> soundPaneName ^ <Symbol> [ ^#soundPane ]
+
+    WinShell class >> soundPaneHwnd ^ <Integer> [
+        | c |
+        c := self controlNamed: self soundPaneName.
+        ^c isNil ifTrue: [ 0 ] ifFalse: [ c handle ]
+    ]
+
+    WinShell class >> buildSoundPane [
+        (self controlNamed: self soundPaneName) ifNotNil: [ :x | ^self ].
+        self
+            addControl: self soundPaneName
+            class: self className
+            text: ''
+            style: (((WinApi constant: 'WS_CHILD')
+                bitOr: (WinApi constant: 'WS_BORDER'))
+                bitOr: (WinApi constant: 'WS_CLIPSIBLINGS'))
+            exStyle: 0.
+        ^self
+    ]
+
+    WinShell class >> showSoundPane: aBool <Boolean> [
+        (self controlNamed: self soundPaneName) ifNotNil: [ :c | c show: aBool ].
+        ^self
+    ]
+
+    WinShell class >> layoutSoundPane: content <Array> [
+        (self controlNamed: self soundPaneName) ifNotNil: [ :c | c moveTo: content ].
+        ^self
+    ]
+
+    "── the document ────────────────────────────────────────────────────"
+
+    WinShell class >> soundDoc ^ <Object> [
+        "Lazy, and kept for the session — the Mac's editor hides its window
+         rather than closing it for the same reason: a recipe you were half way
+         through tuning must survive a look at another view."
+        SndDoc isNil ifTrue: [ SndDoc := SoundDoc new ].
+        ^SndDoc
+    ]
+
+    WinShell class >> soundRng ^ <Object> [
+        "THE SAME SEED THE MAC USES (77_sounded.mst). `27_random.mst` is an
+         exact-integer LCG with a pinned test vector, so Random and Mutate
+         produce the identical sequence on both platforms — a free
+         cross-platform check that costs one literal."
+        SndRng isNil ifTrue: [ SndRng := Random newWithSeed: 20260807 ].
+        ^SndRng
+    ]
+
+    WinShell class >> soundStatus ^ <String> [
+        ^SndStatus isNil ifTrue: [ '' ] ifFalse: [ SndStatus ]
+    ]
+
+    WinShell class >> soundStatus: aString <String> [
+        SndStatus := aString.
+        ^self
+    ]
+
+    WinShell class >> soundSel ^ <Integer> [
+        ^SndSel isNil ifTrue: [ 1 ] ifFalse: [ SndSel ]
+    ]
+
+    WinShell class >> soundPresetIx ^ <Integer> [
+        ^SndPresetIx isNil ifTrue: [ -1 ] ifFalse: [ SndPresetIx ]
+    ]
+
+    WinShell class >> soundSelect: n <Integer> ^ <Integer> [
+        "Clamped against the CURRENT row list, because removing an oscillator
+         can leave the selection past the end."
+        SndSel := (n max: 1) min: (self soundRows size max: 1).
+        ^SndSel
+    ]
+
+    "── the editable rows, PURELY ───────────────────────────────────────
+
+     Each entry is {kind. arg. label. lo. hi} — five slots, which is exactly
+     what `Array class >> with:` reaches (10_array.mst:173). There is no step
+     column: a step is a hundredth of the range, and coarse is ten of those,
+     so a range edit cannot leave a step behind disagreeing with it.
+
+     THE BOUNDS ARE THE DOCUMENT'S, not the Mac face's. Its sliders stop at
+     1.0 for attack where SoundDoc clamps at 2.0, and at 2000 Hz for a sweep
+     the model takes to 4000 — so a preset can sit outside its own slider and
+     the next drag silently truncates the recipe. Reading the model's real
+     bounds costs nothing and cannot do that."
+
+    WinShell class >> soundFields ^ <OrderedCollection> [
+        | out |
+        out := OrderedCollection new.
+        out add: (Array with: #param with: #duration   with: 'duration'   with: 0.05 with: 4.0).
+        out add: (Array with: #param with: #attack     with: 'attack'     with: 0.0  with: 2.0).
+        out add: (Array with: #param with: #decay      with: 'decay'      with: 0.0  with: 2.0).
+        out add: (Array with: #param with: #sustain    with: 'sustain'    with: 0.0  with: 1.0).
+        out add: (Array with: #param with: #release    with: 'release'    with: 0.0  with: 2.0).
+        out add: (Array with: #param with: #sweepStart with: 'sweep from' with: 0.0  with: 4000.0).
+        out add: (Array with: #param with: #sweepEnd   with: 'sweep to'   with: 0.0  with: 4000.0).
+        out add: (Array with: #param with: #noiseMix   with: 'noise'      with: 0.0  with: 1.0).
+        out add: (Array with: #param with: #distortion with: 'distortion' with: 0.0  with: 3.0).
+        out add: (Array with: #param with: #echoCount  with: 'echoes'     with: 0    with: 8).
+        out add: (Array with: #param with: #echoDelay  with: 'echo delay' with: 0.0  with: 0.5).
+        out add: (Array with: #param with: #echoDecay  with: 'echo decay' with: 0.0  with: 1.0).
+        out add: (Array with: #param with: #seed       with: 'seed'       with: 1    with: 99999).
+        ^out
+    ]
+
+    WinShell class >> soundRows ^ <OrderedCollection> [
+        "The recipe fields, then three fields per LIVE oscillator. The list
+         shrinks and grows with `Osc +`/`Osc -`, which is why the selection is
+         clamped against it rather than remembered as a coordinate."
+        | out doc i |
+        out := self soundFields.
+        doc := self soundDoc.
+        i := 1.
+        [ i <= doc oscCount ] whileTrue: [
+            out add: (Array with: #oscWave with: i with: 'osc ' , i printString , ' wave'
+                            with: 0 with: 5).
+            out add: (Array with: #oscFreq with: i with: 'osc ' , i printString , ' freq'
+                            with: 20.0 with: 8000.0).
+            out add: (Array with: #oscAmp with: i with: 'osc ' , i printString , ' amp'
+                            with: 0.0 with: 1.0).
+            out add: (Array with: #oscPw with: i with: 'osc ' , i printString , ' width'
+                            with: 0.01 with: 0.99).
+            i := i + 1 ].
+        ^out
+    ]
+
+    WinShell class >> soundValueOf: field <Array> ^ <Number> [
+        | kind arg doc |
+        kind := field at: 1.
+        arg := field at: 2.
+        doc := self soundDoc.
+        kind == #param ifTrue: [ ^doc perform: arg ].
+        kind == #oscWave ifTrue: [ ^(doc oscAt: arg) at: 1 ].
+        kind == #oscFreq ifTrue: [ ^(doc oscAt: arg) at: 2 ].
+        kind == #oscAmp ifTrue: [ ^(doc oscAt: arg) at: 3 ].
+        kind == #oscPw ifTrue: [ ^(doc oscAt: arg) at: 5 ].
+        ^0
+    ]
+
+    WinShell class >> soundSet: field <Array> to: v <Number> [
+        "Every write goes through the DOCUMENT's setter, so the document's
+         clamp is the only clamp — section 3's rule, `the native side never
+         truncates`, read from the other end."
+        | kind arg doc |
+        kind := field at: 1.
+        arg := field at: 2.
+        doc := self soundDoc.
+        kind == #param ifTrue: [
+            ^doc perform: (arg , ':') asSymbol with: v ].
+        kind == #oscWave ifTrue: [ ^doc osc: arg wave: v rounded ].
+        kind == #oscFreq ifTrue: [ ^doc osc: arg freq: v ].
+        kind == #oscAmp ifTrue: [ ^doc osc: arg amp: v ].
+        kind == #oscPw ifTrue: [ ^doc osc: arg pw: v ].
+        ^self
+    ]
+
+    WinShell class >> soundShow: field <Array> ^ <String> [
+        "What a value READS as. The units are part of the reading — `0.3` and
+         `0.3 s` are the same number and different facts."
+        | kind arg v |
+        kind := field at: 1.
+        arg := field at: 2.
+        v := self soundValueOf: field.
+        kind == #oscWave ifTrue: [ ^self soundDoc oscWaveNameAt: arg ].
+        kind == #oscFreq ifTrue: [ ^v rounded printString , ' Hz' ].
+        (arg == #seed or: [ arg == #echoCount ]) ifTrue: [ ^v rounded printString ].
+        (arg == #sweepStart or: [ arg == #sweepEnd ])
+            ifTrue: [ ^v rounded printString , ' Hz' ].
+        (arg == #duration or: [ arg == #echoDelay ])
+            ifTrue: [ ^(self sndRound2: v) , ' s' ].
+        ^self sndRound2: v
+    ]
+
+    WinShell class >> sndRound2: v <Number> ^ <String> [
+        ^((v * 100) rounded / 100.0) printString
+    ]
+
+    WinShell class >> soundBarFor: field <Array> ^ <String> [
+        "Twenty cells of where this value sits in its range. A number tells you
+         what it is; the bar tells you what is LEFT, which is the question a
+         hand on a slider is really asking."
+        | lo hi v n out i |
+        lo := field at: 4.
+        hi := field at: 5.
+        v := self soundValueOf: field.
+        n := hi > lo
+            ifTrue: [ (((v - lo) / (hi - lo) * 20) rounded max: 0) min: 20 ]
+            ifFalse: [ 0 ].
+        out := ''.
+        i := 0.
+        [ i < 20 ] whileTrue: [
+            out := out , (i < n ifTrue: [ '#' ] ifFalse: [ '.' ]).
+            i := i + 1 ].
+        ^out
+    ]
+
+    "── the display, PURELY ─────────────────────────────────────────────"
+
+    WinShell class >> soundDisplayRows ^ <OrderedCollection> [
+        | out doc rows sel field label |
+        out := OrderedCollection new.
+        doc := self soundDoc.
+        rows := self soundRows.
+        sel := (self soundSel max: 1) min: rows size.
+        out add: (Array with: 'SOUND EDITOR   ' , doc name , '   preset: '
+                             , self soundPresetLabel with: 16r000000).
+        out add: (Array with: '' with: 16r000000).
+        1 to: rows size do: [ :i |
+            field := rows at: i.
+            label := self padded: (field at: 3) to: 12.
+            out add: (Array
+                with: (i = sel ifTrue: [ '> ' ] ifFalse: [ '  ' ])
+                    , label , ' '
+                    , (self padded: (self soundShow: field) to: 10)
+                    , ' ' , (self soundBarFor: field)
+                with: (i = sel ifTrue: [ 16r0000C0 ] ifFalse: [ 16r000000 ])) ].
+        out add: (Array with: '' with: 16r000000).
+        out add: (Array with: 'up/down pick   left/right nudge   shift = x10'
+                        with: 16r606060).
+        out add: (Array with: 'P play   [ ] preset   R random   M mutate'
+                        with: 16r606060).
+        out add: (Array with: 'N new    + - oscillators   S save as a sheet'
+                        with: 16r606060).
+        self soundStatus isEmpty ifFalse: [
+            out add: (Array with: '' with: 16r000000).
+            out add: (Array with: self soundStatus with: 16r806000) ].
+        ^out
+    ]
+
+    WinShell class >> soundPresetLabel ^ <String> [
+        | ix |
+        ix := self soundPresetIx.
+        (ix < 0 or: [ ix > 11 ]) ifTrue: [ ^'-' ].
+        ^SoundDoc presetNames at: ix + 1
+    ]
+
+    "── the blit ────────────────────────────────────────────────────────"
+
+    WinShell class >> renderSound ^ <Boolean> [
+        | hwnd cw ch c r cols rows base row col |
+        hwnd := self soundPaneHwnd.
+        hwnd = 0 ifTrue: [ ^false ].
+        (WinRender cellWidthFor: hwnd) = 0 ifTrue: [
+            (WinRender attach: hwnd points: 9 dpi: self editorMetricsDpi)
+                ifFalse: [ ^false ] ].
+        cw := WinRender cellWidthFor: hwnd.
+        ch := WinRender cellHeightFor: hwnd.
+        (cw = 0 or: [ ch = 0 ]) ifTrue: [ ^false ].
+        c := self controlNamed: self soundPaneName.
+        r := [ c screenRect ] on: Error do: [ :e | nil ].
+        r isNil ifTrue: [ ^false ].
+        cols := ((((r at: 3) - (r at: 1)) // cw) max: 1).
+        rows := ((((r at: 4) - (r at: 2)) // ch) max: 1).
+        base := WinRender gridFor: hwnd cols: cols rows: rows.
+        base = 0 ifTrue: [ ^false ].
+        WinRender clear: hwnd to: 16r000000 on: 16rFFFFFF.
+        row := 0.
+        "`col` is a METHOD temp deliberately — declared inside the outer block
+         it reads as nil in the inner one, which cost an afternoon in 118."
+        self soundDisplayRows do: [ :pair |
+            row < rows ifTrue: [
+                col := 0.
+                (pair at: 1) do: [ :chr |
+                    col < cols ifTrue: [
+                        WinRender at: base col: col row: row cols: cols
+                            put: (chr asInteger < 32 ifTrue: [ 32 ] ifFalse: [ chr asInteger ])
+                            fg: (pair at: 2)
+                            bg: 16rFFFFFF ].
+                    col := col + 1 ].
+                row := row + 1 ] ].
+        WinRender caretFor: hwnd col: 0 row: 0 visible: false.
+        ^WinRender present: hwnd
+    ]
+
+    "── input ───────────────────────────────────────────────────────────"
+
+    WinShell class >> soundMessage: msg <Integer> wParam: wp <Integer> lParam: lp <Integer> ^ <Object> [
+        ^[ self soundMessageBody: msg wParam: wp lParam: lp ]
+            on: Error do: [ :e | PaintError := e messageText. #defwindowproc ]
+    ]
+
+    WinShell class >> soundMessageBody: msg <Integer> wParam: wp <Integer> lParam: lp <Integer> ^ <Object> [
+        msg = (WinApi constant: 'WM_LBUTTONDOWN') ifTrue: [
+            WinApi setFocus: self soundPaneHwnd.
+            ^self soundClickAt: lp ].
+        msg = (WinApi constant: 'WM_KEYDOWN') ifTrue: [ ^self soundKeyDown: wp ].
+        msg = (WinApi constant: 'WM_CHAR') ifTrue: [ ^self soundChar: wp ].
+        ^#defwindowproc
+    ]
+
+    WinShell class >> soundClickAt: lp <Integer> ^ <Object> [
+        "A click picks the row under it. The first two lines are the title and
+         a blank, so the field list starts at row 2 counting from zero."
+        | hwnd ch y rows |
+        hwnd := self soundPaneHwnd.
+        hwnd = 0 ifTrue: [ ^0 ].
+        ch := WinRender cellHeightFor: hwnd.
+        ch = 0 ifTrue: [ ^0 ].
+        y := (self hiWordSigned: lp) // ch.
+        rows := self soundRows size.
+        (y >= 2 and: [ y - 1 <= rows ]) ifTrue: [
+            SndSel := y - 1.
+            self renderSound ].
+        ^0
+    ]
+
+    WinShell class >> soundKeyDown: vk <Integer> ^ <Object> [
+        | rows |
+        rows := self soundRows size.
+        vk = 16r26 ifTrue: [                          "VK_UP"
+            SndSel := ((self soundSel) - 1 max: 1).
+            self renderSound. ^0 ].
+        vk = 16r28 ifTrue: [                          "VK_DOWN"
+            SndSel := ((self soundSel) + 1 min: rows).
+            self renderSound. ^0 ].
+        vk = 16r25 ifTrue: [ ^self soundNudge: -1 ].  "VK_LEFT"
+        vk = 16r27 ifTrue: [ ^self soundNudge: 1 ].   "VK_RIGHT"
+        ^#defwindowproc
+    ]
+
+    WinShell class >> soundChar: code <Integer> ^ <Object> [
+        | ch |
+        code < 32 ifTrue: [ ^#defwindowproc ].
+        ch := (Character value: code) asUppercase.
+        ch = $P ifTrue: [ ^self soundPlay ].
+        ch = $R ifTrue: [ ^self soundRandom ].
+        ch = $M ifTrue: [ ^self soundMutate ].
+        ch = $N ifTrue: [ ^self soundNew ].
+        ch = $S ifTrue: [ ^self soundSave ].
+        ch = $] ifTrue: [ ^self soundPreset: self soundPresetIx + 1 ].
+        ch = $[ ifTrue: [ ^self soundPreset: self soundPresetIx - 1 ].
+        ch = $+ ifTrue: [ ^self soundAddOsc ].
+        ch = $= ifTrue: [ ^self soundAddOsc ].
+        ch = $- ifTrue: [ ^self soundRemoveOsc ].
+        ^#defwindowproc
+    ]
+
+    WinShell class >> soundNudge: dir <Integer> ^ <Object> [
+        "A hundredth of the range, or a tenth with Shift held. Wave and echo
+         count step by whole numbers instead — six waves and nine echo counts
+         are not a continuum, and a hundredth of them is nothing."
+        | rows field lo hi step v |
+        rows := self soundRows.
+        rows isEmpty ifTrue: [ ^0 ].
+        field := rows at: ((self soundSel max: 1) min: rows size).
+        lo := field at: 4.
+        hi := field at: 5.
+        ((field at: 1) == #oscWave or: [ (field at: 2) == #echoCount ])
+            ifTrue: [ step := 1 ]
+            ifFalse: [
+                step := (hi - lo) / 100.0.
+                self shiftIsDown ifTrue: [ step := step * 10 ] ].
+        v := (self soundValueOf: field) + (step * dir).
+        self soundSet: field to: v.
+        SndPresetIx := -1.
+        self soundStatus: ''.
+        self renderSound.
+        ^0
+    ]
+
+    "── the verbs ───────────────────────────────────────────────────────"
+
+    WinShell class >> soundPlay ^ <Object> [
+        "THE REAL SYNTH. Primitive 263 renders the recipe and plays it; the
+         doit goes to the PRIMARY because only the primary holds a game sink.
+         `paramsList printString` is a literal array, so the wire text parses
+         on the far side with nothing to encode or escape."
+        | doc |
+        doc := self soundDoc.
+        Worker uiDoit: 'Sound playEffect: ' , doc paramsList printString
+            onReply: [ :r | ].
+        self soundStatus: 'played (' , doc oscCount printString , ' osc, seed '
+            , doc seed printString , ')'.
+        self renderSound.
+        ^0
+    ]
+
+    WinShell class >> soundPreset: ix <Integer> ^ <Object> [
+        | n |
+        n := ix \\ 12.
+        SndPresetIx := n.
+        self soundDoc loadPreset: n.
+        self soundStatus: ''.
+        self renderSound.
+        ^self soundPlay
+    ]
+
+    WinShell class >> soundRandom ^ <Object> [
+        self soundDoc randomize: self soundRng.
+        SndPresetIx := -1.
+        self soundStatus: ''.
+        self renderSound.
+        ^self soundPlay
+    ]
+
+    WinShell class >> soundMutate ^ <Object> [
+        "Nudge, don't reroll — the document's own word for it. The preset name
+         is KEPT: a mutated coin is still recognisably the coin, which is the
+         whole reason the verb exists next to Random."
+        self soundDoc mutate: self soundRng.
+        self soundStatus: ''.
+        self renderSound.
+        ^self soundPlay
+    ]
+
+    WinShell class >> soundNew ^ <Object> [
+        SndDoc := SoundDoc new.
+        SndPresetIx := -1.
+        SndSel := 1.
+        self soundStatus: 'a fresh 440Hz sine'.
+        self renderSound.
+        ^0
+    ]
+
+    WinShell class >> soundAddOsc ^ <Object> [
+        self soundDoc addOsc
+            ifTrue: [ self soundStatus: '' ]
+            ifFalse: [ self soundStatus: 'four oscillators is the stack' ].
+        self renderSound.
+        ^0
+    ]
+
+    WinShell class >> soundRemoveOsc ^ <Object> [
+        self soundDoc removeOsc
+            ifTrue: [ SndSel := (self soundSel min: self soundRows size) max: 1 ]
+            ifFalse: [ self soundStatus: 'one oscillator stays' ].
+        self renderSound.
+        ^0
+    ]
+
+    WinShell class >> soundSave ^ <Object> [
+        "Saves as SOURCE in the image, the same write path the Browser's Accept
+         takes — a sound sheet is an ordinary class carrying an `isSoundSheet`
+         marker and a `params` array, so `Laser play` works from a Workspace
+         and from a game with nothing else installed."
+        | doc reply |
+        doc := self soundDoc.
+        (SpriteDoc validName: doc name) ifFalse: [
+            self soundStatus: 'save: name must be a capitalised identifier'.
+            self renderSound.
+            ^0 ].
+        reply := [ WinHost persistClass: doc sheetSource ]
+            on: Error do: [ :e | Array with: false with: e messageText ].
+        self soundStatus: ((reply at: 1)
+            ifTrue: [ 'saved ' , doc name ]
+            ifFalse: [ 'save FAILED: ' , (reply at: 2) printString ]).
+        self renderSound.
+        ^0
+    ]
+
+    "── the scripted surface ────────────────────────────────────────────
+     What a headless harness drives, and what the Mac's own stage-6 gate
+     drives on its side: pick a preset, read the recipe back, round-trip it."
+
+    WinShell class >> sndStatus ^ <String> [ ^self soundStatus ]
+    WinShell class >> sndParams ^ <String> [ ^self soundDoc paramsList printString ]
+    WinShell class >> sndName ^ <String> [ ^self soundDoc name ]
+    WinShell class >> sndDocLoad: params <Array> ^ <String> [
+        ^(self soundDoc fromParams: params) printString
+    ]
+]

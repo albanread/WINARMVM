@@ -197,5 +197,11 @@ tier1.mst
 # WG10: the gallery. Life's rules and Julia's escape test are PURE over
 # integers, so both are checkable here with no window, no plane and no GPU.
 ../119_winui_demos.mst
+
+# WG13: the Sound Editor. Every decision about what the pane shows is a pure
+# method over `SoundDoc`, so the whole display is checkable with no window,
+# no audio device and no primary.
+../121_winui_sounded.mst
+68_winui_sounded_tests.mst
 67_winui_editor_tests.mst
 99_run_all.mst

@@ -185,9 +185,21 @@ Object subclass: WinShell [
         "A DISABLED ITEM IS STILL REGISTERED, with no action. It has to be, or
          `ownsControlId:` would answer false for it and the door would hand a
          click on a greyed item to DefWindowProcW — harmless today, and exactly
-         the kind of gap that becomes a mystery later."
+         the kind of gap that becomes a mystery later.
+
+         BUT IT MUST NOT OVERWRITE AN ACTION ALREADY REGISTERED, and that was
+         a real bug for as long as the View menu existed: `viewMenuItems`
+         registers `#switchToView:` WITH ITS ARGUMENT for each view — the
+         spec's one selector slot cannot carry an argument, which is why the
+         table is the place it goes — and then this line put nil straight back
+         over it. `serviceMenu:` read the nil as `owned, but does nothing`, so
+         every item on the View menu was silently inert while the same views
+         switched perfectly from the view bar. Found by adding a view and
+         wondering why only its menu entry did nothing."
         (item at: 3) isNil
-            ifTrue: [ self menuCommands at: (item at: 1) put: nil ]
+            ifTrue: [
+                (self menuCommands includesKey: (item at: 1)) ifFalse: [
+                    self menuCommands at: (item at: 1) put: nil ] ]
             ifFalse: [ self menuCommands at: (item at: 1)
                             put: (Array with: (item at: 3)) ].
         ^self

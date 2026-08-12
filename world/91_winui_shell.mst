@@ -1348,6 +1348,8 @@ Object subclass: WinShell [
          only a WM_COMMAND on release. Routed by HWND here, its
          LBUTTONDOWN/MOUSEMOVE/LBUTTONUP arrive where the drag can use them.
          A no-op hook until 96 defines it."
+        (hwnd ~= 0 and: [ hwnd = self soundPaneHwnd ]) ifTrue: [
+            ^self soundMessage: msg wParam: wp lParam: lp ].
         (hwnd ~= 0 and: [ hwnd = self splitterHwnd ]) ifTrue: [
             ^self splitterMessage: msg wParam: wp lParam: lp ].
 
@@ -1694,6 +1696,15 @@ Object subclass: WinShell [
     WinShell class >> runTests [ ^false ]
     WinShell class >> testRuns [ ^0 ]
     WinShell class >> testsViewName [ ^#tests ]
+    "WG13's Sound Editor — the parametric synth fronted natively; 121
+     overrides."
+    WinShell class >> buildSoundPane [ ^self ]
+    WinShell class >> showSoundPane: aBool [ ^self ]
+    WinShell class >> layoutSoundPane: content [ ^self ]
+    WinShell class >> soundPaneHwnd [ ^0 ]
+    WinShell class >> renderSound [ ^false ]
+    WinShell class >> soundViewName [ ^#sounded ]
+    WinShell class >> soundMessage: msg wParam: wp lParam: lp [ ^#defwindowproc ]
     "WG12: the menu bar; 120 overrides."
     WinShell class >> ownsMenuId: anId [ ^false ]
     WinShell class >> serviceMenu: anId [ ^false ]
