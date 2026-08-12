@@ -796,8 +796,35 @@ GUI members — a stale `winui_render.dll` missing one export nulls the whole
 `RenderApi` OnceLock and every game silently stops uploading. Build with
 `-p win_gui -p winui_host -p winui_render`, like the gates do.
 
-REMAINING for GamePane parity: sound (213/263) — XAudio2/WASAPI behind
-`PlaySound`/`PlayEffect`, which the sink still swallows harmlessly.
+**W12 landed (2026-08-12): sound, and the match is now exhaustive.** The
+split is the portability contract exactly: SYNTHESIS is upstream's own Rust,
+copied byte-for-byte (`cmp` agrees) from the crate the Mac host links —
+`MacGamePane/audio/src/synth.rs` and `abc.rs` → `win_gui/src/sound/` — so the
+recipes, the LCG and therefore the SAMPLES are identical; only the OUTPUT is
+Windows. That output is the sister Dart port's design (`GP_AUDIO_DESIGN.md`):
+**XAudio2** for SFX, whose one structural difference from the Mac is that a
+source voice plays its queue sequentially, so polyphony is a POOL (24 voices,
+round-robin steal when busy) with the mastering voice summing; and **winmm
+`midiStream`** for ABC tunes against the GS Wavetable synth — the half the
+sister designed and left as a no-op, implemented here with its documented
+tick math (`ms * bpm / 125`, 480 ppq, tempo `60000000/bpm`). The lifetime
+hazard it flags is honoured: XAudio2 does NOT copy `pAudioData`, so presets
+are rendered once and LEAKED, and rendered effects are retired to a list
+drained only when every voice reports idle. No audio device degrades to
+silence, never to a dead game. Sound needs no pump hand-off — XAudio2 and
+winmm are free-threaded, unlike D3D's thread_local seam — so the sink's arms
+call straight through and a sound plays the instant the game asks.
+
+**The `_ => {}` catch-all is gone**, and that is the parity statement: every
+`GameCommand` upstream defines is handled, the match is exhaustive, and a
+command added upstream now FAILS THE BUILD rather than being silently
+swallowed. GamePane parity is complete.
+
+Verification note worth keeping: the endpoint peak meter
+(`IAudioMeterInformation`) read the noise floor while sound was audibly
+playing, and XAudio2's own `SamplesPlayed` stayed 0 for the same buffers —
+BOTH instruments lied. Sound was confirmed by ear. Do not gate audio on
+either counter.
 
 ---
 

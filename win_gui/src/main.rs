@@ -117,6 +117,7 @@ mod boot;
 mod debugger;
 mod game;
 mod game_input;
+mod sound;
 mod text_overlay;
 
 #[cfg(windows)]

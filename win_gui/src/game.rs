@@ -756,6 +756,13 @@ impl GameSink for WinGameSink {
                     0xFF00_0000 | ((r as u32) << 16) | ((gg as u32) << 8) | b as u32,
                 );
             }
+            // ── W12: sound. Direct calls, no pump hand-off — XAudio2 and
+            // winmm are free-threaded (their own mixing threads), so unlike
+            // D3D there is no thread_local seam to respect, and a sound plays
+            // the instant the game asks rather than a frame later.
+            GameCommand::PlaySound { preset } => crate::sound::play_preset(preset),
+            GameCommand::PlayTune { abc } => crate::sound::play_tune(&abc),
+            GameCommand::PlayEffect { params } => crate::sound::play_effect(&params),
             GameCommand::StartLoop => RUNNING.store(true, Ordering::Relaxed),
             GameCommand::StopLoop => RUNNING.store(false, Ordering::Relaxed),
             GameCommand::SetFrameRate { fps } => {
@@ -777,11 +784,12 @@ impl GameSink for WinGameSink {
                 open_palette(h.max(1));
                 return;
             }
-            // Everything else is a later W: sprites (W10), the legacy 5x7 text
-            // overlay (W4), sound (W6), the runtime shader (W11), per-scanline
-            // palette and scroll (W9). Swallowed rather than logged — a game
-            // calling them must not spam the console sixty times a second.
-            _ => {}
+            // NO CATCH-ALL, and that is the W12 milestone: every `GameCommand`
+            // upstream defines is handled above, so the match is exhaustive
+            // and the compiler now guards the parity. A command added upstream
+            // will FAIL THE BUILD here rather than being silently swallowed —
+            // which is what a port that tracks another repo wants, since a new
+            // feature arriving as a no-op is indistinguishable from a bug.
         }
     }
 }
@@ -829,6 +837,9 @@ pub fn stop() {
     if let Ok(mut g) = LINE_PAL.lock() {
         *g = None;
     }
+    // W12: a title theme must not keep playing under the next demo. SFX ring
+    // out on their own — they are short, and the sister port leaves them too.
+    crate::sound::stop_tunes();
 }
 
 /// The size the pane currently is, for the input driver's pixel scaling.

@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 // Authored as part of `game.rs`; kept a separate module because the input
 // driver and the frame sink share nothing but these three facts.
-use crate::game::{frame_rate, is_running, pane_size, stop};
+use crate::game::{frame_rate, is_running, pane_size};
 use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Gdi::ScreenToClient;
 use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
@@ -275,6 +275,8 @@ pub fn step_doit() -> String {
 #[cfg(test)]
 mod input_tests {
     use super::*;
+    // The public stop verb, used only by these tests.
+    use crate::game::stop;
 
     #[test]
     fn the_vk_table_is_in_gamepane_bit_order_with_up_before_down() {
