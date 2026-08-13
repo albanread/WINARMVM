@@ -203,5 +203,11 @@ tier1.mst
 # no audio device and no primary.
 ../121_winui_sounded.mst
 68_winui_sounded_tests.mst
+
+# WG14a: the declarative UI's pure half. Build, normalize, validate, diff —
+# all functions, so all checkable here with no window at all. This is the
+# stage that exists precisely to be tested before a realizer can hide a bug.
+../122_winui_spec.mst
+69_winui_spec_tests.mst
 67_winui_editor_tests.mst
 99_run_all.mst

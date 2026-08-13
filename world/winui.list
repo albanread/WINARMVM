@@ -162,3 +162,9 @@
 # the grid is already here. The audition is prim 263 through the primary, so
 # it is the same synth the games use.
 121_winui_sounded.mst
+
+# WG14a: the declarative UI's PURE half — build, normalize, validate, diff.
+# No Win32 in it at all, so the whole model is checkable headless before a
+# window exists to hide a bug in. Contract adopted from wingui's spec+bind;
+# `docs/win_declarative_ui.md` is the decision record.
+122_winui_spec.mst
