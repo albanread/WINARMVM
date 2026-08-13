@@ -32,7 +32,7 @@
  number instead of felt as a flicker."
 
 Object subclass: WinToolWindow [
-    <classVars: Windows EventDepth RerenderPending Suppress PatchCount RebuildCount>
+    <classVars: Windows Order EventDepth RerenderPending Suppress PatchCount RebuildCount>
 
     "── the registry ────────────────────────────────────────────────────"
 
@@ -41,16 +41,40 @@ Object subclass: WinToolWindow [
         ^Windows
     ]
 
+    "REGISTRATION ORDER, kept alongside the dictionary and not derived from it.
+     A Dictionary has no order, so a Tools menu built by iterating one would
+     hand the same tool a different id from run to run — which is invisible
+     until something drives the menu by id and opens the wrong window."
+    WinToolWindow class >> order ^ <OrderedCollection> [
+        Order isNil ifTrue: [ Order := OrderedCollection new ].
+        ^Order
+    ]
+
     WinToolWindow class >> register: anId <Symbol> title: aTitle <String>
                            width: w <Integer> height: h <Integer>
                            render: renderBlock <Object> handler: handlerBlock <Object> ^ <Object> [
+        ^self register: anId title: aTitle width: w height: h
+              render: renderBlock handler: handlerBlock paint: nil
+    ]
+
+    WinToolWindow class >> register: anId <Symbol> title: aTitle <String>
+                           width: w <Integer> height: h <Integer>
+                           render: renderBlock <Object> handler: handlerBlock <Object>
+                           paint: paintBlock <Object> ^ <Object> [
+        "THE PAINT BLOCK IS FOR PANES AND ONLY FOR PANES. A control's contents
+         are its props, and the differ carries those; a pane's contents are
+         PIXELS the tool computes, which no diff of a spec could ever express.
+         So the spec PLACES a pane and this block FILLS it, called after every
+         realize and every patch - which is exactly the set of moments at
+         which what is on screen might have changed." 
         "Declared, not built. A tool that is never opened costs a Dictionary
          entry and no window — which is what makes it reasonable to register
          every tool at load time."
         | tool |
         tool := WinToolWindow new
             setId: anId title: aTitle width: w height: h
-            render: renderBlock handler: handlerBlock.
+            render: renderBlock handler: handlerBlock paint: paintBlock.
+        (self windows includesKey: anId) ifFalse: [ self order add: anId ].
         self windows at: anId put: tool.
         ^tool
     ]
@@ -71,8 +95,15 @@ Object subclass: WinToolWindow [
      messages arrive at the same door and are routed here by hwnd."
 
     WinToolWindow class >> forHwnd: hwnd <Integer> ^ <Object> [
+        "The TOP-LEVEL first, then the panes. A pane is a child window of the
+         shell's own class, so its mouse messages arrive at this same door
+         carrying the CHILD's hwnd — and a click in a sprite grid would go
+         nowhere at all if this only knew about top-levels."
         hwnd = 0 ifTrue: [ ^nil ].
-        self windows do: [ :t | t hwndValue = hwnd ifTrue: [ ^t ] ].
+        self order do: [ :k | (self windows at: k) hwndValue = hwnd
+            ifTrue: [ ^self windows at: k ] ].
+        self order do: [ :k | ((self windows at: k) ownsChild: hwnd)
+            ifTrue: [ ^self windows at: k ] ].
         ^nil
     ]
 
@@ -85,7 +116,7 @@ Object subclass: WinToolWindow [
         | tool |
         tool := self forHwnd: hwnd.
         tool isNil ifTrue: [ ^#defwindowproc ].
-        ^[ tool handleMessage: msg wParam: wp lParam: lp ]
+        ^[ tool handleMessage: msg hwnd: hwnd wParam: wp lParam: lp ]
             on: Error do: [ :e | WinToolWindow report: e messageText. #defwindowproc ]
     ]
 
@@ -96,12 +127,14 @@ Object subclass: WinToolWindow [
      it makes `tick` a place the whole registry visits."
 
     WinToolWindow class >> tickAll [
-        self windows do: [ :t | t isOpen ifTrue: [ t tick ] ].
+        self order do: [ :k | | t |
+            t := self windows at: k.
+            t isOpen ifTrue: [ t tick ] ].
         ^self
     ]
 
     WinToolWindow class >> closeAll [
-        self windows do: [ :t | t teardown ].
+        self order do: [ :k | (self windows at: k) teardown ].
         ^self
     ]
 
@@ -145,10 +178,11 @@ Object subclass: WinToolWindow [
 
     "── an instance ─────────────────────────────────────────────────────"
 
-    | id title width height renderBlock handlerBlock hwnd controls lastSpec nextId |
+    | id title width height renderBlock handlerBlock paintBlock hwnd controls lastSpec nextId |
 
     setId: anId <Symbol> title: aTitle <String> width: w <Integer> height: h <Integer>
-    render: r <Object> handler: hh <Object> ^ <WinToolWindow> [
+    render: r <Object> handler: hh <Object> paint: pp <Object> ^ <WinToolWindow> [
+        paintBlock := pp.
         id := anId.
         title := aTitle.
         width := w.
@@ -216,11 +250,70 @@ Object subclass: WinToolWindow [
         ^self
     ]
 
-    tick [ ^self ]
+    paint [
+        paintBlock isNil ifTrue: [ ^self ].
+        [ paintBlock value: self ] on: Error do: [ :e | WinToolWindow report: e messageText ].
+        ^self
+    ]
+
+    "The child window a pane node was realized into, so a tool can draw into
+     it with `WinPixels`/`WinRender` exactly as the Canvas view does."
+    paneHwnd: nodeId <Object> ^ <Integer> [
+        | want |
+        want := nodeId asString.
+        controls do: [ :pair |
+            (((pair at: 2) idOrEmpty = want) and: [ (pair at: 3) == #control ])
+                ifTrue: [ ^(pair at: 1) handle ] ].
+        ^0
+    ]
+
+    "── the beat: sliders, because WM_HSCROLL is not on the door ────────
+
+     A trackbar reports movement with WM_HSCROLL, which the ALLOWLIST does not
+     carry and should not - a drag is a storm of them. So a slider is POLLED
+     on the drain's own heartbeat instead: the same bargain `checkFocusChanged`
+     already makes, and faithful besides, since the Mac's continuous sliders
+     only relabel as they move."
+
+    tick [
+        self isOpen ifFalse: [ ^self ].
+        WinToolWindow suppressing ifTrue: [ ^self ].
+        controls do: [ :pair | self pollSlider: pair ].
+        ^self
+    ]
+
+    pollSlider: pair <Array> [
+        | control node pos |
+        node := pair at: 2.
+        (node type == #slider and: [ (pair at: 3) == #control ]) ifFalse: [ ^self ].
+        control := pair at: 1.
+        "TBM_GETPOS is WM_USER + 0. Named here rather than fetched because it
+         is not in winkb's database - the same exception 120's MF_ flags make,
+         and checkable against CommCtrl.h in one look."
+        pos := control send: 16r400 wParam: 0 lParam: 0.
+        pos = (node at: #value) ifTrue: [ ^self ].
+        node at: #value put: pos.
+        self dispatch: (node at: #event) value: pos.
+        ^self
+    ]
 
     "── messages ────────────────────────────────────────────────────────"
 
-    handleMessage: msg <Integer> wParam: wp <Integer> lParam: lp <Integer> ^ <Object> [
+    "Is `h` one of my realized controls? Only panes are asked about in
+     practice, but the question is the same for any child."
+    ownsChild: h <Integer> ^ <Boolean> [
+        h = 0 ifTrue: [ ^false ].
+        controls do: [ :pair | (pair at: 1) handle = h ifTrue: [ ^true ] ].
+        ^false
+    ]
+
+    nodeForHwnd: h <Integer> ^ <Object> [
+        controls do: [ :pair | (pair at: 1) handle = h ifTrue: [ ^pair at: 2 ] ].
+        ^nil
+    ]
+
+    handleMessage: msg <Integer> hwnd: hwnd2 <Integer> wParam: wp <Integer> lParam: lp <Integer> ^ <Object> [
+        hwnd2 = hwnd ifFalse: [ ^self childMessage: msg hwnd: hwnd2 wParam: wp lParam: lp ].
         msg = (WinApi constant: 'WM_CLOSE') ifTrue: [ ^self closeRequested ].
         msg = (WinApi constant: 'WM_COMMAND') ifTrue: [
             ^self commandFrom: (WinApi loWord: wp) code: (WinApi hiWord: wp) ].
@@ -231,6 +324,30 @@ Object subclass: WinToolWindow [
             self isOpen ifTrue: [ self realize ].
             ^0 ].
         ^#defwindowproc
+    ]
+
+    "A PANE'S OWN MOUSE. The spec places the pane and names an event; a press
+     or a drag inside it dispatches that event with the point, in the pane's
+     OWN pixels, which is the only coordinate space the tool that drew it
+     thinks in. A drag is `move while the button is down` rather than a
+     capture, because a pane that captured the mouse and missed its button-up
+     would hold it for the life of the window."
+    childMessage: msg <Integer> hwnd: h <Integer> wParam: wp <Integer> lParam: lp <Integer> ^ <Object> [
+        | node down |
+        node := self nodeForHwnd: h.
+        node isNil ifTrue: [ ^#defwindowproc ].
+        (WinSpec paneTypes includes: node type) ifFalse: [ ^#defwindowproc ].
+        (node at: #event) isNil ifTrue: [ ^#defwindowproc ].
+        down := msg = (WinApi constant: 'WM_LBUTTONDOWN').
+        (down or: [ msg = (WinApi constant: 'WM_MOUSEMOVE') ]) ifFalse: [
+            ^#defwindowproc ].
+        down ifTrue: [ WinApi setFocus: h ].
+        down ifFalse: [
+            "VK_LBUTTON's high bit: is the button still down?"
+            ((WinApi getKeyState: 1) bitAnd: 16r8000) = 0 ifTrue: [ ^0 ] ].
+        ^self dispatch: (node at: #event)
+               value: (Array with: (WinShell loWordSigned: lp)
+                             with: (WinShell hiWordSigned: lp))
     ]
 
     commandFrom: anId <Integer> code: aCode <Integer> ^ <Object> [
@@ -292,7 +409,16 @@ Object subclass: WinToolWindow [
         lastSpec isNil ifTrue: [ ^self realizeSpec: spec ].
         ops := WinSpec diff: lastSpec against: spec.
         ops isNil ifTrue: [ ^self realizeSpec: spec ].
-        ops isEmpty ifTrue: [ lastSpec := spec. ^true ].
+        ops isEmpty ifTrue: [
+            "NO OPS IS NOT NOTHING TO DO. A pane's contents are pixels, and a
+             tool that paints one has changed what is on screen without
+             changing a single prop — a pencil stroke in the sprite editor is
+             exactly that. So the paint block runs on EVERY rerender, and the
+             differ's `nothing changed` means nothing changed ABOUT THE
+             CONTROLS. Missing this drew a perfect grid that never updated."
+            lastSpec := spec.
+            self paint.
+            ^true ].
         ^self apply: ops spec: spec
     ]
 
@@ -332,6 +458,7 @@ Object subclass: WinToolWindow [
         places do: [ :p | self createFor: p ].
         WinToolWindow suppress: false.
         lastSpec := spec.
+        self paint.
         ^true
     ]
 
@@ -353,6 +480,7 @@ Object subclass: WinToolWindow [
         WinToolWindow suppress: false.
         WinToolWindow countPatch.
         lastSpec := spec.
+        self paint.
         ^true
     ]
 
@@ -365,18 +493,36 @@ Object subclass: WinToolWindow [
         ^self
     ]
 
+    "Which of a node's controls a changed prop belongs to."
+    kindFor: changed <OrderedCollection> ^ <Symbol> [
+        changed do: [ :a |
+            a key == #title ifTrue: [ ^#cardTitle ].
+            a key == #label ifTrue: [ ^#label ] ].
+        ^#control
+    ]
+
     applyNodeProps: changed <OrderedCollection> to: nodeId <String> [
         | pair control node |
+        "A node can have TWO controls — its own and its label, or a card and
+         its title — so a patch has to find the one the changed prop belongs
+         to. `title` is the card's STATIC; `label` is the label above a
+         control; everything else is the control itself. Looking only for
+         #control left card titles frozen at whatever they said when the
+         window was built, which read as a card that had stopped listening."
         pair := nil.
         controls do: [ :each |
-            ((each at: 2) idOrEmpty = nodeId and: [ (each at: 3) == #control ])
-                ifTrue: [ pair := each ] ].
+            ((each at: 2) idOrEmpty = nodeId and: [
+                (each at: 3) == (self kindFor: changed) ])
+                    ifTrue: [ pair := each ] ].
         pair isNil ifTrue: [ ^self ].
         control := pair at: 1.
         node := pair at: 2.
         changed do: [ :a |
-            (a key == #text or: [ a key == #value ]) ifTrue: [
-                control setText: a value asString ].
+            (a key == #text or: [ a key == #value or: [
+                a key == #title or: [ a key == #label ] ] ]) ifTrue: [
+                (node type == #slider and: [ a key == #value ])
+                    ifTrue: [ self position: control to: a value ]
+                    ifFalse: [ control setText: a value asString ] ].
             a key == #checked ifTrue: [ self check: control to: a value ].
             "The spec the window remembers must agree with what is on screen,
              or the next diff patches something already patched."
@@ -403,6 +549,23 @@ Object subclass: WinToolWindow [
 
     isChecked: control <WinControl> ^ <Boolean> [
         ^(control send: (WinApi constant: 'BM_GETCHECK') wParam: 0 lParam: 0) = 1
+    ]
+
+    range: control <WinControl> from: lo <Object> to: hi <Object> [
+        "A trackbar's range is one message carrying both ends packed into
+         lParam, low word then high."
+        | a b |
+        a := (lo isNil ifTrue: [ 0 ] ifFalse: [ lo ]) bitAnd: 16rFFFF.
+        b := (hi isNil ifTrue: [ 100 ] ifFalse: [ hi ]) bitAnd: 16rFFFF.
+        control send: (WinApi constant: 'TBM_SETRANGE')
+                wParam: 1 lParam: (a bitOr: (b bitShift: 16)).
+        ^self
+    ]
+
+    position: control <WinControl> to: v <Object> [
+        control send: (WinApi constant: 'TBM_SETPOS')
+                wParam: 1 lParam: (v isNil ifTrue: [ 0 ] ifFalse: [ v ]).
+        ^self
     ]
 
     destroyControls [
@@ -436,6 +599,15 @@ Object subclass: WinToolWindow [
                 text := (node at: #label) asString.
                 style := style bitOr: ((WinApi constant: 'WS_TABSTOP')
                     bitOr: (WinApi constant: 'BS_AUTOCHECKBOX')) ].
+            node type == #slider ifTrue: [
+                cls := 'msctls_trackbar32'.
+                style := style bitOr: (WinApi constant: 'WS_TABSTOP') ].
+            "A PANE is a child of the shell's OWN window class, so `WinRender`
+             can attach a swapchain to it exactly as it does to the Canvas.
+             Nothing is drawn here - the tool's paint block owns its contents."
+            (WinSpec paneTypes includes: node type) ifTrue: [
+                cls := WinShell className.
+                style := style bitOr: (WinApi constant: 'WS_CLIPSIBLINGS') ].
             node type == #input ifTrue: [
                 cls := 'EDIT'.
                 text := ((node at: #value) isNil ifTrue: [ '' ] ifFalse: [ (node at: #value) asString ]).
@@ -459,6 +631,9 @@ Object subclass: WinToolWindow [
             with: (place at: 4) with: (place at: 5)).
         (kind == #control and: [ node type == #checkbox ]) ifTrue: [
             self check: control to: ((node at: #checked) == true) ].
+        (kind == #control and: [ node type == #slider ]) ifTrue: [
+            self range: control from: (node at: #min) to: (node at: #max).
+            self position: control to: (node at: #value) ].
         controls add: (Array with: control with: node with: kind).
         ^self
     ]
@@ -504,7 +679,8 @@ Object subclass: WinShell [
         | out id |
         out := OrderedCollection new.
         id := 2101.
-        WinToolWindow windows keysAndValuesDo: [ :key :tool |
+        WinToolWindow order do: [ :key | | tool |
+            tool := WinToolWindow windows at: key.
             out add: (Array with: id with: tool title , '...' with: nil with: true).
             self menuCommands at: id put: (Array with: #openToolWindow: with: key).
             id := id + 1 ].

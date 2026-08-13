@@ -184,3 +184,10 @@
 # code, no layout code — that is the point. It shows its own patch/rebuild
 # counters, so `a click patches and does not rebuild` is checkable by looking.
 125_winui_demotool.mst
+
+# WG14c: the SPRITE EDITOR, the first real tool written in the declarative
+# UI. The document (44a_spritedoc.mst) is already in the world list on every
+# platform; this is only a face, and about a fifth the size of the Cocoa one
+# it replaces because the window, the layout and the lifecycle are owned
+# elsewhere. Its two surfaces are rgbaPane nodes.
+126_winui_spriteed.mst

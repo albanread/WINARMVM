@@ -385,9 +385,14 @@ Object subclass: WinShell [
         WinArena u32At: icc + (WinApi offsetOf: 'INITCOMMONCONTROLSEX' field: 'dwSize')
                  put: (WinApi sizeOf: 'INITCOMMONCONTROLSEX').
         WinArena u32At: icc + (WinApi offsetOf: 'INITCOMMONCONTROLSEX' field: 'dwICC')
-                 put: (((WinApi constant: 'ICC_LISTVIEW_CLASSES')
+                 put: ((((WinApi constant: 'ICC_LISTVIEW_CLASSES')
                         bitOr: (WinApi constant: 'ICC_TREEVIEW_CLASSES'))
-                        bitOr: (WinApi constant: 'ICC_STANDARD_CLASSES')).
+                        bitOr: (WinApi constant: 'ICC_STANDARD_CLASSES'))
+                        "WG14c: `msctls_trackbar32` lives in ICC_BAR_CLASSES and
+                         in no other set. Without this bit a slider's
+                         CreateWindowExW answers NULL and, as the comment above
+                         says, nothing else says why."
+                        bitOr: (WinApi constant: 'ICC_BAR_CLASSES')).
         CommonControlsReady := WinApi asBool: (WinApi initCommonControls: icc).
         CommonControlsReady ifFalse: [
             ^self error: 'WinShell: InitCommonControlsEx failed (GetLastError ' ,

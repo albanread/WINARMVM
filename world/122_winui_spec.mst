@@ -266,6 +266,7 @@ Object subclass: WinSpec [
         ^((self node: #textGrid id: anId)
             at: #columns put: cols;
             at: #rows put: rows;
+            at: #event put: (self eventFor: anId);
             yourself)
     ]
 
@@ -273,6 +274,7 @@ Object subclass: WinSpec [
         ^((self node: #indexedPane id: anId)
             at: #width put: w;
             at: #height put: h;
+            at: #event put: (self eventFor: anId);
             yourself)
     ]
 
@@ -280,7 +282,18 @@ Object subclass: WinSpec [
         ^((self node: #rgbaPane id: anId)
             at: #width put: w;
             at: #height put: h;
+            at: #event put: (self eventFor: anId);
             yourself)
+    ]
+
+    "A PANE'S EVENT DEFAULTS TO ITS ID, which is wingui's own rule for menu and
+     command items and reads even better here: a pane is named because
+     something has to find it, and the thing that finds it is the same thing
+     that wants its clicks. Without this a pane is silent, and silently so —
+     it draws perfectly and reports nothing, which cost an afternoon."
+    WinSpec class >> eventFor: anId <Object> ^ <Object> [
+        anId isNil ifTrue: [ ^nil ].
+        ^anId asString asSymbol
     ]
 
     "── kinds ───────────────────────────────────────────────────────────"

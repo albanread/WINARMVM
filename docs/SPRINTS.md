@@ -906,6 +906,40 @@ every control at roughly twice its size and clipped captions away to nothing;
 and a CHECKBOX must be exempt from the label rule, because Win32 draws its
 caption beside the box and a STATIC above renders the word twice.
 
+**WG14c landed the same day: panes, sliders, and the Sprite Editor.** The
+three pane types realize onto `winui_render` exactly as the Canvas does, and
+a pane's clicks reach its tool with the point in the pane's own pixels. The
+slider needed `ICC_BAR_CLASSES` (its class is in no other set) and is POLLED
+on the drain's heartbeat, because `WM_HSCROLL` is not on the door's allowlist
+and a drag is a storm of them.
+
+`world/126_winui_spriteed.mst` is the first real tool: SpriteDoc was already
+in the world list on every platform, so this is a face and about a fifth the
+size of the Cocoa one it replaces. Both surfaces are `rgbaPane` nodes drawn
+by the tool's paint block.
+
+Four findings, all from running it:
+
+* **A pane's contents change without the spec changing.** A pencil stroke
+  moves pixels and no props at all, so the differ correctly answered "no ops"
+  and the paint block never ran. The paint block now runs on EVERY rerender —
+  "nothing changed" means nothing changed about the CONTROLS.
+* **A pane must carry an event or it is silent, silently.** It drew perfectly
+  and reported nothing. A pane's event now defaults to its id, which is
+  wingui's own rule for menu items.
+* **Menu ids from a Dictionary are not stable.** The Tools menu was built by
+  iterating one, so a tool could get a different id from run to run.
+  Registration order is now kept explicitly beside it.
+* **`getPx:` per device pixel is 186,624 sends per repaint** — slow enough
+  that the door declined the next click while the VM was busy and two thirds
+  of a stroke went missing. Asking once per CELL is 256. Still a full blast
+  per stroke, and the remaining cost is the honest one: the stores.
+
+And the same single-backslash modulo bug the Mac's own sprite editor carries
+(`76_spriteed.mst:784` emits `\` where `\` is meant) was reproduced here
+through Python escaping and caught the same way — both panes blank, because
+one paint raising skips the rest.
+
 ---
 
 ## Standing rules
