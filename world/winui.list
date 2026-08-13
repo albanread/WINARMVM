@@ -191,3 +191,11 @@
 # rgbaPane; only the fields that change the curve repaint it. The WG13 grid
 # view (121) remains for now; this is the first-class face.
 127_winui_soundtool.mst
+
+# WG14c: HELP, the last of the Mac's four views to reach Windows. Its one
+# structural idea is copied exactly — every word lives in the file as
+# Smalltalk methods, so the app documents itself from any working directory.
+# The content is NOT copied: half the Mac's text describes Cocoa. The reader
+# is a `textGrid` pane, the declarative UI's third pane type and the first
+# thing to use it.
+128_winui_help.mst

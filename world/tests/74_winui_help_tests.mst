@@ -1,0 +1,131 @@
+"74_winui_help_tests.mst — WinUiHelpTests: Help's whole reader, headless.
+
+ Every decision Help makes is pure — which topic, which lines, how far they
+ scroll, what colour a line is — so the reader is checkable to the line with
+ no window at all. What is NOT here is whether the cells appear, which needs
+ a real grid and belongs to the scripted gate.
+
+ THE ASCII ASSERTION IS THE POINT OF THIS FILE. Help is the first thing in
+ the port that is entirely prose, and a guest String is UTF-8 bytes while the
+ cell grid takes codepoints — so one em-dash typed in good faith becomes
+ three cells of rubbish. Asserting it per character across every topic is the
+ only way that stays true as the text is edited."
+
+TestCase subclass: WinUiHelpTests [
+    WinUiHelpTests class >> isEnabled ^ <Boolean> [
+        ^Smalltalk platformName == #windows
+    ]
+
+    runAll [
+        self runTest: #testEveryTopicHasTitleSelectorAndText
+             do: [ self testEveryTopicHasTitleSelectorAndText ].
+        self runTest: #testEveryTopicIsAsciiAndFitsTheReadersWidth
+             do: [ self testEveryTopicIsAsciiAndFitsTheReadersWidth ].
+        self runTest: #testChoosingATopicShowsItFromTheTop
+             do: [ self testChoosingATopicShowsItFromTheTop ].
+        self runTest: #testScrollIsClampedAtBothEnds
+             do: [ self testScrollIsClampedAtBothEnds ].
+        self runTest: #testAPageDownAdvancesAndOverlapsByTwoLines
+             do: [ self testAPageDownAdvancesAndOverlapsByTwoLines ].
+        self runTest: #testLineKindsGetTheirOwnColour
+             do: [ self testLineKindsGetTheirOwnColour ].
+        self runTest: #testTheSpecValidatesForEveryTopic
+             do: [ self testTheSpecValidatesForEveryTopic ].
+        ^self
+    ]
+
+    testEveryTopicHasTitleSelectorAndText [
+        WinHelp topics do: [ :t |
+            self assert: (t at: 1) isEmpty not description: 'a topic has a title'.
+            self assert: ((t at: 2) isKindOf: Symbol)
+                 description: (t at: 1) , ' names a selector'.
+            self assert: (WinHelp perform: (t at: 2)) isEmpty not
+                 description: (t at: 1) , ' has text' ].
+        self assert: WinHelp topics size >= 5
+             description: 'and there is enough of it to be worth a window'.
+    ]
+
+    testEveryTopicIsAsciiAndFitsTheReadersWidth [
+        "Two claims that only stay true if they are checked: no character the
+         grid cannot show, and no line the grid would cut off."
+        | lines |
+        1 to: WinHelp topics size do: [ :i |
+            WinHelp helpShow: i.
+            lines := WinHelp lines.
+            lines do: [ :line |
+                line do: [ :ch |
+                    self assert: ch asInteger < 128
+                         description: WinHelp topicTitle , ' is ASCII' ].
+                self assert: line size <= WinHelp cols
+                     description: WinHelp topicTitle , ' fits in '
+                         , WinHelp cols printString , ' columns' ] ].
+        WinHelp helpShow: 1.
+    ]
+
+    testChoosingATopicShowsItFromTheTop [
+        WinHelp helpShow: 2.
+        WinHelp handle: #pageDown value: nil.
+        self assert: WinHelp clampedScroll > 0 description: 'scrolled down'.
+        WinHelp helpShow: 3.
+        self assert: WinHelp clampedScroll equals: 0
+             description: 'a new topic starts at its first line'.
+        WinHelp helpShow: 1.
+    ]
+
+    testScrollIsClampedAtBothEnds [
+        "A topic shorter than the window must not scroll into empty space, and
+         one longer must not scroll past its last line."
+        | last |
+        WinHelp helpShow: 1.
+        1 to: 40 do: [ :i | WinHelp handle: #pageUp value: nil ].
+        self assert: WinHelp clampedScroll equals: 0
+             description: 'up stops at the top'.
+        1 to: 40 do: [ :i | WinHelp handle: #pageDown value: nil ].
+        last := (WinHelp lines size - WinHelp rows) max: 0.
+        self assert: WinHelp clampedScroll equals: last
+             description: 'and down stops at the last screenful'.
+        self assert: WinHelp visibleLines size <= WinHelp rows
+             description: 'the reader never shows more rows than it has'.
+        WinHelp helpShow: 1.
+    ]
+
+    testAPageDownAdvancesAndOverlapsByTwoLines [
+        "Two lines of overlap, so the eye has somewhere to land — a page that
+         advanced by a full screen would cut a sentence in half at the seam.
+         Run against the LONGEST topic, because a short one clamps to zero and
+         asserts nothing."
+        | longest before |
+        longest := 1.
+        1 to: WinHelp topics size do: [ :i |
+            WinHelp helpShow: i.
+            WinHelp lines size > WinHelp rows ifTrue: [ longest := i ] ].
+        WinHelp helpShow: longest.
+        before := WinHelp clampedScroll.
+        WinHelp handle: #pageDown value: nil.
+        self assert: WinHelp clampedScroll
+             equals: ((before + WinHelp rows - 2)
+                        min: ((WinHelp lines size - WinHelp rows) max: 0))
+             description: 'a page is the window less two lines, or the end,
+whichever comes first'.
+        WinHelp helpShow: 1.
+    ]
+
+    testLineKindsGetTheirOwnColour [
+        self assert: (WinHelp colourOf: '# A heading') equals: 16r0000C0
+             description: 'a heading is blue'.
+        self assert: (WinHelp colourOf: '- a bullet') equals: 16r006000
+             description: 'a bullet is green'.
+        self assert: (WinHelp colourOf: '  an aside') equals: 16r606060
+             description: 'an indented aside is dimmed'.
+        self assert: (WinHelp colourOf: 'plain prose') equals: 16r000000
+             description: 'and prose is plain'.
+    ]
+
+    testTheSpecValidatesForEveryTopic [
+        1 to: WinHelp topics size do: [ :i |
+            WinHelp helpShow: i.
+            self assert: (WinSpec validate: (WinSpec normalize: WinHelp spec)) isNil
+                 description: WinHelp topicTitle , ' builds a valid spec' ].
+        WinHelp helpShow: 1.
+    ]
+]

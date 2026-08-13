@@ -102,6 +102,17 @@ Object subclass: WinSpecLayout [
         t == #input ifTrue: [ ^Array with: (self clamp: maxW lo: 220 hi: 360) with: lh + 10 ].
         t == #slider ifTrue: [ ^Array with: (self clamp: maxW lo: 260 hi: 420) with: 32 ].
         t == #select ifTrue: [ ^Array with: (self clamp: maxW lo: 220 hi: 360) with: lh + 12 ].
+        "A TEXT GRID IS MEASURED IN CELLS, which is the one pane type whose
+         size is not a number the spec happens to know: it is `columns` and
+         `rows` times the font, and the font is exactly what these metrics
+         are. Sizing it in pixels instead would make every caller multiply by
+         a character width it would have to guess."
+        t == #textGrid ifTrue: [
+            ^Array
+                with: ((((aNode at: #columns) isNil ifTrue: [ 40 ] ifFalse: [ aNode at: #columns ])
+                        * (self charWidthIn: m)) min: maxW)
+                with: (((aNode at: #rows) isNil ifTrue: [ 10 ] ifFalse: [ aNode at: #rows ])
+                        * (self lineHeightIn: m)) ].
         (WinSpec paneTypes includes: t) ifTrue: [
             ^Array
                 with: (((aNode at: #width) isNil ifTrue: [ 320 ] ifFalse: [ aNode at: #width ]) min: maxW)

@@ -217,6 +217,8 @@ tier1.mst
 72_winui_spriteed_tests.mst
 ../127_winui_soundtool.mst
 73_winui_soundtool_tests.mst
+../128_winui_help.mst
+74_winui_help_tests.mst
 71_winui_toolwin_tests.mst
 67_winui_editor_tests.mst
 99_run_all.mst
