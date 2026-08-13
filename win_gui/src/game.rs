@@ -53,9 +53,15 @@ const DEF_H: u32 = 240;
 
 /// The frame the primary draws into and the pump uploads.
 pub struct GameFrame {
+    /// The WORLD's shape — what `indices` is, and what the guest draws into.
+    /// Equal to the viewport unless a game asked for `overscan:`.
     pub w: u32,
     pub h: u32,
-    /// One palette index per pixel, row-major, `w * h`.
+    /// The VIEWPORT's shape — what is actually shown. `scrollTo:x:y:` picks
+    /// which part of the world lands here.
+    pub view_w: u32,
+    pub view_h: u32,
+    /// One palette index per pixel, row-major, `w * h` — WORLD-sized.
     pub indices: Vec<u8>,
     /// 256 BGRA words — the renderer's format, so the upload is a memcpy.
     pub palette: Vec<u32>,
@@ -72,6 +78,8 @@ impl GameFrame {
         GameFrame {
             w,
             h,
+            view_w: w,
+            view_h: h,
             indices: vec![0u8; (w * h) as usize],
             // Opaque black, so an index nobody set is visibly empty rather
             // than whatever the allocator left behind.
@@ -79,6 +87,28 @@ impl GameFrame {
             text: TextOverlay::new(w, h),
             generation: 0,
         }
+    }
+
+    /// **`overscan:`** — grow the WORLD by `margin` pixels on every side while
+    /// the viewport stays as it is, so a game can scroll a picture larger than
+    /// the screen.
+    ///
+    /// THE PLANE IS REALLOCATED, and that is the whole of it. Storing the
+    /// margin and leaving the buffer alone is what broke Minesweeper for the
+    /// life of this port: it asks for a 16-pixel border, draws into a 352x272
+    /// buffer, and blits it — so 352-wide rows were being copied into a
+    /// 320-wide plane and every row slipped 32 pixels further left than the
+    /// one above it. The board sheared, and the numbers inside the tiles,
+    /// which are pixels and not text, sheared with it.
+    fn set_overscan(&mut self, margin: u32) {
+        let w = self.view_w + margin * 2;
+        let h = self.view_h + margin * 2;
+        if w == self.w && h == self.h {
+            return;
+        }
+        self.w = w;
+        self.h = h;
+        self.indices = vec![0u8; (w * h) as usize];
     }
 
     fn idx(&self, x: i64, y: i64) -> Option<usize> {
@@ -147,10 +177,14 @@ impl GameFrame {
         }
     }
 
+    /// `resizeTo:by:` — the VIEWPORT's shape, and with it the world's, since
+    /// a resize cancels any overscan (upstream rebuilds the pane).
     fn resize(&mut self, w: u32, h: u32) {
-        if w == self.w && h == self.h {
+        if w == self.w && h == self.h && w == self.view_w && h == self.view_h {
             return;
         }
+        self.view_w = w;
+        self.view_h = h;
         self.w = w;
         self.h = h;
         self.indices = vec![0u8; (w * h) as usize];
@@ -655,10 +689,8 @@ impl GameSink for WinGameSink {
                 crate::app::wake_ui_thread();
             }
             GameCommand::SetOverscan { margin } => {
-                // The WORLD grows; the viewport does not. The plane is
-                // reallocated at world size and the shader pans within it.
-                let (vw, vh) = (f.w, f.h);
-                let _ = (vw, vh);
+                // The WORLD grows; the viewport does not.
+                f.set_overscan(margin);
                 OVERSCAN.store(margin as usize, Ordering::Relaxed);
             }
             GameCommand::Scroll { x, y } => {
@@ -795,7 +827,19 @@ impl GameSink for WinGameSink {
 }
 
 /// Copy the current frame out for the pump. Answers `(w, h, indices, palette)`.
-pub fn take_frame() -> Option<(u32, u32, Vec<u8>, Vec<u32>, Option<Vec<u32>>)> {
+pub struct Upload {
+    /// The viewport — what the renderer's plane is sized to.
+    pub w: u32,
+    pub h: u32,
+    /// The world's width, which is `indices`' stride.
+    pub world_w: u32,
+    pub world_h: u32,
+    pub indices: Vec<u8>,
+    pub palette: Vec<u32>,
+    pub overlay: Option<Vec<u32>>,
+}
+
+pub fn take_frame() -> Option<Upload> {
     let presented = PRESENTED.load(Ordering::Acquire);
     if presented == UPLOADED.load(Ordering::Relaxed) {
         return None;
@@ -810,7 +854,15 @@ pub fn take_frame() -> Option<(u32, u32, Vec<u8>, Vec<u32>, Option<Vec<u32>>)> {
     } else {
         None
     };
-    Some((f.w, f.h, f.indices.clone(), f.palette.clone(), overlay))
+    Some(Upload {
+        w: f.view_w,
+        h: f.view_h,
+        world_w: f.w,
+        world_h: f.h,
+        indices: f.indices.clone(),
+        palette: f.palette.clone(),
+        overlay,
+    })
 }
 
 /// End the session host-side, the way the Mac's `close_window` does.
@@ -843,19 +895,52 @@ pub fn stop() {
     wipe_layers();
 }
 
-/// **W13: erase every layer**, so the next demo starts on a blank pane.
+/// Upstream's `#default` palette — `GamePane class >> defaultPalette`,
+/// transcribed, sixteen RGB triples that load from slot 16 up. Dark tones
+/// first, then the brights, so `GamePane white` and its friends name the same
+/// colour on every platform.
+///
+/// The HOST seeds these as well as the guest, and the reason is the gap: a
+/// wiped pane is shown for however many frames pass before the new demo's
+/// `GamePane new` runs, and an all-black palette makes that gap look like a
+/// failure. Seeding it makes a half-drawn first frame look like a game.
+const DEFAULT_PALETTE: [(u8, u8, u8); 16] = [
+    (0, 0, 0),         // 16 black
+    (29, 43, 83),      // 17 midnight
+    (126, 37, 83),     // 18 plum
+    (0, 135, 81),      // 19 forest
+    (171, 82, 54),     // 20 brown
+    (95, 87, 79),      // 21 dark grey
+    (194, 195, 199),   // 22 light grey
+    (255, 241, 232),   // 23 white
+    (255, 0, 77),      // 24 red
+    (255, 163, 0),     // 25 orange
+    (255, 236, 39),    // 26 yellow
+    (0, 228, 54),      // 27 green
+    (41, 173, 255),    // 28 blue
+    (131, 118, 156),   // 29 lavender
+    (255, 119, 168),   // 30 pink
+    (255, 204, 170),   // 31 peach
+];
+
+/// **W13: the pane, as new.** Every layer erased, the screen back to its
+/// default shape, and the palette back to the sixteen colours `GamePane new`
+/// installs — the state a demo is entitled to assume it is starting from.
 ///
 /// The Mac gets this for nothing: its pane is an object, `teardown()` drops the
-/// whole `NativeGame`, and sprites, both text layers and the shader go with it.
-/// Here the layers are process-lifetime statics — leaked deliberately, because
-/// the guest holds pointers into them — so "drop the pane" has to be spelled
-/// out, and until it was, a demo inherited its predecessor's screen: Plasma
-/// ran under Minesweeper's `MINES 32` and FreeCell's `DEAL/MOVES` row, three
-/// demos after either had exited.
+/// whole `NativeGame`, and sprites, both text layers, the shader, the size and
+/// the palette go with it. Here the layers are process-lifetime statics —
+/// leaked deliberately, because the guest holds pointers into them — so "drop
+/// the pane" has to be spelled out, and until it was, a demo inherited its
+/// predecessor's screen: Plasma ran under Minesweeper's `MINES 32` and
+/// FreeCell's `DEAL/MOVES` row, three demos after either had exited.
 ///
-/// Deliberately NOT reset here: the pane's SIZE. A demo that never calls
-/// `resizeTo:by:` runs at whatever the last one asked for, which is upstream's
-/// behaviour too — the pane is the console's screen, not the game's.
+/// THE SIZE IS PART OF IT, and leaving it out was wrong. Only two demos in the
+/// corpus ask for a shape — galaxigans wants 640x360, Plasma opens 320x240
+/// direct — and every other one draws for the DEFAULT pane without ever saying
+/// so. So after galaxigans, Life was laying an 80x60 grid meant for 320x240
+/// across a 640x360 screen. A demo that wants a different shape asks on its
+/// way in; a demo that says nothing must get the shape it was written for.
 fn wipe_layers() {
     OVERSCAN.store(0, Ordering::Relaxed);
     SCROLL_X.store(0, Ordering::Relaxed);
@@ -864,6 +949,19 @@ fn wipe_layers() {
     // the next demo — galaxigans asks for 30 and everything else wants 60.
     FPS.store(60, Ordering::Relaxed);
     let _ = with_sprites(|v| v.clear());
+
+    // SCREEN MEMORY GOES ENTIRELY, not just blank. A demo that never opens a
+    // direct plane must find `screenMemory` nil, exactly as it would on a
+    // fresh pane — and the next `openDirect:` then allocates at its own size
+    // rather than inheriting the last one's stride.
+    if let Ok(mut g) = DIRECT.lock() {
+        *g = None;
+    }
+    macvm::embed::clear_screen_memory();
+
+    // Zeroed FIRST and resized after: `open_text_plane`/`open_palette` answer
+    // early when the shape already matches, so the fill is what clears a plane
+    // that is not changing shape, and a reallocation zeroes the rest.
     if let Ok(mut g) = TEXTP.lock() {
         if let Some(t) = g.as_mut() {
             t.cells.fill(0);
@@ -874,17 +972,18 @@ fn wipe_layers() {
             p.bytes.fill(0);
         }
     }
-    if let Ok(mut g) = DIRECT.lock() {
-        if let Some(d) = g.as_mut() {
-            for b in d.bufs.iter_mut() {
-                b.fill(0);
-            }
-        }
-    }
+    open_text_plane(DEF_W, DEF_H);
+    open_palette(DEF_H);
+
     if let Ok(mut f) = shared().lock() {
         f.text.clear();
+        f.resize(DEF_W, DEF_H);
         f.indices.fill(0);
         f.palette.fill(0xFF00_0000);
+        for (i, (r, g, b)) in DEFAULT_PALETTE.iter().enumerate() {
+            f.palette[16 + i] =
+                0xFF00_0000 | ((*r as u32) << 16) | ((*g as u32) << 8) | *b as u32;
+        }
         // One more generation, so the pump uploads the blank frame rather than
         // leaving the last game's picture on screen until the next one draws.
         f.generation += 1;
@@ -896,7 +995,7 @@ fn wipe_layers() {
 pub fn pane_size() -> (u32, u32) {
     shared()
         .lock()
-        .map(|f| (f.w, f.h))
+        .map(|f| (f.view_w, f.view_h))
         .unwrap_or((DEF_W, DEF_H))
 }
 
@@ -1004,15 +1103,45 @@ fn render_api() -> Option<&'static RenderApi> {
 /// frame was shown.
 ///
 /// Called from the pump between dispatches, never from a wndproc.
+/// Copy the viewport-sized window out of a world-sized index buffer, offset by
+/// the current scroll and clamped to the world's edges.
+///
+/// The no-overscan case — every game but Minesweeper — is the whole buffer at
+/// offset zero, and is short-circuited to the clone it always was.
+fn crop_world(world: &[u8], ww: u32, wh: u32, vw: u32, vh: u32) -> Vec<u8> {
+    if ww == vw && wh == vh {
+        return world.to_vec();
+    }
+    let sx = SCROLL_X.load(Ordering::Relaxed).min(ww.saturating_sub(vw) as usize);
+    let sy = SCROLL_Y.load(Ordering::Relaxed).min(wh.saturating_sub(vh) as usize);
+    let (ww, vw, vh) = (ww as usize, vw as usize, vh as usize);
+    let mut out = vec![0u8; vw * vh];
+    for y in 0..vh {
+        let src = (sy + y) * ww + sx;
+        if src + vw <= world.len() {
+            out[y * vw..(y + 1) * vw].copy_from_slice(&world[src..src + vw]);
+        }
+    }
+    out
+}
+
 #[allow(unsafe_code)]
 pub fn upload_and_present(hwnd: i64) -> bool {
     if hwnd == 0 {
         return false;
     }
     let Some(api) = render_api() else { return false };
-    let Some((w, h, indices, palette, overlay)) = take_frame() else {
+    let Some(up) = take_frame() else {
         return false;
     };
+    let (w, h) = (up.w, up.h);
+    let (palette, overlay) = (up.palette, up.overlay);
+    // THE CROP. `indices` is the WORLD; the plane is the VIEWPORT. With no
+    // overscan the two are the same shape and this is the memcpy it always
+    // was; with overscan it is the pan, done here rather than in the shader
+    // because the copper keys off the SCREEN row and cropping first is what
+    // makes the screen row the destination row without any further arithmetic.
+    let indices = crop_world(&up.indices, up.world_w, up.world_h, w, h);
     let any_sprites = with_sprites(|v| v.iter().any(|(_, sp)| sp.visible)).unwrap_or(false);
     if overlay.is_some() || text_cells().is_some() || any_sprites {
         // Either text layer means RGB over indices, so the direct path.
@@ -1080,11 +1209,9 @@ pub fn upload_and_present(hwnd: i64) -> bool {
             let copper = effective_copper(h, &palette, shader_live);
             if copper.is_some() {
                 (api.make_copper)(hwnd);
-                (api.scroll)(
-                    hwnd,
-                    SCROLL_X.load(Ordering::Relaxed) as i64,
-                    SCROLL_Y.load(Ordering::Relaxed) as i64,
-                );
+                // ZERO, deliberately: `crop_world` has already applied the
+                // scroll, and the shader adding it again would pan twice.
+                (api.scroll)(hwnd, 0, 0);
             }
             let pal = (api.palette)(hwnd);
             if pal == 0 {
@@ -1184,4 +1311,72 @@ pub fn install(vm: &mut macvm::embed::VmHandle) {
     open_text_plane(DEF_W, DEF_H);
     open_palette(DEF_H);
     vm.set_game_sink(Box::new(WinGameSink));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// WG13: the crop is what makes `overscan:` mean anything, and Minesweeper
+    /// is the game that proves it — a 16-pixel border, so a 352x272 world
+    /// behind a 320x240 screen. Before this existed the world's rows were
+    /// copied straight into the viewport and each one slipped 32 pixels.
+    #[test]
+    fn the_crop_takes_a_window_out_of_the_world_at_the_scroll() {
+        // A 6x4 world whose every pixel names its own row, so a row landing in
+        // the wrong place is visible as a value rather than as a shift.
+        let mut world = vec![0u8; 6 * 4];
+        for y in 0..4usize {
+            for x in 0..6usize {
+                world[y * 6 + x] = (y * 10 + x) as u8;
+            }
+        }
+        SCROLL_X.store(1, Ordering::Relaxed);
+        SCROLL_Y.store(1, Ordering::Relaxed);
+        let out = crop_world(&world, 6, 4, 4, 2);
+        assert_eq!(out.len(), 8, "the window is the VIEWPORT's size");
+        assert_eq!(&out[0..4], &[11, 12, 13, 14], "row 0 comes from world row 1");
+        assert_eq!(&out[4..8], &[21, 22, 23, 24], "and row 1 from world row 2");
+    }
+
+    /// The scroll cannot walk off the edge: a game that asks for more than the
+    /// border has gets the border's limit, not a torn read.
+    #[test]
+    fn the_crop_clamps_at_the_worlds_edge() {
+        let world = vec![7u8; 6 * 4];
+        SCROLL_X.store(999, Ordering::Relaxed);
+        SCROLL_Y.store(999, Ordering::Relaxed);
+        let out = crop_world(&world, 6, 4, 4, 2);
+        assert_eq!(out, vec![7u8; 8], "clamped, and every pixel still read");
+    }
+
+    /// No overscan is the common case and must stay a straight copy — every
+    /// game but Minesweeper takes this path every frame.
+    #[test]
+    fn without_overscan_the_crop_is_the_whole_buffer() {
+        let world: Vec<u8> = (0..24u8).collect();
+        SCROLL_X.store(3, Ordering::Relaxed);
+        SCROLL_Y.store(3, Ordering::Relaxed);
+        assert_eq!(
+            crop_world(&world, 6, 4, 6, 4),
+            world,
+            "same shape means the scroll is not applied at all"
+        );
+        SCROLL_X.store(0, Ordering::Relaxed);
+        SCROLL_Y.store(0, Ordering::Relaxed);
+    }
+
+    /// `overscan:` grows the WORLD and leaves the viewport alone; a later
+    /// `resizeTo:by:` cancels it, which is how the wipe puts a pane back.
+    #[test]
+    fn overscan_grows_the_world_and_a_resize_cancels_it() {
+        let mut f = GameFrame::new(320, 240);
+        f.set_overscan(16);
+        assert_eq!((f.w, f.h), (352, 272), "the world takes the border");
+        assert_eq!((f.view_w, f.view_h), (320, 240), "the screen does not");
+        assert_eq!(f.indices.len(), 352 * 272, "and the plane is world-sized");
+        f.resize(320, 240);
+        assert_eq!((f.w, f.h), (320, 240), "a resize cancels the overscan");
+        assert_eq!(f.indices.len(), 320 * 240);
+    }
 }
