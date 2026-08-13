@@ -862,6 +862,28 @@ passed zero so the pan cannot be applied twice.
 Worth keeping as a rule: **the gallery is a test.** All three of these were
 invisible to 9877 passing assertions and obvious in a screenshot.
 
+### WG14 — the declarative UI (design settled 2026-08-13)
+
+The direction, verbatim: *"we need a first class replacement here for the
+cocoa ui, and I think the declarative UI will be it."* Design of record:
+[`win_declarative_ui.md`](win_declarative_ui.md). The short of it: adopt the
+spec+bind CONTRACT of `albanread/wingui` (the extraction of winscheme's
+declarative Win32 UI — JSON-shaped node trees, id-based reconciliation,
+event names bound to host handlers, full-spec republish with diffing), and
+implement the realizer NATIVELY in the world layer over what this port
+already trusts: the `WinControl` factory, `winui_render` (whose three
+shaders ARE wingui's three pane types), and the door. winscheme itself is
+the precedent — its reconciler lives in Scheme, not C++.
+
+Staged as WG14a (WinSpec: build/normalize/validate/diff, pure, headless),
+WG14b (WinRealize MVP + WinToolWindow + the Tools menu — the tool-window
+lifecycle the Mac never abstracted: open/hide-on-close/teardown/tick/theme,
+owned once), WG14c (panes + slider + select; THE SPRITE EDITOR ships on it),
+WG14d+ (table/tree/tabs/split as tools need them; Sound Editor migrates).
+Both reference repos are cloned at `C:\projects\wingui` and
+`C:\projects\winscheme-dev-2026`; where their docs and headers disagree,
+the headers are truth.
+
 ---
 
 ## Standing rules
