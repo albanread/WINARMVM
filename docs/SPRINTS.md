@@ -884,6 +884,28 @@ Both reference repos are cloned at `C:\projects\wingui` and
 `C:\projects\winscheme-dev-2026`; where their docs and headers disagree,
 the headers are truth.
 
+**WG14a and WG14b landed (2026-08-13).** The pure half first — `WinSpec`
+builds node trees, `normalize` stamps `__auto__:<path>` ids, `validate` runs
+the publish-time contract at BUILD time, and `diff:against:` answers patch
+ops or nil for "cannot express this, republish". Then the realizer:
+`WinSpecLayout` is pure arithmetic (metrics passed IN, so it is testable to
+the pixel), and `WinToolWindow` is the lifecycle the Mac never abstracted —
+registry, front-or-build, hide-on-close, teardown order, beat tick, and the
+event-depth discipline that coalesces N state changes in a handler into one
+reconcile. The Tools menu is built from the tool registry the way the View
+menu is built from the view registry.
+
+Proven on screen by `world/125_winui_demotool.mst`, which is three things and
+no more: a title, a block that answers a spec, a block that handles an event.
+It displays its own `patches`/`rebuilds` counters, so the claim is checkable
+by looking — three clicks moved `clicks:` and left `rebuilds:` at 1.
+
+Two bugs worth keeping, both found by looking rather than by testing:
+`moveTo:` is `{x. y. WIDTH. HEIGHT}` and was handed right/bottom, which drew
+every control at roughly twice its size and clipped captions away to nothing;
+and a CHECKBOX must be exempt from the label rule, because Win32 draws its
+caption beside the box and a STATIC above renders the word twice.
+
 ---
 
 ## Standing rules

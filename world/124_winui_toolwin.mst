@@ -1,0 +1,517 @@
+"124_winui_toolwin.mst — WG14b: the realizer, and the tool window it serves.
+
+ This is where a spec becomes controls. `WinSpec` said what, `WinSpecLayout`
+ said where; this file is the small dull thing that remains — create a
+ control per rect, move a control per rect, set a caption per patch op.
+
+ THE PIECE THE MAC NEVER HAD. Upstream's Cocoa side has two tool windows and
+ no abstraction over them: each hand-rolls a fifteen-line NSWindow prologue,
+ duplicates the control factories (`77_sounded.mst` says so in a comment),
+ and is torn down by hard-coded name from `CocoaUI teardown`. The costs show:
+ neither editor hears the font or theme broadcast, neither survives an
+ environment restart, and neither can own a timer. The informal protocol is
+ four duck-typed messages — `open`, `windowShouldClose:`, `teardown`,
+ `previewTick`. `WinToolWindow` is that protocol, written down once and owned
+ by a registry, so a tool declares a title, a render block and a handler and
+ gets the rest.
+
+ THE DISPATCH DISCIPLINE, ported from winscheme's `user-app-ui.ss` because it
+ is right: event depth is COUNTED. A handler that asks to rerender while
+ another is running only raises a flag; the drain flushes ONE reconcile when
+ depth returns to zero. So five state changes in a handler cost one diff and
+ one screen update rather than five of each. And while ops are being applied,
+ events are SUPPRESSED — a `SetWindowTextW` that came back as an EN_CHANGE
+ and re-entered the handler would loop forever, which is the trap wingui
+ documents and pays for with the same guard.
+
+ WHAT THE REALIZER CAN PATCH, and what it cannot: a prop change on a control
+ that already exists is applied in place — a caption, a value, a check state.
+ Anything structural rebuilds the window. That is honest for the MVP and it
+ is MEASURED rather than assumed: `patchCount` and `rebuildCount` are kept
+ exactly so an id strategy that has quietly stopped working is visible as a
+ number instead of felt as a flicker."
+
+Object subclass: WinToolWindow [
+    <classVars: Windows EventDepth RerenderPending Suppress PatchCount RebuildCount>
+
+    "── the registry ────────────────────────────────────────────────────"
+
+    WinToolWindow class >> windows ^ <Dictionary> [
+        Windows isNil ifTrue: [ Windows := Dictionary new ].
+        ^Windows
+    ]
+
+    WinToolWindow class >> register: anId <Symbol> title: aTitle <String>
+                           width: w <Integer> height: h <Integer>
+                           render: renderBlock <Object> handler: handlerBlock <Object> ^ <Object> [
+        "Declared, not built. A tool that is never opened costs a Dictionary
+         entry and no window — which is what makes it reasonable to register
+         every tool at load time."
+        | tool |
+        tool := WinToolWindow new
+            setId: anId title: aTitle width: w height: h
+            render: renderBlock handler: handlerBlock.
+        self windows at: anId put: tool.
+        ^tool
+    ]
+
+    WinToolWindow class >> named: anId <Symbol> ^ <Object> [
+        ^self windows at: anId ifAbsent: [ nil ]
+    ]
+
+    WinToolWindow class >> open: anId <Symbol> ^ <Boolean> [
+        | tool |
+        tool := self named: anId.
+        tool isNil ifTrue: [ ^false ].
+        ^tool open
+    ]
+
+    "── the door's other end ────────────────────────────────────────────
+     A tool window is an ordinary window of the shell's own class, so its
+     messages arrive at the same door and are routed here by hwnd."
+
+    WinToolWindow class >> forHwnd: hwnd <Integer> ^ <Object> [
+        hwnd = 0 ifTrue: [ ^nil ].
+        self windows do: [ :t | t hwndValue = hwnd ifTrue: [ ^t ] ].
+        ^nil
+    ]
+
+    WinToolWindow class >> ownsHwnd: hwnd <Integer> ^ <Boolean> [
+        ^(self forHwnd: hwnd) isNil not
+    ]
+
+    WinToolWindow class >> message: msg <Integer> hwnd: hwnd <Integer>
+                           wParam: wp <Integer> lParam: lp <Integer> ^ <Object> [
+        | tool |
+        tool := self forHwnd: hwnd.
+        tool isNil ifTrue: [ ^#defwindowproc ].
+        ^[ tool handleMessage: msg wParam: wp lParam: lp ]
+            on: Error do: [ :e | WinToolWindow report: e messageText. #defwindowproc ]
+    ]
+
+    "── the beat ────────────────────────────────────────────────────────
+     The Mac's tool windows cannot own a timer — world-targeted NSTimers never
+     fire there — so they ride the shell's metrics beat. Ours could own one,
+     and deliberately do not: one clock is easier to reason about than N, and
+     it makes `tick` a place the whole registry visits."
+
+    WinToolWindow class >> tickAll [
+        self windows do: [ :t | t isOpen ifTrue: [ t tick ] ].
+        ^self
+    ]
+
+    WinToolWindow class >> closeAll [
+        self windows do: [ :t | t teardown ].
+        ^self
+    ]
+
+    "── the dispatch discipline, shared by every window ──────────────────"
+
+    WinToolWindow class >> eventDepth ^ <Integer> [
+        ^EventDepth isNil ifTrue: [ 0 ] ifFalse: [ EventDepth ]
+    ]
+
+    WinToolWindow class >> suppressing ^ <Boolean> [ ^Suppress == true ]
+    WinToolWindow class >> suppress: aBool <Boolean> [ Suppress := aBool. ^self ]
+
+    WinToolWindow class >> enterEvent [ EventDepth := self eventDepth + 1. ^self ]
+    WinToolWindow class >> leaveEvent [
+        EventDepth := (self eventDepth - 1) max: 0.
+        ^self
+    ]
+
+    WinToolWindow class >> rerenderPending ^ <Boolean> [ ^RerenderPending == true ]
+    WinToolWindow class >> rerenderPending: aBool <Boolean> [ RerenderPending := aBool. ^self ]
+
+    "── the metrics, because an id strategy fails QUIETLY ────────────────"
+
+    WinToolWindow class >> patchCount ^ <Integer> [
+        ^PatchCount isNil ifTrue: [ 0 ] ifFalse: [ PatchCount ]
+    ]
+    WinToolWindow class >> rebuildCount ^ <Integer> [
+        ^RebuildCount isNil ifTrue: [ 0 ] ifFalse: [ RebuildCount ]
+    ]
+    WinToolWindow class >> countPatch [ PatchCount := self patchCount + 1. ^self ]
+    WinToolWindow class >> countRebuild [ RebuildCount := self rebuildCount + 1. ^self ]
+    WinToolWindow class >> resetCounts [ PatchCount := 0. RebuildCount := 0. ^self ]
+
+    "Where a tool's own failure goes. The transcript rather than `PaintError`,
+     which has a reader but no writer outside the pane that owns it — and
+     which nobody looking at a misbehaving tool would think to check."
+    WinToolWindow class >> report: aString <String> [
+        WinShell appendTranscript: 'tool: ' , aString.
+        ^self
+    ]
+
+    "── an instance ─────────────────────────────────────────────────────"
+
+    | id title width height renderBlock handlerBlock hwnd controls lastSpec nextId |
+
+    setId: anId <Symbol> title: aTitle <String> width: w <Integer> height: h <Integer>
+    render: r <Object> handler: hh <Object> ^ <WinToolWindow> [
+        id := anId.
+        title := aTitle.
+        width := w.
+        height := h.
+        renderBlock := r.
+        handlerBlock := hh.
+        hwnd := 0.
+        controls := OrderedCollection new.
+        lastSpec := nil.
+        nextId := 5000.
+        ^self
+    ]
+
+    id ^ <Symbol> [ ^id ]
+    title ^ <String> [ ^title ]
+    hwndValue ^ <Integer> [ ^hwnd ]
+    isOpen ^ <Boolean> [ ^hwnd ~= 0 ]
+    controls ^ <OrderedCollection> [ ^controls ]
+    lastSpec ^ <Object> [ ^lastSpec ]
+
+    "── open: front or build, exactly the Mac's own choice ──────────────"
+
+    open ^ <Boolean> [
+        self isOpen ifTrue: [
+            WinApi showWindow: hwnd cmd: (WinApi constant: 'SW_SHOW').
+            ^true ].
+        WinShell isOpen ifFalse: [ ^false ].
+        WinShell ensureClassRegistered.
+        hwnd := WinApi
+            createWindowExStyle: 0
+            class: (WinArena nativeUtf16: WinShell className)
+            title: (WinArena scratchUtf16: title)
+            style: ((WinApi constant: 'WS_OVERLAPPEDWINDOW')
+                bitOr: (WinApi constant: 'WS_CLIPCHILDREN'))
+            x: (WinApi constant: 'CW_USEDEFAULT')
+            y: (WinApi constant: 'CW_USEDEFAULT')
+            width: width
+            height: height
+            parent: 0
+            menu: 0
+            instance: WinApi moduleHandle
+            param: 0.
+        (hwnd isNil or: [ hwnd = 0 ]) ifTrue: [
+            hwnd := 0.
+            ^false ].
+        self realize.
+        WinApi showWindow: hwnd cmd: (WinApi constant: 'SW_SHOW').
+        ^true
+    ]
+
+    "HIDE, DO NOT DIE — the Mac chose this deliberately and so does this:
+     state lives in the tool's own class vars, so reopening is instant and
+     loses nothing. Answering 0 tells the door the close was handled."
+    closeRequested ^ <Object> [
+        self isOpen ifTrue: [
+            WinApi showWindow: hwnd cmd: (WinApi constant: 'SW_HIDE') ].
+        ^0
+    ]
+
+    teardown [
+        self destroyControls.
+        hwnd = 0 ifFalse: [ WinApi destroyWindow: hwnd ].
+        hwnd := 0.
+        lastSpec := nil.
+        ^self
+    ]
+
+    tick [ ^self ]
+
+    "── messages ────────────────────────────────────────────────────────"
+
+    handleMessage: msg <Integer> wParam: wp <Integer> lParam: lp <Integer> ^ <Object> [
+        msg = (WinApi constant: 'WM_CLOSE') ifTrue: [ ^self closeRequested ].
+        msg = (WinApi constant: 'WM_COMMAND') ifTrue: [
+            ^self commandFrom: (WinApi loWord: wp) code: (WinApi hiWord: wp) ].
+        msg = (WinApi constant: 'WM_SIZE') ifTrue: [
+            "A resize relays out from the spec that is already current. It is a
+             full rebuild for now and it is COUNTED, which is how the cost of
+             not debouncing would show up rather than merely be felt."
+            self isOpen ifTrue: [ self realize ].
+            ^0 ].
+        ^#defwindowproc
+    ]
+
+    commandFrom: anId <Integer> code: aCode <Integer> ^ <Object> [
+        | control node event |
+        WinToolWindow suppressing ifTrue: [ ^0 ].
+        control := nil.
+        controls do: [ :pair |
+            ((pair at: 1) id = anId) ifTrue: [ control := pair ] ].
+        control isNil ifTrue: [ ^#defwindowproc ].
+        node := control at: 2.
+        event := node at: #event.
+        event isNil ifTrue: [ ^0 ].
+        "An EDIT sends EN_CHANGE for every keystroke and BUTTON sends
+         BN_CLICKED as 0; anything else is noise this window has no use for."
+        (node type == #input and: [ aCode ~= (WinApi constant: 'EN_CHANGE') ])
+            ifTrue: [ ^0 ].
+        ^self dispatch: event value: (self valueOf: control)
+    ]
+
+    valueOf: pair <Array> ^ <Object> [
+        | control node |
+        control := pair at: 1.
+        node := pair at: 2.
+        node type == #input ifTrue: [ ^control text ].
+        node type == #checkbox ifTrue: [ ^self isChecked: control ].
+        ^node at: #value
+    ]
+
+    "THE DISCIPLINE. Depth in, handler, depth out — and only at depth zero
+     does a pending rerender actually happen."
+    dispatch: event <Symbol> value: aValue <Object> ^ <Object> [
+        handlerBlock isNil ifTrue: [ ^0 ].
+        WinToolWindow enterEvent.
+        [ handlerBlock value: event value: aValue ]
+            on: Error do: [ :e | WinToolWindow report: e messageText ].
+        WinToolWindow leaveEvent.
+        (WinToolWindow eventDepth = 0 and: [ WinToolWindow rerenderPending ])
+            ifTrue: [
+                WinToolWindow rerenderPending: false.
+                self rerender ].
+        ^0
+    ]
+
+    "── rerender: the whole programming model in one method ─────────────"
+
+    rerender ^ <Boolean> [
+        | spec ops |
+        "THE DEPTH GUARD COMES FIRST, before asking whether there is even a
+         window. The discipline is about WHEN a reconcile may happen, not
+         about whether one is worth doing — and a deferred rerender that finds
+         a closed window at depth zero simply answers false, which costs
+         nothing and keeps one rule instead of two."
+        WinToolWindow eventDepth > 0 ifTrue: [
+            WinToolWindow rerenderPending: true.
+            ^true ].
+        self isOpen ifFalse: [ ^false ].
+        spec := self currentSpec.
+        spec isNil ifTrue: [ ^false ].
+        lastSpec isNil ifTrue: [ ^self realizeSpec: spec ].
+        ops := WinSpec diff: lastSpec against: spec.
+        ops isNil ifTrue: [ ^self realizeSpec: spec ].
+        ops isEmpty ifTrue: [ lastSpec := spec. ^true ].
+        ^self apply: ops spec: spec
+    ]
+
+    currentSpec ^ <Object> [
+        | spec bad |
+        renderBlock isNil ifTrue: [ ^nil ].
+        spec := [ renderBlock value ] on: Error do: [ :e |
+            WinToolWindow report: e messageText. nil ].
+        spec isNil ifTrue: [ ^nil ].
+        spec := WinSpec normalize: spec.
+        bad := WinSpec validate: spec.
+        bad isNil ifFalse: [
+            "A malformed spec is refused HERE, where the tool that built it can
+             be named, rather than half-realized into a window."
+            WinToolWindow report: 'tool ' , id printString , ': ' , bad.
+            ^nil ].
+        ^spec
+    ]
+
+    "── the two outcomes ────────────────────────────────────────────────"
+
+    realize ^ <Boolean> [
+        | spec |
+        spec := self currentSpec.
+        spec isNil ifTrue: [ ^false ].
+        ^self realizeSpec: spec
+    ]
+
+    realizeSpec: spec <WinNode> ^ <Boolean> [
+        | places metrics |
+        WinToolWindow countRebuild.
+        WinToolWindow suppress: true.
+        self destroyControls.
+        metrics := self metrics.
+        places := WinSpecLayout
+            layout: spec width: self clientWidth metrics: metrics.
+        places do: [ :p | self createFor: p ].
+        WinToolWindow suppress: false.
+        lastSpec := spec.
+        ^true
+    ]
+
+    apply: ops <OrderedCollection> spec: spec <WinNode> ^ <Boolean> [
+        "IN PLACE, or not at all. Only prop patches are applied here; anything
+         structural falls back to a rebuild, which is honest for the MVP and
+         is the counter that says when it stops being good enough."
+        | ok |
+        ok := true.
+        ops do: [ :op |
+            ((op at: 1) == #setNodeProps or: [ (op at: 1) == #setWindowProps ])
+                ifFalse: [ ok := false ] ].
+        ok ifFalse: [ ^self realizeSpec: spec ].
+        WinToolWindow suppress: true.
+        ops do: [ :op |
+            (op at: 1) == #setWindowProps
+                ifTrue: [ self applyWindowProps: (op at: 2) ]
+                ifFalse: [ self applyNodeProps: (op at: 3) to: (op at: 2) ] ].
+        WinToolWindow suppress: false.
+        WinToolWindow countPatch.
+        lastSpec := spec.
+        ^true
+    ]
+
+    applyWindowProps: changed <OrderedCollection> [
+        changed do: [ :a |
+            a key == #title ifTrue: [
+                title := a value.
+                hwnd = 0 ifFalse: [
+                    WinApi setWindowText: hwnd text: (WinArena scratchUtf16: a value) ] ] ].
+        ^self
+    ]
+
+    applyNodeProps: changed <OrderedCollection> to: nodeId <String> [
+        | pair control node |
+        pair := nil.
+        controls do: [ :each |
+            ((each at: 2) idOrEmpty = nodeId and: [ (each at: 3) == #control ])
+                ifTrue: [ pair := each ] ].
+        pair isNil ifTrue: [ ^self ].
+        control := pair at: 1.
+        node := pair at: 2.
+        changed do: [ :a |
+            (a key == #text or: [ a key == #value ]) ifTrue: [
+                control setText: a value asString ].
+            a key == #checked ifTrue: [ self check: control to: a value ].
+            "The spec the window remembers must agree with what is on screen,
+             or the next diff patches something already patched."
+            node at: a key put: a value ].
+        ^self
+    ]
+
+    "── controls ────────────────────────────────────────────────────────"
+
+    "── the three things WinControl does not do ─────────────────────────
+     Kept here rather than widened into `92_winui_controls.mst`: they are
+     this realizer's needs, and 92's protocol is the shell's."
+
+    destroy: control <WinControl> [
+        control handle = 0 ifFalse: [ WinApi destroyWindow: control handle ].
+        ^self
+    ]
+
+    check: control <WinControl> to: aBool <Boolean> [
+        control send: (WinApi constant: 'BM_SETCHECK')
+                wParam: (aBool ifTrue: [ 1 ] ifFalse: [ 0 ]) lParam: 0.
+        ^self
+    ]
+
+    isChecked: control <WinControl> ^ <Boolean> [
+        ^(control send: (WinApi constant: 'BM_GETCHECK') wParam: 0 lParam: 0) = 1
+    ]
+
+    destroyControls [
+        controls do: [ :pair | self destroy: (pair at: 1) ].
+        controls := OrderedCollection new.
+        nextId := 5000.
+        ^self
+    ]
+
+    createFor: place <Array> [
+        | node kind control cls text style |
+        node := place at: 1.
+        kind := place at: 6.
+        cls := 'STATIC'.
+        text := ''.
+        style := (WinApi constant: 'WS_CHILD') bitOr: (WinApi constant: 'WS_VISIBLE').
+        kind == #label ifTrue: [ text := (node at: #label) asString ].
+        kind == #cardTitle ifTrue: [ text := (node at: #title) asString ].
+        kind == #control ifTrue: [
+            node type == #text ifTrue: [ text := (node at: #text) asString ].
+            node type == #heading ifTrue: [ text := (node at: #text) asString ].
+            node type == #divider ifTrue: [
+                style := style bitOr: (WinApi constant: 'SS_ETCHEDHORZ') ].
+            node type == #button ifTrue: [
+                cls := 'BUTTON'.
+                text := (node at: #text) asString.
+                style := style bitOr: ((WinApi constant: 'WS_TABSTOP')
+                    bitOr: (WinApi constant: 'BS_PUSHBUTTON')) ].
+            node type == #checkbox ifTrue: [
+                cls := 'BUTTON'.
+                text := (node at: #label) asString.
+                style := style bitOr: ((WinApi constant: 'WS_TABSTOP')
+                    bitOr: (WinApi constant: 'BS_AUTOCHECKBOX')) ].
+            node type == #input ifTrue: [
+                cls := 'EDIT'.
+                text := ((node at: #value) isNil ifTrue: [ '' ] ifFalse: [ (node at: #value) asString ]).
+                style := style bitOr: ((WinApi constant: 'WS_TABSTOP')
+                    bitOr: ((WinApi constant: 'WS_BORDER')
+                        bitOr: (WinApi constant: 'ES_AUTOHSCROLL'))) ] ].
+        control := [ WinControl
+            name: (id printString , '_' , nextId printString) asSymbol
+            class: cls text: text style: style exStyle: 0
+            id: nextId in: hwnd ]
+            on: Error do: [ :e | WinToolWindow report: e messageText. nil ].
+        control isNil ifTrue: [ ^self ].
+        nextId := nextId + 1.
+        control setFont: WinShell guiFont.
+        "`moveTo:` is {x. y. WIDTH. HEIGHT}, not a left/top/right/bottom rect —
+         and the placement is already in exactly that shape. Passing
+         right/bottom instead put every control at roughly twice its size,
+         which read on screen as captions clipped away to nothing."
+        control moveTo: (Array
+            with: (place at: 2) with: (place at: 3)
+            with: (place at: 4) with: (place at: 5)).
+        (kind == #control and: [ node type == #checkbox ]) ifTrue: [
+            self check: control to: ((node at: #checked) == true) ].
+        controls add: (Array with: control with: node with: kind).
+        ^self
+    ]
+
+    "── metrics, measured once and handed to the pure layout ────────────"
+
+    metrics ^ <Array> [
+        ^WinSpecLayout metricsCharWidth: 8 lineHeight: 20
+    ]
+
+    clientWidth ^ <Integer> [
+        | r |
+        hwnd = 0 ifTrue: [ ^width ].
+        r := [ (WinApi asBool: (WinApi getClientRect: hwnd into: WinShell rectScratch))
+                    ifTrue: [ WinArena rectAt: WinShell rectScratch ]
+                    ifFalse: [ nil ] ]
+            on: Error do: [ :e | nil ].
+        r isNil ifTrue: [ ^width ].
+        ^((r at: 3) - (r at: 1)) max: 120
+    ]
+]
+
+Object subclass: WinShell [
+    "WG14b: 91 declared these no-ops so its own dispatcher could name them
+     before this file existed; here is what they do."
+
+    WinShell class >> toolWindowMessage: msg <Integer> hwnd: hwnd <Integer>
+                      wParam: wp <Integer> lParam: lp <Integer> ^ <Object> [
+        (WinToolWindow ownsHwnd: hwnd) ifFalse: [ ^nil ].
+        ^WinToolWindow message: msg hwnd: hwnd wParam: wp lParam: lp
+    ]
+
+    WinShell class >> tickToolWindows [
+        WinToolWindow tickAll.
+        ^self
+    ]
+
+    WinShell class >> toolsMenuItems ^ <OrderedCollection> [
+        "Built from the TOOL REGISTRY, the same way the View menu is built
+         from the view registry — so a tool registered in a later sprint
+         appears here without anyone remembering to add it. Ids run from 2101,
+         clear of the View menu's 2040-upward block."
+        | out id |
+        out := OrderedCollection new.
+        id := 2101.
+        WinToolWindow windows keysAndValuesDo: [ :key :tool |
+            out add: (Array with: id with: tool title , '...' with: nil with: true).
+            self menuCommands at: id put: (Array with: #openToolWindow: with: key).
+            id := id + 1 ].
+        ^out
+    ]
+
+    WinShell class >> openToolWindow: anId <Symbol> ^ <Boolean> [
+        ^WinToolWindow open: anId
+    ]
+]

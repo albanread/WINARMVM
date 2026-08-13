@@ -168,3 +168,19 @@
 # window exists to hide a bug in. Contract adopted from wingui's spec+bind;
 # `docs/win_declarative_ui.md` is the decision record.
 122_winui_spec.mst
+
+# WG14b: where a node GOES — pure arithmetic over the spec, the space and
+# the font metrics, so the realizer that follows is only `create a control
+# per rect`. Containers are layout-only here, not windows; see the header.
+123_winui_layout.mst
+
+# WG14b: the realizer and the tool window it serves — a spec becomes real
+# controls in a second top-level window of the shell's own class, routed by
+# the same door. The lifecycle the Mac never abstracted, owned once.
+124_winui_toolwin.mst
+
+# WG14b's proof, and the shape every later tool copies: a title, a block that
+# answers a spec, a block that handles an event. No window code, no control
+# code, no layout code — that is the point. It shows its own patch/rebuild
+# counters, so `a click patches and does not rebuild` is checkable by looking.
+125_winui_demotool.mst

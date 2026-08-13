@@ -82,7 +82,7 @@ Object subclass: WinShell [
      and a nil selector with a label of '-' is a separator."
 
     WinShell class >> menuSpec ^ <OrderedCollection> [
-        | out menu |
+        | out menu toolItems |
         out := OrderedCollection new.
         menu := [ :title :items | out add: (Array with: title with: items) ].
 
@@ -125,12 +125,30 @@ Object subclass: WinShell [
             add: (Array with: 2029 with: 'Stop Demo' with: #menuStopDemo with: true);
             yourself).
 
+        "WG14b: TOOLS, and the Mac's own reasoning for it being a menu rather
+         than a view: the view bar is for the persistent IDE surfaces, and an
+         editor is a utility you SUMMON. Each item opens a registered tool
+         window (`WinToolWindow`), which is a real second top-level window."
+        toolItems := self toolsMenuItems.
+        toolItems isEmpty ifTrue: [
+            toolItems add: (Array with: 2100 with: 'No tools registered'
+                                  with: nil with: false) ].
+        menu value: 'Tools' value: toolItems.
+
         menu value: 'View' value: (self viewMenuItems).
 
         menu value: 'Help' value: (OrderedCollection new
             add: (Array with: 2091 with: 'About MACVM' with: #menuAbout with: true);
             yourself).
         ^out
+    ]
+
+    WinShell class >> toolsMenuItems ^ <OrderedCollection> [
+        "A no-op until 124 defines the tool registry — this file loads before
+         it, and a menu cannot name a class that does not exist yet. An empty
+         list here means the Tools menu shows only its `nothing registered`
+         placeholder, which is the truthful answer for a world without 124."
+        ^OrderedCollection new
     ]
 
     WinShell class >> viewMenuItems ^ <OrderedCollection> [

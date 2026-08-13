@@ -209,5 +209,16 @@ tier1.mst
 # stage that exists precisely to be tested before a realizer can hide a bug.
 ../122_winui_spec.mst
 69_winui_spec_tests.mst
+
+# WG14b's layout, pure for the same reason and tested the same way.
+../123_winui_layout.mst
+70_winui_layout_tests.mst
+
+# The realizer itself. Its Win32 half needs a window and belongs to a
+# scripted gate; what loads here is the registry and the dispatch
+# discipline, both of which are checkable with no window at all.
+../124_winui_toolwin.mst
+../125_winui_demotool.mst
+71_winui_toolwin_tests.mst
 67_winui_editor_tests.mst
 99_run_all.mst

@@ -1348,6 +1348,13 @@ Object subclass: WinShell [
          only a WM_COMMAND on release. Routed by HWND here, its
          LBUTTONDOWN/MOUSEMOVE/LBUTTONUP arrive where the drag can use them.
          A no-op hook until 96 defines it."
+        "WG14b: a TOOL WINDOW is not this window at all — it is another
+         top-level of the same class, so its messages land here too and must
+         be routed away FIRST, before any test that assumes `hwnd` is ours.
+         Answering nil means `not mine`, which is the one answer a real
+         handler never gives, so no temp is needed to hold it."
+        (self toolWindowMessage: msg hwnd: hwnd wParam: wp lParam: lp)
+            ifNotNil: [ :answer | ^answer ].
         (hwnd ~= 0 and: [ hwnd = self soundPaneHwnd ]) ifTrue: [
             ^self soundMessage: msg wParam: wp lParam: lp ].
         (hwnd ~= 0 and: [ hwnd = self splitterHwnd ]) ifTrue: [
@@ -1588,6 +1595,7 @@ Object subclass: WinShell [
          directly would be drawing from inside a message dispatch, which is
          exactly the arrangement §2.4a exists to prevent."
         self serviceCanvasAnimation.
+        self tickToolWindows.
         ReaskOnce == true ifTrue: [
             "The guest's own escape hatch, and `tests_wg3.md` item 5's whole
              mechanism: work discovered DURING a pass. Answering non-zero
@@ -1696,6 +1704,12 @@ Object subclass: WinShell [
     WinShell class >> runTests [ ^false ]
     WinShell class >> testRuns [ ^0 ]
     WinShell class >> testsViewName [ ^#tests ]
+    "WG14b's tool windows — a second top-level of THIS window class, so its
+     messages arrive at this same door; 124 overrides. Answering nil means
+     `not mine`, which is the one answer a real handler never gives."
+    WinShell class >> toolWindowMessage: msg hwnd: hwnd wParam: wp lParam: lp [ ^nil ]
+    WinShell class >> tickToolWindows [ ^self ]
+
     "WG13's Sound Editor — the parametric synth fronted natively; 121
      overrides."
     WinShell class >> buildSoundPane [ ^self ]

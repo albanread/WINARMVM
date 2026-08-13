@@ -1,0 +1,328 @@
+"123_winui_layout.mst — WG14b's arithmetic, and it is PURE.
+
+ Where a node goes is a function of the spec, the space, and the font's
+ metrics. Nothing else — no window, no HDC, no Win32 — so the whole layout is
+ checkable headless, and the realizer that follows becomes the small dull
+ thing it should be: create a control per rect, move a control per rect.
+
+ THE METRICS ARE PASSED IN, an Array of {charWidth. lineHeight}. wingui reads
+ the system's `lfMessageFont` through a device context, which would drag a
+ window into this file and take the tests with it. Here the realizer measures
+ once and hands the numbers over; a test hands over round numbers and asserts
+ exact pixels.
+
+ THE ALGORITHM IS WINGUI'S, transcribed from `native_ui.cpp` by way of the
+ survey in `docs/win_declarative_ui.md`: two passes, measure then place;
+ `stack` flows down; `row` gives children their natural widths and shrinks
+ proportionally only when they do not fit, with a 72-pixel floor; `grid` is
+ uniform columns; `card` has FIXED padding 12 and gap 10 whatever the spec
+ says, and reserves 26 pixels for a title. Children are left-aligned at their
+ natural width — THERE IS NO STRETCH-TO-FILL, which surprises everyone once
+ and is load-bearing for how the row shrink reads.
+
+ ONE DELIBERATE SIMPLIFICATION vs wingui, recorded so it is a choice: a
+ container is NOT a window here. wingui creates a STATIC host per container
+ and lays children out relative to it; this answers ABSOLUTE rects in the
+ window's client area and creates controls only for leaves. That removes a
+ window per container, removes the coordinate translation, and costs the
+ thing hosts buy — clipping and per-container repaint — which nothing in the
+ MVP's node set needs. When `scroll-view` arrives it will need a real host,
+ and this is where that decision gets revisited."
+
+Object subclass: WinSpecLayout [
+
+    "── the constants ───────────────────────────────────────────────────
+     Raw pixels at the current DPI, exactly as wingui keeps them: DPI enters
+     through the FONT metrics, not through these."
+
+    WinSpecLayout class >> rootPadding ^ <Integer> [ ^16 ]
+    WinSpecLayout class >> defaultGap ^ <Integer> [ ^12 ]
+    WinSpecLayout class >> cardPadding ^ <Integer> [ ^12 ]
+    WinSpecLayout class >> cardGap ^ <Integer> [ ^10 ]
+    WinSpecLayout class >> cardTitleHeight ^ <Integer> [ ^26 ]
+    WinSpecLayout class >> rowMinWidth ^ <Integer> [ ^72 ]
+    WinSpecLayout class >> labelGap ^ <Integer> [ ^8 ]
+    WinSpecLayout class >> dividerHeight ^ <Integer> [ ^8 ]
+
+    "── metrics ─────────────────────────────────────────────────────────"
+
+    WinSpecLayout class >> metricsCharWidth: cw <Integer> lineHeight: lh <Integer> ^ <Array> [
+        ^Array with: cw with: lh
+    ]
+
+    WinSpecLayout class >> charWidthIn: m <Array> ^ <Integer> [ ^(m at: 1) max: 1 ]
+    WinSpecLayout class >> lineHeightIn: m <Array> ^ <Integer> [ ^(m at: 2) max: 1 ]
+
+    WinSpecLayout class >> textWidth: aString <Object> in: m <Array> ^ <Integer> [
+        aString isNil ifTrue: [ ^0 ].
+        ^aString size * (self charWidthIn: m)
+    ]
+
+    "── the label rule ──────────────────────────────────────────────────
+     A labelled control renders a STATIC above itself and costs its line plus
+     a gap. Stated once here because four control types share it."
+
+    WinSpecLayout class >> labelHeightOf: aNode <WinNode> in: m <Array> ^ <Integer> [
+        "A CHECKBOX IS THE EXCEPTION, and it shows immediately if it is
+         missed: Win32 draws a checkbox's own text beside its box, so adding a
+         STATIC above it renders the word twice, once as a heading over
+         nothing and once on the control."
+        aNode type == #checkbox ifTrue: [ ^0 ].
+        (aNode at: #label) isNil ifTrue: [ ^0 ].
+        ^(self lineHeightIn: m) + self labelGap
+    ]
+
+    "── measure ─────────────────────────────────────────────────────────
+     Answers {width. height} for `aNode` given at most `maxW` pixels."
+
+    WinSpecLayout class >> measure: aNode <WinNode> width: maxW <Integer> metrics: m <Array> ^ <Array> [
+        | t inner |
+        t := aNode type.
+        (WinSpec isContainer: t) ifTrue: [ ^self measureContainer: aNode width: maxW metrics: m ].
+        t == #divider ifTrue: [ ^Array with: maxW with: self dividerHeight ].
+        inner := self measureControl: aNode width: maxW metrics: m.
+        ^Array
+            with: (inner at: 1)
+            with: (inner at: 2) + (self labelHeightOf: aNode in: m)
+    ]
+
+    "The control's own box, before its label is accounted for."
+    WinSpecLayout class >> measureControl: aNode <WinNode> width: maxW <Integer> metrics: m <Array> ^ <Array> [
+        | t lh tw |
+        t := aNode type.
+        lh := self lineHeightIn: m.
+        tw := self textWidth: (aNode at: #text) in: m.
+        t == #text ifTrue: [ ^Array with: (tw min: maxW) with: lh ].
+        t == #heading ifTrue: [ ^Array with: (tw min: maxW) with: lh + 4 ].
+        t == #button ifTrue: [ ^Array with: ((tw + 28) min: maxW) with: lh + 16 ].
+        t == #checkbox ifTrue: [
+            ^Array
+                with: (((self textWidth: (aNode at: #label) in: m) + 32) min: maxW)
+                with: lh + 12 ].
+        t == #input ifTrue: [ ^Array with: (self clamp: maxW lo: 220 hi: 360) with: lh + 10 ].
+        t == #slider ifTrue: [ ^Array with: (self clamp: maxW lo: 260 hi: 420) with: 32 ].
+        t == #select ifTrue: [ ^Array with: (self clamp: maxW lo: 220 hi: 360) with: lh + 12 ].
+        (WinSpec paneTypes includes: t) ifTrue: [
+            ^Array
+                with: (((aNode at: #width) isNil ifTrue: [ 320 ] ifFalse: [ aNode at: #width ]) min: maxW)
+                with: ((aNode at: #height) isNil ifTrue: [ 180 ] ifFalse: [ aNode at: #height ]) ].
+        "An unknown leaf still occupies a line rather than nothing, so a spec
+         that grew a node this file has not met yet is visibly wrong rather
+         than invisibly absent."
+        ^Array with: (tw min: maxW) with: lh
+    ]
+
+    WinSpecLayout class >> clamp: v <Integer> lo: lo <Integer> hi: hi <Integer> ^ <Integer> [
+        ^(v max: lo) min: hi
+    ]
+
+    "── containers ──────────────────────────────────────────────────────
+
+     Measure and place are the same walk with a different verb, so they share
+     one method: `place` nil means measure only, otherwise placements are
+     appended to it as {node. x. y. w. h}."
+
+    WinSpecLayout class >> measureContainer: aNode <WinNode> width: maxW <Integer> metrics: m <Array> ^ <Array> [
+        ^self walk: aNode x: 0 y: 0 width: maxW metrics: m into: nil
+    ]
+
+    WinSpecLayout class >> layout: aNode <WinNode> width: maxW <Integer> metrics: m <Array> ^ <OrderedCollection> [
+        "The whole window: the body inset by the root padding, and every
+         control's ABSOLUTE rect in the client area."
+        | out body |
+        out := OrderedCollection new.
+        body := aNode type == #window ifTrue: [ aNode body ] ifFalse: [ aNode ].
+        body isNil ifTrue: [ ^out ].
+        self place: body
+            x: self rootPadding
+            y: self rootPadding
+            width: (maxW - (self rootPadding * 2) max: 120)
+            metrics: m
+            into: out.
+        ^out
+    ]
+
+    "Place `aNode` at (x, y) and answer {width. height} consumed."
+    WinSpecLayout class >> place: aNode <WinNode> x: x <Integer> y: y <Integer>
+                       width: maxW <Integer> metrics: m <Array>
+                       into: out <Object> ^ <Array> [
+        | t size lh ctl |
+        t := aNode type.
+        (WinSpec isContainer: t)
+            ifTrue: [ ^self walk: aNode x: x y: y width: maxW metrics: m into: out ].
+        size := self measure: aNode width: maxW metrics: m.
+        out isNil ifFalse: [
+            lh := self labelHeightOf: aNode in: m.
+            lh = 0 ifFalse: [
+                "A label is a control in its own right — its own STATIC, its
+                 own rect — so it gets its own placement, tagged with the KIND
+                 that says which of the two this is. Both carry the same node,
+                 because both are that node's."
+                out add: { aNode. x. y. (size at: 1). (self lineHeightIn: m). #label } ].
+            ctl := self measureControl: aNode width: maxW metrics: m.
+            out add: { aNode. x. y + lh. (ctl at: 1). (ctl at: 2). #control } ].
+        ^size
+    ]
+
+    WinSpecLayout class >> walk: aNode <WinNode> x: x <Integer> y: y <Integer>
+                       width: maxW <Integer> metrics: m <Array>
+                       into: out <Object> ^ <Array> [
+        | t |
+        t := aNode type.
+        t == #row ifTrue: [ ^self walkRow: aNode x: x y: y width: maxW metrics: m into: out ].
+        t == #grid ifTrue: [ ^self walkGrid: aNode x: x y: y width: maxW metrics: m into: out ].
+        t == #card ifTrue: [ ^self walkCard: aNode x: x y: y width: maxW metrics: m into: out ].
+        ^self walkStack: aNode x: x y: y width: maxW metrics: m into: out
+    ]
+
+    "── stack: straight down, natural widths ────────────────────────────"
+
+    WinSpecLayout class >> walkStack: aNode <WinNode> x: x <Integer> y: y <Integer>
+                       width: maxW <Integer> metrics: m <Array>
+                       into: out <Object> ^ <Array> [
+        | gap pad cursor widest size first |
+        gap := self gapOf: aNode default: self defaultGap.
+        pad := self padOf: aNode.
+        cursor := y + pad.
+        widest := 0.
+        first := true.
+        aNode children do: [ :c |
+            first ifFalse: [ cursor := cursor + gap ].
+            first := false.
+            size := self place: c x: x + pad y: cursor
+                         width: (maxW - (pad * 2) max: 1) metrics: m into: out.
+            widest := widest max: (size at: 1).
+            cursor := cursor + (size at: 2) ].
+        ^Array with: widest + (pad * 2) with: cursor - y + pad
+    ]
+
+    "── row: natural widths, proportional shrink, 72px floor ────────────"
+
+    WinSpecLayout class >> walkRow: aNode <WinNode> x: x <Integer> y: y <Integer>
+                       width: maxW <Integer> metrics: m <Array>
+                       into: out <Object> ^ <Array> [
+        | gap pad kids n avail widths total cursor tallest size |
+        gap := self gapOf: aNode default: self defaultGap.
+        pad := self padOf: aNode.
+        kids := aNode children.
+        n := kids size.
+        n = 0 ifTrue: [ ^Array with: pad * 2 with: pad * 2 ].
+        avail := (maxW - (pad * 2) - ((n - 1) * gap)) max: (n * self rowMinWidth).
+        widths := OrderedCollection new.
+        kids do: [ :c |
+            widths add: (((self measure: c width: avail metrics: m) at: 1)
+                            max: self rowMinWidth) ].
+        total := 0.
+        widths do: [ :w | total := total + w ].
+        total > avail ifTrue: [ widths := self shrink: widths to: avail ].
+        cursor := x + pad.
+        tallest := 0.
+        1 to: n do: [ :i |
+            size := self place: (kids at: i) x: cursor y: y + pad
+                         width: (widths at: i) metrics: m into: out.
+            tallest := tallest max: (size at: 2).
+            "ADVANCE BY WHAT THE CHILD TOOK, not by what it was offered. The
+             computed width is a CONSTRAINT — the most this child may have —
+             and a child that wanted less keeps less, because there is no
+             stretch-to-fill. Advancing by the slot instead leaves a gap after
+             every narrow control and was wrong for exactly one test."
+            cursor := cursor + (size at: 1) + gap ].
+        ^Array with: cursor - gap - x + pad with: tallest + (pad * 2)
+    ]
+
+    "Scale proportionally, then shave one pixel at a time off whichever is
+     currently widest until it fits — wingui's own two-step, and the shaving
+     is what makes the result exact rather than off by the rounding."
+    WinSpecLayout class >> shrink: widths <OrderedCollection> to: avail <Integer> ^ <OrderedCollection> [
+        | natural out total widest idx guard |
+        natural := 0.
+        widths do: [ :w | natural := natural + w ].
+        natural = 0 ifTrue: [ ^widths ].
+        out := OrderedCollection new.
+        widths do: [ :w |
+            out add: ((w * avail // natural) max: self rowMinWidth) ].
+        total := 0.
+        out do: [ :w | total := total + w ].
+        guard := 0.
+        [ total > avail and: [ guard < 10000 ] ] whileTrue: [
+            guard := guard + 1.
+            widest := 0.
+            idx := 1.
+            1 to: out size do: [ :i |
+                (out at: i) > widest ifTrue: [ widest := out at: i. idx := i ] ].
+            widest <= self rowMinWidth ifTrue: [ ^out ].
+            out at: idx put: widest - 1.
+            total := total - 1 ].
+        ^out
+    ]
+
+    "── grid: uniform columns, row-major ────────────────────────────────"
+
+    WinSpecLayout class >> walkGrid: aNode <WinNode> x: x <Integer> y: y <Integer>
+                       width: maxW <Integer> metrics: m <Array>
+                       into: out <Object> ^ <Array> [
+        | gap pad kids cols cell col row cursorY rowH widest size |
+        gap := self gapOf: aNode default: self defaultGap.
+        pad := self padOf: aNode.
+        kids := aNode children.
+        cols := (aNode at: #columns) isNil ifTrue: [ 2 ] ifFalse: [ (aNode at: #columns) max: 1 ].
+        cell := ((maxW - (pad * 2) - ((cols - 1) * gap)) // cols) max: self rowMinWidth.
+        col := 0.
+        cursorY := y + pad.
+        rowH := 0.
+        widest := 0.
+        kids do: [ :c |
+            size := self place: c
+                         x: x + pad + (col * (cell + gap))
+                         y: cursorY
+                         width: cell metrics: m into: out.
+            rowH := rowH max: (size at: 2).
+            widest := widest max: (col * (cell + gap)) + (size at: 1).
+            col := col + 1.
+            col = cols ifTrue: [
+                col := 0.
+                cursorY := cursorY + rowH + gap.
+                rowH := 0 ] ].
+        col = 0 ifTrue: [ cursorY := cursorY - gap ] ifFalse: [ cursorY := cursorY + rowH ].
+        ^Array with: widest + (pad * 2) with: cursorY - y + pad
+    ]
+
+    "── card: FIXED padding and gap, and room for a title ───────────────"
+
+    WinSpecLayout class >> walkCard: aNode <WinNode> x: x <Integer> y: y <Integer>
+                       width: maxW <Integer> metrics: m <Array>
+                       into: out <Object> ^ <Array> [
+        | pad gap top cursor widest size first title |
+        pad := self cardPadding.
+        gap := self cardGap.
+        title := aNode at: #title.
+        top := (title isNil or: [ title isEmpty ])
+            ifTrue: [ 0 ]
+            ifFalse: [ self cardTitleHeight ].
+        out isNil ifFalse: [
+            top = 0 ifFalse: [
+                out add: { aNode. x + pad. y + pad.
+                           maxW - (pad * 2). self lineHeightIn: m. #cardTitle } ] ].
+        cursor := y + pad + top.
+        widest := 0.
+        first := true.
+        aNode children do: [ :c |
+            first ifFalse: [ cursor := cursor + gap ].
+            first := false.
+            size := self place: c x: x + pad y: cursor
+                         width: (maxW - (pad * 2) max: 1) metrics: m into: out.
+            widest := widest max: (size at: 1).
+            cursor := cursor + (size at: 2) ].
+        ^Array with: widest + (pad * 2) with: ((cursor - y + pad) max: 48)
+    ]
+
+    "── shared prop reads ───────────────────────────────────────────────"
+
+    WinSpecLayout class >> gapOf: aNode <WinNode> default: d <Integer> ^ <Integer> [
+        ^(aNode at: #gap) isNil ifTrue: [ d ] ifFalse: [ (aNode at: #gap) max: 0 ]
+    ]
+
+    WinSpecLayout class >> padOf: aNode <WinNode> ^ <Integer> [
+        ^(aNode at: #padding) isNil ifTrue: [ 0 ] ifFalse: [ (aNode at: #padding) max: 0 ]
+    ]
+]
