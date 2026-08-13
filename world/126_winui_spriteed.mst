@@ -28,7 +28,7 @@
  top-left already, so the flip would be a bug rather than a fix."
 
 Object subclass: WinSpriteEd [
-    <classVars: Doc CurFrame SelColor Tool Status>
+    <classVars: Doc CurFrame SelColor Tool Status WantW WantH>
 
     "── state the FACE owns; SpriteDoc holds none of it ─────────────────"
 
@@ -64,54 +64,89 @@ Object subclass: WinSpriteEd [
      instead of one window."
 
     WinSpriteEd class >> spec ^ <WinNode> [
-        | d |
-        d := self doc.
+        "LANDSCAPE, since WG14d made columns sayable: the canvas and its tools
+         on the left, everything you SET on the right. The grid is 432 wide
+         and the panel wants about the same, so the weights are even."
         ^WinSpec window: 'Sprite Editor' id: #spriteWin body: (WinSpec stack: {
             WinSpec text: self status id: #status.
-
-            WinSpec rgbaPane: #grid width: self gridWidth height: self gridHeight.
-
             WinSpec row: {
-                WinSpec button: (self toolLabel: #pencil) event: #toolPencil id: #tPencil.
-                WinSpec button: (self toolLabel: #fill) event: #toolFill id: #tFill.
-                WinSpec button: (self toolLabel: #pick) event: #toolPick id: #tPick.
-                WinSpec button: 'Clear' event: #clear id: #tClear
-            } id: #tools.
-
-            WinSpec rgbaPane: #swatches width: self swatchWidth height: self swatchHeight.
-
-            WinSpec card: 'Colour ' , self selColor printString children: {
-                WinSpec slider: 'R' value: (self channel: 1) min: 0 max: 255
-                        event: #red id: #sliderR.
-                WinSpec slider: 'G' value: (self channel: 2) min: 0 max: 255
-                        event: #green id: #sliderG.
-                WinSpec slider: 'B' value: (self channel: 3) min: 0 max: 255
-                        event: #blue id: #sliderB
-            } id: #colourCard.
-
-            WinSpec card: 'Frame ' , (self curFrame + 1) printString , '/'
-                        , d frameCount printString
-                children: {
+                WinSpec stack: {
+                    WinSpec rgbaPane: #grid width: self gridWidth height: self gridHeight.
                     WinSpec row: {
-                        WinSpec button: 'First' event: #frameFirst id: #fFirst.
-                        WinSpec button: 'Prev' event: #framePrev id: #fPrev.
-                        WinSpec button: 'Next' event: #frameNext id: #fNext
-                    } id: #frameNav.
+                        WinSpec button: (self toolLabel: #pencil) event: #toolPencil id: #tPencil.
+                        WinSpec button: (self toolLabel: #fill) event: #toolFill id: #tFill.
+                        WinSpec button: (self toolLabel: #pick) event: #toolPick id: #tPick.
+                        WinSpec button: 'Clear' event: #clear id: #tClear
+                    } id: #tools.
                     WinSpec row: {
-                        WinSpec button: 'Add' event: #frameAdd id: #fAdd.
-                        WinSpec button: 'Dup' event: #frameDup id: #fDup.
-                        WinSpec button: 'Del' event: #frameDel id: #fDel
-                    } id: #frameEdit
-                } id: #frameCard.
-
-            WinSpec card: 'Sheet' children: {
-                WinSpec input: 'Name' value: d name event: #name id: #nameField.
-                WinSpec row: {
-                    WinSpec button: 'Save' event: #save id: #bSave.
-                    WinSpec button: 'Copy Code' event: #copy id: #bCopy
-                } id: #sheetButtons
-            } id: #sheetCard
+                        WinSpec button: 'Left' event: #nudgeLeft id: #nLeft.
+                        WinSpec button: 'Right' event: #nudgeRight id: #nRight.
+                        WinSpec button: 'Up' event: #nudgeUp id: #nUp.
+                        WinSpec button: 'Down' event: #nudgeDown id: #nDown
+                    } id: #nudges.
+                    WinSpec rgbaPane: #swatches width: self swatchWidth height: self swatchHeight
+                } id: #leftCol.
+                WinSpec stack: {
+                    self colourCard.
+                    self frameCard.
+                    self sizeCard.
+                    self sheetCard
+                } id: #rightCol
+            } weights: #(1 1) id: #main
         } id: #root)
+    ]
+
+    WinSpriteEd class >> colourCard ^ <WinNode> [
+        ^WinSpec card: 'Colour ' , self selColor printString children: {
+            WinSpec slider: 'R' value: (self channel: 1) min: 0 max: 255
+                    event: #red id: #sliderR.
+            WinSpec slider: 'G' value: (self channel: 2) min: 0 max: 255
+                    event: #green id: #sliderG.
+            WinSpec slider: 'B' value: (self channel: 3) min: 0 max: 255
+                    event: #blue id: #sliderB
+        } id: #colourCard
+    ]
+
+    WinSpriteEd class >> frameCard ^ <WinNode> [
+        ^WinSpec card: 'Frame ' , (self curFrame + 1) printString , '/'
+                    , self doc frameCount printString
+            children: {
+                WinSpec row: {
+                    WinSpec button: 'First' event: #frameFirst id: #fFirst.
+                    WinSpec button: 'Prev' event: #framePrev id: #fPrev.
+                    WinSpec button: 'Next' event: #frameNext id: #fNext
+                } id: #frameNav.
+                WinSpec row: {
+                    WinSpec button: 'Add' event: #frameAdd id: #fAdd.
+                    WinSpec button: 'Dup' event: #frameDup id: #fDup.
+                    WinSpec button: 'Del' event: #frameDel id: #fDel
+                } id: #frameEdit.
+                WinSpec button: 'Preview' event: #preview id: #bPreview
+            } id: #frameCard
+    ]
+
+    WinSpriteEd class >> sizeCard ^ <WinNode> [
+        ^WinSpec card: 'Size ' , self doc width printString , 'x'
+                    , self doc height printString
+            children: {
+                WinSpec row: {
+                    WinSpec input: 'W' value: self wantW event: #wantW id: #wField.
+                    WinSpec input: 'H' value: self wantH event: #wantH id: #hField.
+                    WinSpec button: 'Resize' event: #resize id: #bResize
+                } id: #sizeRow
+            } id: #sizeCard
+    ]
+
+    WinSpriteEd class >> sheetCard ^ <WinNode> [
+        ^WinSpec card: 'Sheet' children: {
+            WinSpec input: 'Name' value: self doc name event: #name id: #nameField.
+            WinSpec row: {
+                WinSpec button: 'Save' event: #save id: #bSave.
+                WinSpec button: 'Load' event: #load id: #bLoad.
+                WinSpec button: 'Sheets' event: #sheets id: #bSheets.
+                WinSpec button: 'Copy Code' event: #copy id: #bCopy
+            } id: #sheetButtons
+        } id: #sheetCard
     ]
 
     WinSpriteEd class >> toolLabel: aSymbol <Symbol> ^ <String> [
@@ -160,9 +195,53 @@ Object subclass: WinSpriteEd [
                 ifFalse: [ ^self status: 'the last frame stays' ] ].
 
         event == #name ifTrue: [ d name: value. ^self ].
+        event == #wantW ifTrue: [ WantW := value. ^self ].
+        event == #wantH ifTrue: [ WantH := value. ^self ].
+        event == #resize ifTrue: [ ^self resize ].
+        event == #nudgeLeft ifTrue: [ ^self nudge: -1 dy: 0 ].
+        event == #nudgeRight ifTrue: [ ^self nudge: 1 dy: 0 ].
+        event == #nudgeUp ifTrue: [ ^self nudge: 0 dy: -1 ].
+        event == #nudgeDown ifTrue: [ ^self nudge: 0 dy: 1 ].
         event == #save ifTrue: [ ^self save ].
+        event == #load ifTrue: [ ^self load ].
+        event == #sheets ifTrue: [ ^self sheets ].
         event == #copy ifTrue: [ ^self copyCode ].
+        event == #preview ifTrue: [ ^self preview ].
         ^self
+    ]
+
+    "── the pixel verbs the Mac has and this did not ────────────────────"
+
+    WinSpriteEd class >> nudge: dx <Integer> dy: dy <Integer> [
+        "A WRAPPING shift, the document's own — which is why nudging a sprite
+         all the way round brings it back rather than eating it."
+        self doc shift: self curFrame dx: dx dy: dy.
+        self invalidateGrid.
+        ^self status: 'nudged'
+    ]
+
+    WinSpriteEd class >> wantW ^ <String> [
+        ^WantW isNil ifTrue: [ self doc width printString ] ifFalse: [ WantW ]
+    ]
+    WinSpriteEd class >> wantH ^ <String> [
+        ^WantH isNil ifTrue: [ self doc height printString ] ifFalse: [ WantH ]
+    ]
+
+    WinSpriteEd class >> resize [
+        "The document decides, and it declines a same-size request as well as
+         an out-of-range one — so the message names both possibilities rather
+         than claiming a bound was broken."
+        | nw nh |
+        nw := self wantW asInteger.
+        nh := self wantH asInteger.
+        (nw isNil or: [ nh isNil ]) ifTrue: [ ^self status: 'resize: not a number' ].
+        (self doc resizeTo: nw by: nh) ifFalse: [
+            ^self status: 'resize declined (1..64, and different from now)' ].
+        WantW := nil.
+        WantH := nil.
+        self invalidateGrid.
+        ^self status: 'resized to ' , self doc width printString , 'x'
+                    , self doc height printString
     ]
 
     "── damage: the handler says WHAT it dirtied ────────────────────────
@@ -270,6 +349,181 @@ Object subclass: WinSpriteEd [
         ^self status: ((reply at: 1)
             ifTrue: [ 'saved ' , d name ]
             ifFalse: [ 'save FAILED: ' , (reply at: 2) printString ])
+    ]
+
+    "── load: the round trip that makes Save mean anything ──────────────
+
+     A sheet is SOURCE IN THE IMAGE, so loading reads it back from the image
+     rather than from any live pane — which is why a sheet saved a moment ago
+     loads immediately, and why a sheet edited by hand in the Browser loads
+     exactly as edited. The two scrapers are honest parsers because this
+     editor wrote the text they read."
+
+    WinSpriteEd class >> load [
+        | d nm rows pal frames triples |
+        d := self doc.
+        nm := d name.
+        (SpriteDoc validName: nm) ifFalse: [
+            ^self status: 'load: type the sheet class name in Name first' ].
+        rows := [ WinHost methodSourceFor: nm side: #class selector: 'frames' ]
+            on: Error do: [ :e | Array with: false with: e messageText ].
+        pal := [ WinHost methodSourceFor: nm side: #class selector: 'palette' ]
+            on: Error do: [ :e | Array with: false with: e messageText ].
+        ((rows at: 1) and: [ pal at: 1 ]) ifFalse: [
+            ^self status: 'load: ' , nm , ' has no frames/palette (not a sheet?)' ].
+        frames := self quotedStringsIn: (rows at: 2).
+        triples := self integerTriplesIn: (pal at: 2).
+        (frames isEmpty or: [ triples isNil ]) ifTrue: [
+            ^self status: 'load: ' , nm , ' did not parse as a sheet' ].
+        (d loadFrames: frames palette: triples) ifFalse: [
+            ^self status: 'load: ' , nm , ' did not load' ].
+        d name: nm.
+        CurFrame := 0.
+        WantW := nil.
+        WantH := nil.
+        self invalidateGrid.
+        self invalidateSwatches.
+        ^self status: 'loaded ' , nm , ' (' , d frameCount printString , ' frames)'
+    ]
+
+    WinSpriteEd class >> sheets [
+        | reply names |
+        reply := [ WinHost implementorsOf: 'isSpriteSheet' ]
+            on: Error do: [ :e | Array with: false with: e messageText ].
+        (reply at: 1) ifFalse: [ ^self status: 'sheets: ' , (reply at: 2) printString ].
+        names := OrderedCollection new.
+        (WinShell splitFindReply: (reply at: 2)) do: [ :fields |
+            fields isEmpty ifFalse: [ names add: (fields at: 1) ] ].
+        names isEmpty ifTrue: [ ^self status: 'no sprite sheets in the image yet' ].
+        ^self status: 'sheets: ' , (self joined: names)
+    ]
+
+    WinSpriteEd class >> joined: names <OrderedCollection> ^ <String> [
+        | out first |
+        out := ''.
+        first := true.
+        names do: [ :n |
+            first ifFalse: [ out := out , ' ' ].
+            first := false.
+            out := out , n ].
+        ^out
+    ]
+
+    "Every single-quoted run's contents, in order. PURE."
+    WinSpriteEd class >> quotedStringsIn: src <String> ^ <OrderedCollection> [
+        | out run inside |
+        out := OrderedCollection new.
+        run := ''.
+        inside := false.
+        src do: [ :ch |
+            ch = $'
+                ifTrue: [
+                    inside ifTrue: [ out add: run. run := '' ].
+                    inside := inside not ]
+                ifFalse: [ inside ifTrue: [ run := run , (String with: ch) ] ] ].
+        ^out
+    ]
+
+    "Every digit run, grouped in threes — and nil unless there are EXACTLY
+     forty-eight of them, because sixteen colours is what a sheet has and a
+     short read would silently recolour the sprite."
+    WinSpriteEd class >> integerTriplesIn: src <String> ^ <Object> [
+        | nums run out i |
+        nums := OrderedCollection new.
+        run := ''.
+        src do: [ :ch |
+            ch isDigit
+                ifTrue: [ run := run , (String with: ch) ]
+                ifFalse: [
+                    run isEmpty ifFalse: [ nums add: run asInteger. run := '' ] ] ].
+        run isEmpty ifFalse: [ nums add: run asInteger ].
+        nums size = 48 ifFalse: [ ^nil ].
+        out := OrderedCollection new.
+        i := 1.
+        [ i <= 48 ] whileTrue: [
+            out add: (Array with: (nums at: i) with: (nums at: i + 1)
+                            with: (nums at: i + 2)).
+            i := i + 3 ].
+        ^out
+    ]
+
+    "── preview: the sprite ANIMATING, in the real game pane ────────────"
+
+    WinSpriteEd class >> preview [
+        "Composed from the model every time, so it cannot drift from what is
+         on the canvas, and launched down the same road as any demo."
+        WinShell launchDemo: self previewDoit named: 'Sprite preview'.
+        ^self status: 'preview launched (' , self doc frameCount printString , ' frames)'
+    ]
+
+    WinSpriteEd class >> previewDoit ^ <String> [
+        "NOTE THE DOUBLE BACKSLASH. The Mac's own preview emits `\` here
+         (76_spriteed.mst:784) and there is no such selector — modulo is `\\`
+         — so its animated branch is a doesNotUnderstand at step time. Written
+         correctly here, and said out loud so the next reader does not
+         `correct` it back."
+        | d nl out i c |
+        d := self doc.
+        nl := String with: (Character value: 10).
+        "WRAPPED IN A BLOCK, and that is not style. A doit crossing the worker
+         seam is compiled as a top-level chunk, and this world's parser
+         refuses temporaries there — the whole preview raised, replied, and
+         the reply block cheerfully said `up`, so the only symptom was a black
+         pane. A BLOCK may declare temps anywhere, so the body goes inside one
+         and the doit becomes a single expression."
+        out := 'GamePane reset. ' , nl.
+        out := out , '[ | p s fr tick last | ' , nl.
+        out := out , 'p := GamePane new. p resizeTo: 320 by: 180. p frameRate: 12. ' , nl.
+        out := out , 'fr := OrderedCollection new. ' , nl.
+        0 to: d frameCount - 1 do: [ :f |
+            out := out , 'fr add: ''' , (d rowsOf: f) , '''. ' , nl ].
+        out := out , 'fr := fr asArray. ' , nl.
+        out := out , 's := p defineSprite: (fr at: 1). ' , nl.
+        out := out , '2 to: fr size do: [ :k | s addFrame: (fr at: k) ]. ' , nl.
+        i := 1.
+        [ i <= 15 ] whileTrue: [
+            c := d paletteAt: i.
+            out := out , 's colorAt: ' , i printString ,
+                ' r: ' , (c at: 1) printString ,
+                ' g: ' , (c at: 2) printString ,
+                ' b: ' , (c at: 3) printString , '. ' , nl.
+            i := i + 1 ].
+        "The pane's OWN palette mirrors the sprite's into 17..31, so the big
+         rendition can be drawn with `fill:` rects in the same colours the
+         hardware sprite uses — the Mac's own trick, and the reason a preview
+         can show one sprite twice at two sizes."
+        i := 1.
+        [ i <= 15 ] whileTrue: [
+            c := d paletteAt: i.
+            out := out , 'p paletteAt: ' , (16 + i) printString ,
+                ' r: ' , (c at: 1) printString ,
+                ' g: ' , (c at: 2) printString ,
+                ' b: ' , (c at: 3) printString , '. ' , nl.
+            i := i + 1 ].
+        out := out , 'p paletteAt: 16 r: 68 g: 70 b: 84. ' , nl.
+        out := out , 'tick := 0. last := -1. ' , nl.
+        out := out , 'p onStep: [ :frame | | f rows scale ox oy | ' , nl.
+        out := out , '  tick := tick + 1. ' , nl.
+        out := out , '  f := tick // 6 \\ fr size. ' , nl.
+        out := out , '  f = last ifFalse: [ ' , nl.
+        out := out , '    last := f. ' , nl.
+        out := out , '    p cls: 16. ' , nl.
+        "The big one, cell by cell — index 0 is skipped, so the background
+         shows through exactly where the sprite is transparent."
+        out := out , '    rows := (fr at: f + 1) subStrings: ''/''. ' , nl.
+        out := out , '    scale := 128 // (rows size max: 1). ' , nl.
+        out := out , '    scale < 1 ifTrue: [ scale := 1 ]. ' , nl.
+        out := out , '    ox := 160. oy := 90 - (rows size * scale // 2). ' , nl.
+        out := out , '    1 to: rows size do: [ :ry | ' , nl.
+        out := out , '      1 to: (rows at: ry) size do: [ :rx | | ci | ' , nl.
+        out := out , '        ci := ((rows at: ry) at: rx) digitValue. ' , nl.
+        out := out , '        ci > 0 ifTrue: [ ' , nl.
+        out := out , '          p fill: ox + (rx - 1 * scale) y: oy + (ry - 1 * scale) ' , nl.
+        out := out , '            width: scale height: scale color: 16 + ci ] ] ]. ' , nl.
+        out := out , '    s moveTo: 80 y: 82 frame: f ]. ' , nl.
+        out := out , '  p present ]. ' , nl.
+        out := out , 'p run ] value. 1'.
+        ^out
     ]
 
     WinSpriteEd class >> copyCode [
@@ -421,7 +675,7 @@ Object subclass: WinSpriteEd [
 
     WinSpriteEd class >> install [
         WinToolWindow
-            register: #spriteEd title: 'Sprite Editor' width: 500 height: 900
+            register: #spriteEd title: 'Sprite Editor' width: 1020 height: 720
             render: [ WinSpriteEd spec ]
             handler: [ :event :value |
                 WinSpriteEd handle: event value: value.

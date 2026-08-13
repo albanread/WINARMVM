@@ -215,6 +215,7 @@ tier1.mst
 ../125_winui_demotool.mst
 ../126_winui_spriteed.mst
 72_winui_spriteed_tests.mst
+75_winui_spritesheet_tests.mst
 ../127_winui_soundtool.mst
 73_winui_soundtool_tests.mst
 ../128_winui_help.mst

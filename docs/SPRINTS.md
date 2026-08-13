@@ -993,6 +993,25 @@ re-specced landscape at 1150x720 (envelope, verbs, oscillators and sheet on
 the left; the twelve recipe sliders in two aligned columns of six on the
 right, the Mac's own 2x6) from a 480x980 tower, by changing only the spec.
 
+**The Sprite Editor's remaining verbs (2026-08-13).** Load, Sheets, Preview,
+nudge and resize — the tool now does everything the Mac's does, and it went
+landscape on the same weights the Sound Editor uses. Two findings worth
+keeping:
+
+* **A doit crossing the worker seam cannot declare temporaries.** It is
+  compiled as a top-level chunk, and this world's parser refuses `| a b |`
+  there. The preview raised, the reply block cheerfully reported `up`, and
+  the only symptom was a black pane — an upload probe showed exactly one
+  frame, the wipe's own. Wrapping the body in a BLOCK (which may declare
+  temps anywhere) fixed it, and the reason is now written where the string
+  is built.
+* **The scrapers must be pointed at ONE method, not a class.** A sheet's
+  source carries digits in its header comment and its `installOn:` loops, so
+  a palette scrape over the whole class finds far more than forty-eight
+  numbers and correctly refuses. Load asks the image for the `palette`
+  method; the test proves the emitter puts sixteen triples somewhere a
+  triple-scrape reads them, by ASKING the scraper to find that line.
+
 And the same single-backslash modulo bug the Mac's own sprite editor carries
 (`76_spriteed.mst:784` emits `\` where `\` is meant) was reproduced here
 through Python escaping and caught the same way — both panes blank, because
