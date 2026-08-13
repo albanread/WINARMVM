@@ -198,12 +198,6 @@ tier1.mst
 # integers, so both are checkable here with no window, no plane and no GPU.
 ../119_winui_demos.mst
 
-# WG13: the Sound Editor. Every decision about what the pane shows is a pure
-# method over `SoundDoc`, so the whole display is checkable with no window,
-# no audio device and no primary.
-../121_winui_sounded.mst
-68_winui_sounded_tests.mst
-
 # WG14a: the declarative UI's pure half. Build, normalize, validate, diff —
 # all functions, so all checkable here with no window at all. This is the
 # stage that exists precisely to be tested before a realizer can hide a bug.

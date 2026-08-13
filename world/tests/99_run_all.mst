@@ -136,7 +136,6 @@ Smalltalk platformName == #windows ifTrue: [ TestRunner run: WinUiShellWg4Tests 
 Smalltalk platformName == #windows ifTrue: [ TestRunner run: WinUiHostWg5bTests ].
 Smalltalk platformName == #windows ifTrue: [ TestRunner run: WinUiSyntaxWg5cTests ].
 Smalltalk platformName == #windows ifTrue: [ TestRunner run: WinUiEditorWg6cTests ].
-Smalltalk platformName == #windows ifTrue: [ TestRunner run: WinUiSoundEditorTests ].
 Smalltalk platformName == #windows ifTrue: [ TestRunner run: WinUiSpecTests ].
 Smalltalk platformName == #windows ifTrue: [ TestRunner run: WinUiLayoutTests ].
 Smalltalk platformName == #windows ifTrue: [ TestRunner run: WinUiToolWindowTests ].

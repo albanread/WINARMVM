@@ -156,13 +156,6 @@
 # flag-and-drain; WM_COMMAND has been allowlisted since WG3.
 120_winui_menu.mst
 
-# WG13: the Sound Editor — the Windows face for `SoundDoc` (44b, world list).
-# A cell grid driven by the keyboard rather than the Mac's twelve sliders: a
-# trackbar carries an integer, WM_HSCROLL is not on the door's allowlist, and
-# the grid is already here. The audition is prim 263 through the primary, so
-# it is the same synth the games use.
-121_winui_sounded.mst
-
 # WG14a: the declarative UI's PURE half — build, normalize, validate, diff.
 # No Win32 in it at all, so the whole model is checkable headless before a
 # window exists to hide a bug in. Contract adopted from wingui's spec+bind;

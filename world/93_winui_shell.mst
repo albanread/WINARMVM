@@ -241,9 +241,6 @@ Object subclass: WinShell [
         "WG9: Tests, next to the Debugger — a failure and its stack are one
          click apart and belong beside each other in the bar too."
         self registerViewNamed: #tests title: 'Tests'.
-        "WG13: the Sound Editor — the parametric synth's face, next to Tests
-         because both are tools you drive rather than places you read."
-        self registerViewNamed: #sounded title: 'Sound'.
         self registerViewNamed: #welcome title: 'Welcome'.
         self registerViewNamed: #transcript title: 'Transcript'.
         self registerViewNamed: #metrics title: 'Metrics'.
@@ -277,8 +274,7 @@ Object subclass: WinShell [
                 and: [ aSymbol ~~ self monitorViewName
                 and: [ aSymbol ~~ self debuggerViewName
                 and: [ aSymbol ~~ self canvasViewName
-                and: [ aSymbol ~~ self testsViewName
-                and: [ aSymbol ~~ self soundViewName ] ] ] ] ] ]) ].
+                and: [ aSymbol ~~ self testsViewName ] ] ] ] ]) ].
         self showBrowserPanes: aSymbol == #browser.
         (self controlNamed: self outlinerName)
             ifNotNil: [ :c | c show: aSymbol == #outliner ].
@@ -288,7 +284,6 @@ Object subclass: WinShell [
         self showDebuggerPane: aSymbol == self debuggerViewName.
         self showCanvasPane: aSymbol == self canvasViewName.
         self showTestsPane: aSymbol == self testsViewName.
-        self showSoundPane: aSymbol == self soundViewName.
         self views do: [ :v |
             | c |
             (v at: 1) == aSymbol ifFalse: [
@@ -408,16 +403,6 @@ Object subclass: WinShell [
              you found the verb would be a tab that mostly shows nothing; a
              re-run is explicit, but the first one is what you came for."
             self testRuns = 0 ifTrue: [ self runTests ] ].
-        aSymbol == self soundViewName ifTrue: [
-            self buildSoundPane.
-            self isOpen ifTrue: [
-                | rects |
-                rects := self layout
-                    rectsIn: self clientWidth
-                    by: self clientHeight
-                    dpi: (Dpi isNil ifTrue: [ WinApi constant: 'USER_DEFAULT_SCREEN_DPI' ] ifFalse: [ Dpi ]).
-                self layoutSoundPane: (rects at: #content) ].
-            self renderSound ].
         aSymbol == self canvasViewName ifTrue: [
             self buildCanvasPane.
             self isOpen ifTrue: [
@@ -789,8 +774,6 @@ Object subclass: WinShell [
             self layoutCanvasPane: (rects at: #content) ].
         (self viewIsBuilt: self testsViewName) ifTrue: [
             self layoutTestsPane: (rects at: #content) ].
-        (self viewIsBuilt: self soundViewName) ifTrue: [
-            self layoutSoundPane: (rects at: #content) ].
 
         (self controlNamed: #splitter) ifNotNil: [ :c |
             (c moveTo: (rects at: #splitter)) ifTrue: [ moved := moved + 1 ] ].
