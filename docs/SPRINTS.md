@@ -1012,6 +1012,28 @@ keeping:
   method; the test proves the emitter puts sixteen triples somewhere a
   triple-scrape reads them, by ASKING the scraper to find that line.
 
+**`select` and `listBox` realized (2026-08-13).** The last two node types the
+spec declared and the realizer could not build. They differ by four message
+numbers and their shape, so the numbers are chosen by one method and the
+logic is written once — anything else is the same code twice with `CB` and
+`LB` swapped, which is how two controls drift apart.
+
+Three decisions worth keeping. An option may be a plain String, an
+Association, or a two-element Array, so `optionValue:`/`optionText:` decide
+which part is which — once, purely, with every spelling asserted. Selection
+crosses as the option's VALUE, never its text or its index, because the value
+is what the spec said and what the handler will be given back; the demo
+proves it by showing `Blue` in the combo and `colour: #b` in its state card.
+And a COMBO BOX'S CREATION HEIGHT IS ITS DROPPED HEIGHT — Win32 sizes the
+closed control from the font and uses the remainder for the list — so the
+realizer adds room for eight rows while the layout keeps reasoning about the
+closed height, which is the one the arrangement can see.
+
+`options` was already on the differ's structured-patchable list; it now means
+something. A tool that recomputes its choices costs one message per option
+and no new control, which the demo shows by growing its shape list on a click
+while `rebuilds` stays at 1.
+
 And the same single-backslash modulo bug the Mac's own sprite editor carries
 (`76_spriteed.mst:784` emits `\` where `\` is meant) was reproduced here
 through Python escaping and caught the same way — both panes blank, because

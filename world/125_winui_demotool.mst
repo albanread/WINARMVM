@@ -15,11 +15,32 @@
  the window can HIDE rather than destroy and reopening is instant."
 
 Object subclass: WinDemoTool [
-    <classVars: Clicks Note Loud>
+    <classVars: Clicks Note Loud Colour Shape>
 
     WinDemoTool class >> clicks ^ <Integer> [ ^Clicks isNil ifTrue: [ 0 ] ifFalse: [ Clicks ] ]
     WinDemoTool class >> note ^ <String> [ ^Note isNil ifTrue: [ 'edit me' ] ifFalse: [ Note ] ]
     WinDemoTool class >> loud ^ <Boolean> [ ^Loud == true ]
+    WinDemoTool class >> colour ^ <Object> [ ^Colour isNil ifTrue: [ #g ] ifFalse: [ Colour ] ]
+    WinDemoTool class >> shape ^ <Object> [ ^Shape isNil ifTrue: [ 'circle' ] ifFalse: [ Shape ] ]
+
+    "The two spellings of an option side by side, on purpose: the colours are
+     Associations because their value and their label differ, the shapes are
+     plain Strings because they do not. Both realize the same way."
+    WinDemoTool class >> colourOptions ^ <Array> [
+        ^Array
+            with: (Association key: #r value: 'Red')
+            with: (Association key: #g value: 'Green')
+            with: (Association key: #b value: 'Blue')
+    ]
+
+    "GROWN BY A CLICK, which is what makes this the differ's showcase: adding
+     a shape patches the list box's contents in place rather than rebuilding
+     it, and `rebuilds` on screen stays where it was."
+    WinDemoTool class >> shapeOptions ^ <Array> [
+        ^self clicks > 2
+            ifTrue: [ #('circle' 'square' 'triangle' 'hexagon') ]
+            ifFalse: [ #('circle' 'square' 'triangle') ]
+    ]
 
     "── the spec ────────────────────────────────────────────────────────
 
@@ -36,7 +57,9 @@ Object subclass: WinDemoTool [
             WinSpec card: 'State' children: {
                 WinSpec text: 'clicks: ' , self clicks printString id: #clicks.
                 WinSpec text: 'note: ' , self note id: #noteEcho.
-                WinSpec text: 'loud: ' , self loud printString id: #loudEcho
+                WinSpec text: 'loud: ' , self loud printString id: #loudEcho.
+                WinSpec text: 'colour: ' , self colour printString id: #colourEcho.
+                WinSpec text: 'shape: ' , self shape id: #shapeEcho
             } id: #stateCard.
 
             WinSpec card: 'Do something' children: {
@@ -45,7 +68,11 @@ Object subclass: WinDemoTool [
                     WinSpec button: 'Reset' event: #reset id: #reset
                 } id: #buttons.
                 WinSpec input: 'Note' value: self note event: #note id: #noteField.
-                WinSpec checkbox: 'Loud' checked: self loud event: #loud id: #loudBox
+                WinSpec checkbox: 'Loud' checked: self loud event: #loud id: #loudBox.
+                WinSpec select: 'Colour' value: self colour
+                        options: self colourOptions event: #colour id: #colourPick.
+                WinSpec listBox: 'Shape' value: self shape
+                        options: self shapeOptions event: #shape id: #shapePick
             } id: #doCard.
 
             WinSpec card: 'Reconciliation' children: {
@@ -68,9 +95,12 @@ Object subclass: WinDemoTool [
 
     WinDemoTool class >> handle: event <Symbol> value: value <Object> [
         event == #bump ifTrue: [ Clicks := self clicks + 1 ].
-        event == #reset ifTrue: [ Clicks := 0. Note := nil. Loud := false ].
+        event == #reset ifTrue: [
+            Clicks := 0. Note := nil. Loud := false. Colour := nil. Shape := nil ].
         event == #note ifTrue: [ Note := value ].
         event == #loud ifTrue: [ Loud := value ].
+        event == #colour ifTrue: [ Colour := value ].
+        event == #shape ifTrue: [ Shape := value ].
         ^self
     ]
 
@@ -80,7 +110,7 @@ Object subclass: WinDemoTool [
 
     WinDemoTool class >> install [
         WinToolWindow
-            register: #demo title: 'Declarative Demo' width: 460 height: 640
+            register: #demo title: 'Declarative Demo' width: 460 height: 860
             render: [ WinDemoTool spec ]
             handler: [ :event :value |
                 WinDemoTool handle: event value: value.

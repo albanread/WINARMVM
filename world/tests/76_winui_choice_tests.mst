@@ -1,0 +1,165 @@
+"76_winui_choice_tests.mst — WinUiChoiceTests: the two controls that offer a
+ CHOICE, and the pure half that decides what a choice IS.
+
+ `select` and `listBox` differ by four message numbers and their shape. Every
+ other decision — what an option is, which one is selected, whether a change
+ can be patched or must rebuild — is arithmetic over the spec, and is checked
+ here with no window.
+
+ THE OPTION SPELLINGS ARE THE POINT. An option may be a plain String, an
+ Association, or a two-element Array, because all three read naturally
+ depending on what the caller has. The realizer and the differ must agree
+ about which part is the VALUE and which is the TEXT, so that answer lives in
+ one pure pair and every spelling is asserted."
+
+TestCase subclass: WinUiChoiceTests [
+    WinUiChoiceTests class >> isEnabled ^ <Boolean> [
+        ^Smalltalk platformName == #windows
+    ]
+
+    runAll [
+        self runTest: #testAnOptionCanBeWrittenThreeWays
+             do: [ self testAnOptionCanBeWrittenThreeWays ].
+        self runTest: #testTheSelectedIndexIsZeroBasedAndMinusOneWhenAbsent
+             do: [ self testTheSelectedIndexIsZeroBasedAndMinusOneWhenAbsent ].
+        self runTest: #testBothChoiceTypesCarryTheSameProps
+             do: [ self testBothChoiceTypesCarryTheSameProps ].
+        self runTest: #testAChoiceWithoutOptionsIsRefused
+             do: [ self testAChoiceWithoutOptionsIsRefused ].
+        self runTest: #testChangingTheSelectionIsOnePatch
+             do: [ self testChangingTheSelectionIsOnePatch ].
+        self runTest: #testChangingTheOPTIONSIsAlsoOnePatch
+             do: [ self testChangingTheOPTIONSIsAlsoOnePatch ].
+        self runTest: #testSwappingSelectForListBoxRebuilds
+             do: [ self testSwappingSelectForListBoxRebuilds ].
+        self runTest: #testAListBoxIsAsTallAsTheRowsItShows
+             do: [ self testAListBoxIsAsTallAsTheRowsItShows ].
+        ^self
+    ]
+
+    "── what an option is ───────────────────────────────────────────────"
+
+    testAnOptionCanBeWrittenThreeWays [
+        "A plain String is its own value; an Association is value -> text; a
+         two-element Array is the same pair written positionally."
+        self assert: (WinSpec optionValue: 'red') equals: 'red'
+             description: 'a String IS its value'.
+        self assert: (WinSpec optionText: 'red') equals: 'red'
+             description: 'and its own text'.
+        self assert: (WinSpec optionValue: (Association key: #r value: 'Red')) equals: #r
+             description: 'an Association key is the value'.
+        self assert: (WinSpec optionText: (Association key: #r value: 'Red')) equals: 'Red'
+             description: 'and its value is the text'.
+        self assert: (WinSpec optionValue: #(#g 'Green')) equals: #g
+             description: 'an Array is positional: value first'.
+        self assert: (WinSpec optionText: #(#g 'Green')) equals: 'Green'
+             description: 'then text'.
+    ]
+
+    testTheSelectedIndexIsZeroBasedAndMinusOneWhenAbsent [
+        "Zero-based because that is what CB_SETCURSEL and LB_SETCURSEL take;
+         converting at this boundary keeps one convention in one place. And
+         -1 is Win32's own `nothing selected`, so a value nobody offers
+         deselects rather than picking the first by accident."
+        | opts |
+        opts := #('a' 'b' 'c').
+        self assert: (WinSpec indexOfValue: 'a' in: opts) equals: 0
+             description: 'the first option is zero'.
+        self assert: (WinSpec indexOfValue: 'c' in: opts) equals: 2
+             description: 'and the third is two'.
+        self assert: (WinSpec indexOfValue: 'z' in: opts) equals: -1
+             description: 'an absent value selects NOTHING'.
+        self assert: (WinSpec indexOfValue: 'a' in: nil) equals: -1
+             description: 'and no options at all is the same answer'.
+    ]
+
+    "── the two nodes ───────────────────────────────────────────────────"
+
+    testBothChoiceTypesCarryTheSameProps [
+        "Identical props are what let a tool change its mind between a combo
+         and a list by editing one word."
+        | s l |
+        s := WinSpec select: 'Pick' value: 'b' options: #('a' 'b') event: #pick id: #p.
+        l := WinSpec listBox: 'Pick' value: 'b' options: #('a' 'b') event: #pick id: #p.
+        #(#label #value #options #event) do: [ :k |
+            self assert: (s at: k) equals: (l at: k)
+                 description: k printString , ' is the same on both' ].
+        self assert: s type equals: #select description: 'only the type differs'.
+        self assert: l type equals: #listBox description: 'and it is the shape'.
+    ]
+
+    testAChoiceWithoutOptionsIsRefused [
+        "Validated at BUILD time, where the tool that wrote it can be named —
+         a choice with nothing to choose from would realize as an empty box."
+        self assert: (WinSpec validate: (WinSpec window: 'W' id: #w body:
+            ((WinSpec node: #select id: #s) at: #value put: 'a'; yourself))) isNil not
+             description: 'a select with no options is refused'.
+        self assert: (WinSpec validate: (WinSpec window: 'W' id: #w body:
+            ((WinSpec node: #listBox id: #l) at: #value put: 'a'; yourself))) isNil not
+             description: 'and so is a list box'.
+    ]
+
+    "── what the differ does with them ──────────────────────────────────"
+
+    testChangingTheSelectionIsOnePatch [
+        | old new ops |
+        old := WinSpec window: 'W' id: #w body: (WinSpec stack: {
+            WinSpec select: 'Pick' value: 'a' options: #('a' 'b') event: #pick id: #p } id: #root).
+        new := WinSpec window: 'W' id: #w body: (WinSpec stack: {
+            WinSpec select: 'Pick' value: 'b' options: #('a' 'b') event: #pick id: #p } id: #root).
+        ops := WinSpec diff: old against: new.
+        self assert: ops isNil not description: 'a new selection is patchable'.
+        self assert: ops size equals: 1 description: 'and costs one op'.
+        self assert: (ops first at: 1) equals: #setNodeProps
+             description: 'a prop patch, not a rebuild'.
+    ]
+
+    testChangingTheOPTIONSIsAlsoOnePatch [
+        "The reason `options` is on the structured-patchable list: a combo can
+         be REFILLED without being rebuilt, so a tool that recomputes its
+         choices costs one message per option rather than a new control."
+        | old new ops |
+        old := WinSpec window: 'W' id: #w body: (WinSpec stack: {
+            WinSpec listBox: 'Pick' value: 'a' options: #('a' 'b') event: #pick id: #p } id: #root).
+        new := WinSpec window: 'W' id: #w body: (WinSpec stack: {
+            WinSpec listBox: 'Pick' value: 'a' options: #('a' 'b' 'c') event: #pick id: #p } id: #root).
+        ops := WinSpec diff: old against: new.
+        self assert: ops isNil not description: 'a longer option list is patchable'.
+        self assert: ops size equals: 1 description: 'in one op'.
+        self assert: (ops first at: 3) first key equals: #options
+             description: 'carrying the new options'.
+    ]
+
+    testSwappingSelectForListBoxRebuilds [
+        "Node identity is (type, id), so changing the shape is a different
+         control and the differ must decline rather than try to convert one
+         into the other."
+        | old new |
+        old := WinSpec window: 'W' id: #w body: (WinSpec stack: {
+            WinSpec select: 'Pick' value: 'a' options: #('a') event: #pick id: #p } id: #root).
+        new := WinSpec window: 'W' id: #w body: (WinSpec stack: {
+            WinSpec listBox: 'Pick' value: 'a' options: #('a') event: #pick id: #p } id: #root).
+        self assert: (WinSpec diff: old against: new) isNil
+             description: 'a combo cannot be patched into a list'.
+    ]
+
+    "── how big they are ────────────────────────────────────────────────"
+
+    testAListBoxIsAsTallAsTheRowsItShows [
+        "A combo has a closed state and a list box does not, so a list box's
+         measured height is what you actually see."
+        | m short tall |
+        m := WinSpecLayout metricsCharWidth: 10 lineHeight: 20.
+        short := WinSpecLayout
+            measureControl: (WinSpec listBox: 'P' value: 'a' options: #('a') event: #e id: #s)
+            width: 300 metrics: m.
+        tall := WinSpecLayout
+            measureControl: ((WinSpec listBox: 'P' value: 'a' options: #('a') event: #e id: #t)
+                                at: #visibleRows put: 8; yourself)
+            width: 300 metrics: m.
+        self assert: (short at: 2) equals: 86
+             description: 'four rows at twenty, plus a border'.
+        self assert: (tall at: 2) equals: 166
+             description: 'and eight rows is twice the rows plus the same border'.
+    ]
+]

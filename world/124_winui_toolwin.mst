@@ -434,10 +434,16 @@ Object subclass: WinToolWindow [
         node := control at: 2.
         event := node at: #event.
         event isNil ifTrue: [ ^0 ].
-        "An EDIT sends EN_CHANGE for every keystroke and BUTTON sends
-         BN_CLICKED as 0; anything else is noise this window has no use for."
+        "EVERY CONTROL KIND HAS A NOTIFICATION IT MEANS AND SEVERAL IT DOES
+         NOT. An EDIT sends EN_CHANGE for every keystroke; a BUTTON sends
+         BN_CLICKED as 0; a COMBOBOX and a LISTBOX both send SELCHANGE as 1
+         and also send focus and double-click codes that mean nothing here.
+         Filtering by kind is what stops a click that merely FOCUSED a list
+         from being reported as a choice."
         (node type == #input and: [ aCode ~= (WinApi constant: 'EN_CHANGE') ])
             ifTrue: [ ^0 ].
+        ((WinSpec choiceTypes includes: node type)
+            and: [ aCode ~= (WinApi constant: 'CBN_SELCHANGE') ]) ifTrue: [ ^0 ].
         ^self dispatch: event value: (self valueOf: control)
     ]
 
@@ -447,6 +453,8 @@ Object subclass: WinToolWindow [
         node := pair at: 2.
         node type == #input ifTrue: [ ^control text ].
         node type == #checkbox ifTrue: [ ^self isChecked: control ].
+        (WinSpec choiceTypes includes: node type)
+            ifTrue: [ ^self choiceValueOf: control node: node ].
         ^node at: #value
     ]
 
@@ -604,11 +612,23 @@ Object subclass: WinToolWindow [
                 a key == #value ifTrue: [
                     node type == #slider
                         ifTrue: [ self position: control to: a value ]
-                        ifFalse: [ control setText: a value asString ] ].
+                        ifFalse: [
+                            (WinSpec choiceTypes includes: node type)
+                                ifFalse: [ control setText: a value asString ] ] ].
                 a key == #checked ifTrue: [ self check: control to: a value ].
                 "The spec the window remembers must agree with what is on
                  screen, or the next diff patches something already patched."
-                node at: a key put: a value ] ].
+                node at: a key put: a value.
+                "A CHOICE IS REFILLED AFTER ITS NODE IS UPDATED, not before —
+                 `fill:from:` reads BOTH `options` and `value` off the node,
+                 so doing it first would repopulate from the old list and
+                 select from the new one. Done here it covers either prop
+                 changing, which is why `options` is on the differ's
+                 structured-patchable list at all: a combo whose choices are
+                 recomputed costs one message per option, not a new window."
+                ((WinSpec choiceTypes includes: node type)
+                    and: [ a key == #options or: [ a key == #value ] ])
+                        ifTrue: [ self fill: control from: node ] ] ].
         ^self
     ]
 
@@ -648,6 +668,58 @@ Object subclass: WinToolWindow [
         control send: (WinApi constant: 'TBM_SETPOS')
                 wParam: 1 lParam: (v isNil ifTrue: [ 0 ] ifFalse: [ v ]).
         ^self
+    ]
+
+    "── the two choice controls ─────────────────────────────────────────
+
+     A combo and a list box differ by four message NUMBERS and nothing else,
+     so the numbers are chosen here and the logic is written once. Anything
+     else would be the same method twice with `CB` and `LB` swapped, which is
+     exactly how the two drift apart."
+
+    msgFor: node <WinNode> add: which <Symbol> ^ <Integer> [
+        | combo |
+        combo := node type == #select.
+        which == #add ifTrue: [
+            ^WinApi constant: (combo ifTrue: [ 'CB_ADDSTRING' ] ifFalse: [ 'LB_ADDSTRING' ]) ].
+        which == #reset ifTrue: [
+            ^WinApi constant: (combo ifTrue: [ 'CB_RESETCONTENT' ] ifFalse: [ 'LB_RESETCONTENT' ]) ].
+        which == #setSel ifTrue: [
+            ^WinApi constant: (combo ifTrue: [ 'CB_SETCURSEL' ] ifFalse: [ 'LB_SETCURSEL' ]) ].
+        ^WinApi constant: (combo ifTrue: [ 'CB_GETCURSEL' ] ifFalse: [ 'LB_GETCURSEL' ])
+    ]
+
+    "Repopulate and reselect. Called on creation and on an `options` patch —
+     which is why `options` is on the differ's structured-patchable list: a
+     combo can be refilled without being rebuilt, so a tool that recomputes
+     its choices costs one message per option rather than a new window."
+    fill: control <WinControl> from: node <WinNode> [
+        | opts sel |
+        opts := node at: #options.
+        control send: (self msgFor: node add: #reset) wParam: 0 lParam: 0.
+        opts isNil ifFalse: [
+            opts do: [ :opt |
+                control send: (self msgFor: node add: #add)
+                        wParam: 0
+                        lParam: (WinArena nativeUtf16: (WinSpec optionText: opt)) ] ].
+        sel := WinSpec indexOfValue: (node at: #value) in: opts.
+        control send: (self msgFor: node add: #setSel) wParam: sel lParam: 0.
+        ^self
+    ]
+
+    "The VALUE currently chosen — the option's value, not its text and not
+     its index, because the value is what the spec said and what the handler
+     will be given back."
+    choiceValueOf: control <WinControl> node: node <WinNode> ^ <Object> [
+        | sel opts i |
+        sel := control send: (self msgFor: node add: #getSel) wParam: 0 lParam: 0.
+        opts := node at: #options.
+        (sel < 0 or: [ opts isNil ]) ifTrue: [ ^node at: #value ].
+        i := 0.
+        opts do: [ :opt |
+            i = sel ifTrue: [ ^WinSpec optionValue: opt ].
+            i := i + 1 ].
+        ^node at: #value
     ]
 
     destroyControls [
@@ -695,7 +767,28 @@ Object subclass: WinToolWindow [
                 text := ((node at: #value) isNil ifTrue: [ '' ] ifFalse: [ (node at: #value) asString ]).
                 style := style bitOr: ((WinApi constant: 'WS_TABSTOP')
                     bitOr: ((WinApi constant: 'WS_BORDER')
-                        bitOr: (WinApi constant: 'ES_AUTOHSCROLL'))) ] ].
+                        bitOr: (WinApi constant: 'ES_AUTOHSCROLL'))) ].
+            node type == #select ifTrue: [
+                cls := 'COMBOBOX'.
+                "DROPDOWNLIST, not DROPDOWN: the difference is whether the
+                 user can type something that is not on the list, and a
+                 `select` whose value can be a string nobody offered is not a
+                 select. HASSTRINGS so the control owns its text."
+                style := style bitOr: ((WinApi constant: 'WS_TABSTOP')
+                    bitOr: ((WinApi constant: 'WS_VSCROLL')
+                        bitOr: ((WinApi constant: 'CBS_DROPDOWNLIST')
+                            bitOr: (WinApi constant: 'CBS_HASSTRINGS')))) ].
+            node type == #listBox ifTrue: [
+                cls := 'LISTBOX'.
+                "NOTIFY, or it never says a word. A list box without
+                 LBS_NOTIFY selects perfectly well and sends no LBN_SELCHANGE,
+                 which is the silent-control failure this port has now met
+                 three times in three different disguises."
+                style := style bitOr: ((WinApi constant: 'WS_TABSTOP')
+                    bitOr: ((WinApi constant: 'WS_BORDER')
+                        bitOr: ((WinApi constant: 'WS_VSCROLL')
+                            bitOr: ((WinApi constant: 'LBS_NOTIFY')
+                                bitOr: (WinApi constant: 'LBS_HASSTRINGS'))))) ] ].
         control := [ WinControl
             name: (id printString , '_' , nextId printString) asSymbol
             class: cls text: text style: style exStyle: 0
@@ -710,9 +803,21 @@ Object subclass: WinToolWindow [
          which read on screen as captions clipped away to nothing."
         control moveTo: (Array
             with: (place at: 2) with: (place at: 3)
-            with: (place at: 4) with: (place at: 5)).
+            with: (place at: 4)
+            "A COMBO BOX'S HEIGHT IS ITS DROPPED HEIGHT, not its closed one.
+             Win32 sizes the closed control from the font and uses the rest
+             for the list that appears when you click it, so passing the
+             measured height gives a combo whose dropdown is one line tall
+             and unusable. Room for eight rows is given here instead; the
+             layout's own height is what the CLOSED control occupies, which
+             is what the rest of the arrangement should reason about."
+            with: (node type == #select
+                        ifTrue: [ (place at: 5) + (8 * 18) ]
+                        ifFalse: [ place at: 5 ])).
         (kind == #control and: [ node type == #checkbox ]) ifTrue: [
             self check: control to: ((node at: #checked) == true) ].
+        (kind == #control and: [ WinSpec choiceTypes includes: node type ]) ifTrue: [
+            self fill: control from: node ].
         (kind == #control and: [ node type == #slider ]) ifTrue: [
             self range: control from: (node at: #min) to: (node at: #max).
             self position: control to: (node at: #value) ].

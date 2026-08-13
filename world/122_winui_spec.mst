@@ -273,6 +273,60 @@ Object subclass: WinSpec [
             yourself)
     ]
 
+    WinSpec class >> listBox: aLabel <String> value: aValue <String> options: opts <Object>
+                     event: anEvent <Symbol> id: anId <Object> ^ <WinNode> [
+        "A LIST BOX IS A SELECT THAT SHOWS ITS OPTIONS. Same props, same
+         patch rules, same event; the difference is only that a combo hides
+         its list until asked and a list box does not — which is a choice
+         about how many options there are and how often you switch, not about
+         what the control MEANS. Keeping the props identical is what lets a
+         tool change its mind by editing one word."
+        ^((self node: #listBox id: anId)
+            at: #label put: aLabel;
+            at: #value put: aValue;
+            at: #options put: opts;
+            at: #event put: anEvent;
+            yourself)
+    ]
+
+    "── options: what one IS, decided once ──────────────────────────────
+
+     An option may be written three ways, because all three read naturally
+     depending on what you have: a plain String when the value IS the text,
+     an Association `#a -> 'Alpha'`, or a two-element Array. The realizer and
+     the differ must agree about which is which, so the answer lives HERE and
+     is pure — a test can check every spelling without a window."
+
+    WinSpec class >> optionValue: opt <Object> ^ <Object> [
+        (opt isKindOf: Association) ifTrue: [ ^opt key ].
+        ((opt isKindOf: Collection) and: [ opt isString not ])
+            ifTrue: [ ^opt isEmpty ifTrue: [ nil ] ifFalse: [ opt at: 1 ] ].
+        ^opt
+    ]
+
+    WinSpec class >> optionText: opt <Object> ^ <String> [
+        (opt isKindOf: Association) ifTrue: [ ^opt value asString ].
+        ((opt isKindOf: Collection) and: [ opt isString not ]) ifTrue: [
+            ^opt size >= 2
+                ifTrue: [ (opt at: 2) asString ]
+                ifFalse: [ (self optionValue: opt) printString ] ].
+        ^opt asString
+    ]
+
+    "The 0-BASED index of `aValue` among `opts`, or -1. Zero-based because
+     that is what both CB_SETCURSEL and LB_SETCURSEL take, and converting at
+     the boundary rather than in the realizer keeps one convention in one
+     place."
+    WinSpec class >> indexOfValue: aValue <Object> in: opts <Object> ^ <Integer> [
+        | i |
+        opts isNil ifTrue: [ ^-1 ].
+        i := 0.
+        opts do: [ :opt |
+            (self optionValue: opt) = aValue ifTrue: [ ^i ].
+            i := i + 1 ].
+        ^-1
+    ]
+
     "── the GPU panes ───────────────────────────────────────────────────
      The three that already exist as pixel shaders in `winui_render` — which
      is why adopting this contract costs a realizer and not a renderer."
@@ -323,9 +377,13 @@ Object subclass: WinSpec [
 
     WinSpec class >> knownTypes ^ <Array> [
         ^#(#window #stack #row #grid #card #divider
-           #text #heading #button #input #checkbox #slider #select
+           #text #heading #button #input #checkbox #slider #select #listBox
            #textGrid #indexedPane #rgbaPane)
     ]
+
+    "The two that offer a CHOICE among options — validated and realized
+     together, because everything about them but their shape is the same."
+    WinSpec class >> choiceTypes ^ <Array> [ ^#(#select #listBox) ]
 
     WinSpec class >> isContainer: aType <Symbol> ^ <Boolean> [
         ^self containerTypes includes: aType
@@ -379,8 +437,8 @@ Object subclass: WinSpec [
             ifFalse: [ ^aPath , ': unknown type ' , aNode type printString ].
         (aNode id isNil or: [ aNode id isString ])
             ifFalse: [ ^aPath , ': id must be a String' ].
-        (aNode type == #select and: [ (aNode at: #options) isNil ])
-            ifTrue: [ ^aPath , ': select needs options' ].
+        ((self choiceTypes includes: aNode type) and: [ (aNode at: #options) isNil ])
+            ifTrue: [ ^aPath , ': ' , aNode type printString , ' needs options' ].
         ((self paneTypes includes: aNode type) and: [ aNode id isNil ])
             ifTrue: [ ^aPath , ': a pane must be named, it is how it is found' ].
         kids := aNode children.

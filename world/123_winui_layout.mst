@@ -102,6 +102,15 @@ Object subclass: WinSpecLayout [
         t == #input ifTrue: [ ^Array with: (self clamp: maxW lo: 220 hi: 360) with: lh + 10 ].
         t == #slider ifTrue: [ ^Array with: (self clamp: maxW lo: 260 hi: 420) with: 32 ].
         t == #select ifTrue: [ ^Array with: (self clamp: maxW lo: 220 hi: 360) with: lh + 12 ].
+        "A LIST BOX IS AS TALL AS THE ROWS IT SHOWS — `visibleRows` of them,
+         four by default, plus a border. Unlike a combo it has no closed
+         state, so its measured height is what you actually see."
+        t == #listBox ifTrue: [
+            ^Array
+                with: (self clamp: maxW lo: 220 hi: 360)
+                with: (((aNode at: #visibleRows) isNil
+                            ifTrue: [ 4 ] ifFalse: [ (aNode at: #visibleRows) max: 1 ])
+                        * lh) + 6 ].
         "A TEXT GRID IS MEASURED IN CELLS, which is the one pane type whose
          size is not a number the spec happens to know: it is `columns` and
          `rows` times the font, and the font is exactly what these metrics
