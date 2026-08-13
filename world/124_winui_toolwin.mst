@@ -571,39 +571,44 @@ Object subclass: WinToolWindow [
     ]
 
     "Which of a node's controls a changed prop belongs to."
-    kindFor: changed <OrderedCollection> ^ <Symbol> [
-        changed do: [ :a |
-            a key == #title ifTrue: [ ^#cardTitle ].
-            a key == #label ifTrue: [ ^#label ] ].
-        ^#control
+    "EACH PROP GOES TO ITS OWN CONTROL, and this used to pick one control for
+     the whole list — which is a bug with a signature worth recording. A
+     slider's patch usually changes BOTH its `label` (the readout) and its
+     `value` (the thumb); choosing the label control and applying the list to
+     it updated the readout, sent a TBM_SETPOS to a STATIC (a harmless no-op),
+     and LEFT THE THUMB WHERE IT WAS. The heartbeat poll then read the stale
+     thumb, disagreed with the echoed spec, and dispatched the OLD position
+     back into the document — the screen quietly reverting the model, four
+     presets in and every slider a step behind. The fix is the obvious
+     routing: `title` is the card's own STATIC, `label` is the one above a
+     control, everything else is the control itself."
+    controlFor: nodeId <String> kind: aKind <Symbol> ^ <Object> [
+        controls do: [ :each |
+            ((each at: 2) idOrEmpty = nodeId and: [ (each at: 3) == aKind ])
+                ifTrue: [ ^each ] ].
+        ^nil
     ]
 
     applyNodeProps: changed <OrderedCollection> to: nodeId <String> [
-        | pair control node |
-        "A node can have TWO controls — its own and its label, or a card and
-         its title — so a patch has to find the one the changed prop belongs
-         to. `title` is the card's STATIC; `label` is the label above a
-         control; everything else is the control itself. Looking only for
-         #control left card titles frozen at whatever they said when the
-         window was built, which read as a card that had stopped listening."
-        pair := nil.
-        controls do: [ :each |
-            ((each at: 2) idOrEmpty = nodeId and: [
-                (each at: 3) == (self kindFor: changed) ])
-                    ifTrue: [ pair := each ] ].
-        pair isNil ifTrue: [ ^self ].
-        control := pair at: 1.
-        node := pair at: 2.
+        | kind pair control node |
         changed do: [ :a |
-            (a key == #text or: [ a key == #value or: [
-                a key == #title or: [ a key == #label ] ] ]) ifTrue: [
-                (node type == #slider and: [ a key == #value ])
-                    ifTrue: [ self position: control to: a value ]
-                    ifFalse: [ control setText: a value asString ] ].
-            a key == #checked ifTrue: [ self check: control to: a value ].
-            "The spec the window remembers must agree with what is on screen,
-             or the next diff patches something already patched."
-            node at: a key put: a value ].
+            kind := a key == #title
+                ifTrue: [ #cardTitle ]
+                ifFalse: [ a key == #label ifTrue: [ #label ] ifFalse: [ #control ] ].
+            pair := self controlFor: nodeId kind: kind.
+            pair isNil ifFalse: [
+                control := pair at: 1.
+                node := pair at: 2.
+                (a key == #text or: [ a key == #title or: [ a key == #label ] ])
+                    ifTrue: [ control setText: a value asString ].
+                a key == #value ifTrue: [
+                    node type == #slider
+                        ifTrue: [ self position: control to: a value ]
+                        ifFalse: [ control setText: a value asString ] ].
+                a key == #checked ifTrue: [ self check: control to: a value ].
+                "The spec the window remembers must agree with what is on
+                 screen, or the next diff patches something already patched."
+                node at: a key put: a value ] ].
         ^self
     ]
 

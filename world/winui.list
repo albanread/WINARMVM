@@ -191,3 +191,10 @@
 # it replaces because the window, the layout and the lifecycle are owned
 # elsewhere. Its two surfaces are rgbaPane nodes.
 126_winui_spriteed.mst
+
+# WG14c: the Sound Editor migrated onto the declarative UI — the sliders the
+# Mac has, without its twelve hand-written mappings: the fields are a table
+# and ONE conversion serves every slider. The envelope is a damage-driven
+# rgbaPane; only the fields that change the curve repaint it. The WG13 grid
+# view (121) remains for now; this is the first-class face.
+127_winui_soundtool.mst

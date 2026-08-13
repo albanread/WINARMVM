@@ -949,6 +949,34 @@ diagonal that lost two thirds of its strokes to a busy VM now lands all 16.
 The pane's plane is retained between paints (it reallocates only on a size
 change), which is what makes partial repaint sound.
 
+**The Sound Editor migrated onto the declarative UI** the same day
+(`world/127_winui_soundtool.mst`) — the migration this section promised,
+`Sound Editor first`. It gets the Mac's sliders back WITHOUT the twelve
+hand-written fixed-point mappings WG13 built a keyboard grid to avoid: the
+fields are a TABLE (event, label, range, kind) and one pure conversion pair
+serves every slider, tested at the endpoints and midpoint of every range.
+The envelope visualization is a damage-driven `rgbaPane` — only the seven
+fields that change the CURVE repaint it; noise, distortion and the echo trio
+are audible, not visible, and dragging them repaints nothing. Audition is
+the Mac's, behaviour for behaviour: Play/preset/random/mutate/wave-click
+sound the recipe through primitive 263 in the primary; a slider drag does
+not. Proved live with the endpoint peak meter: presets clicked in the tool
+window peaked 0.51-0.81 from a dead-silent baseline.
+
+And the migration found the realizer's best bug yet, with a signature worth
+recording: `applyNodeProps:` picked ONE control for a patch's whole
+changed-list. A slider's patch changes both its label (the readout) and its
+value (the thumb); the label control won, the readout updated, the
+TBM_SETPOS went to a STATIC as a harmless no-op — and THE THUMB STAYED PUT.
+The heartbeat poll then read the stale thumb, disagreed with the echoed
+spec, and dispatched the OLD position back into the document: the screen
+quietly REVERTING the model, four presets in and every slider one recipe
+behind, with the status line correctly naming a preset whose values were no
+longer there. Headless the handler was provably perfect, which is what
+isolated the patch path in one probe. Each prop now routes to ITS control —
+title to the card's STATIC, label to the readout, everything else to the
+control itself.
+
 And the same single-backslash modulo bug the Mac's own sprite editor carries
 (`76_spriteed.mst:784` emits `\` where `\` is meant) was reproduced here
 through Python escaping and caught the same way — both panes blank, because

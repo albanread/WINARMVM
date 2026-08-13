@@ -141,4 +141,5 @@ Smalltalk platformName == #windows ifTrue: [ TestRunner run: WinUiSpecTests ].
 Smalltalk platformName == #windows ifTrue: [ TestRunner run: WinUiLayoutTests ].
 Smalltalk platformName == #windows ifTrue: [ TestRunner run: WinUiToolWindowTests ].
 Smalltalk platformName == #windows ifTrue: [ TestRunner run: WinUiSpriteEdTests ].
+Smalltalk platformName == #windows ifTrue: [ TestRunner run: WinUiSoundToolTests ].
 TestRunner report.
