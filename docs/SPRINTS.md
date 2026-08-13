@@ -826,6 +826,42 @@ playing, and XAudio2's own `SamplesPlayed` stayed 0 for the same buffers —
 BOTH instruments lied. Sound was confirmed by ear. Do not gate audio on
 either counter.
 
+**W13 reset the pane between demos, and fixed `overscan:`.** Three defects,
+all found by looking at the gallery rather than at the code, and reported
+from a screenshot rather than by a test.
+
+Demos inherited each other's LAYERS — Plasma ran under Minesweeper's
+`MINES 32` and FreeCell's `DEAL/MOVES` row, three demos after either had
+exited. The Mac gets the cleanup free (its pane is an object and `teardown()`
+drops the whole `NativeGame`); here the layers are process-lifetime statics,
+leaked deliberately because the guest holds pointers into them, so "drop the
+pane" has to be spelled out.
+
+They also inherited each other's SIZE and PALETTE. Only two demos ask for a
+shape — galaxigans wants 640x360, Plasma opens 320x240 direct — and every
+other one draws for the default pane without ever saying so, so after
+galaxigans, Life laid an 80x60 grid meant for 320x240 across a 640x360 screen
+and sat in the corner of it. The wipe now restores both, and the HOST seeds
+upstream's sixteen default colours as well as the guest, because a wiped pane
+is on screen for however many frames pass before the new demo's
+`GamePane new` runs.
+
+And **`overscan:` never worked**: the arm stored its margin and reallocated
+nothing. Minesweeper asks for a 16-pixel border, draws into a 352x272 buffer
+and blits it — so 352-wide rows were copied into a 320-wide plane and every
+row slipped 32 pixels further left than the one above. The board sheared, and
+the numbers inside the tiles, which are pixels and not text, sheared with it,
+for the whole life of the port. `GameFrame` now carries the world and the
+viewport separately, and `crop_world` takes the viewport window out of the
+world at the current scroll on the way to the renderer. Cropping on the HOST
+rather than in the shader is the smaller change and the better one: the
+copper keys off the SCREEN row, and cropping first makes the screen row the
+destination row with no further arithmetic. The renderer's own scroll is
+passed zero so the pan cannot be applied twice.
+
+Worth keeping as a rule: **the gallery is a test.** All three of these were
+invisible to 9877 passing assertions and obvious in a screenshot.
+
 ---
 
 ## Standing rules
