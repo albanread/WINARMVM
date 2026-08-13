@@ -179,6 +179,21 @@ Object subclass: WinSpec [
         ^((self node: #row id: anId) addAll: children; yourself)
     ]
 
+    WinSpec class >> row: children <Object> weights: someWeights <Array> id: anId <Object> ^ <WinNode> [
+        "A row whose children take SHARES of the width rather than their
+         natural sizes — the landscape constructor. A weight of 0 leaves that
+         child natural; see the layout's own note for the arithmetic. The two
+         collections are walked together, and a missing weight is 0."
+        | node kids |
+        node := self node: #row id: anId.
+        kids := OrderedCollection new.
+        children do: [ :c | kids add: c ].
+        1 to: kids size do: [ :i |
+            (someWeights size >= i and: [ (someWeights at: i) > 0 ])
+                ifTrue: [ (kids at: i) at: #weight put: (someWeights at: i) ] ].
+        ^(node addAll: kids; yourself)
+    ]
+
     WinSpec class >> grid: children <Object> columns: n <Integer> id: anId <Object> ^ <WinNode> [
         ^((self node: #grid id: anId)
             at: #columns put: (n max: 1);

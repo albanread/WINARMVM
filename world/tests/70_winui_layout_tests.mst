@@ -37,6 +37,14 @@ TestCase subclass: WinUiLayoutTests [
              do: [ self testEveryPlacementIsInsideTheWindow ].
         self runTest: #testAPaneAsksForItsOwnSize
              do: [ self testAPaneAsksForItsOwnSize ].
+        self runTest: #testWeightedColumnsSplitTheWidthExactly
+             do: [ self testWeightedColumnsSplitTheWidthExactly ].
+        self runTest: #testUnequalWeightsDivideByProportion
+             do: [ self testUnequalWeightsDivideByProportion ].
+        self runTest: #testANaturalChildKeepsItsWidthBesideAWeightedOne
+             do: [ self testANaturalChildKeepsItsWidthBesideAWeightedOne ].
+        self runTest: #testAWeightlessRowIsUntouchedByTheFeature
+             do: [ self testAWeightlessRowIsUntouchedByTheFeature ].
         ^self
     ]
 
@@ -235,5 +243,68 @@ TestCase subclass: WinUiLayoutTests [
         p := self in: places find: 'grid' kind: #control.
         self assert: (self wOf: p) equals: 300 description: 'the width it asked for'.
         self assert: (self hOf: p) equals: 120 description: 'and the height'.
+    ]
+
+    "── weights: the landscape feature ──────────────────────────────────"
+
+    testWeightedColumnsSplitTheWidthExactly [
+        "Two 1:1 columns in a 400 window: avail is 368, one 12 gap leaves 356,
+         so 178 each — and the second column starts at 16 + 178 + 12, whether
+         or not the first column's content wanted all of its slot. Columns
+         hold still; that is what makes them columns."
+        | places a b |
+        places := self place: (WinSpec row: {
+            WinSpec stack: { WinSpec text: 'left' id: #a } id: #colA.
+            WinSpec stack: { WinSpec text: 'right' id: #b } id: #colB
+        } weights: #(1 1) id: #main).
+        a := self in: places find: 'a' kind: #control.
+        b := self in: places find: 'b' kind: #control.
+        self assert: (self xOf: a) equals: 16 description: 'first column at the left'.
+        self assert: (self xOf: b) equals: 206
+             description: '16 + a 178 slot + the 12 gap, exactly'.
+        self assert: (self yOf: a) equals: (self yOf: b)
+             description: 'columns share their top edge'.
+    ]
+
+    testUnequalWeightsDivideByProportion [
+        "2:3 of 356 is 142 and 214 — and they SUM to 356, the last weighted
+         child taking the rounding remainder, so the split is exact."
+        | places b |
+        places := self place: (WinSpec row: {
+            WinSpec stack: { WinSpec text: 'l' id: #a } id: #colA.
+            WinSpec stack: { WinSpec text: 'r' id: #b } id: #colB
+        } weights: #(2 3) id: #main).
+        b := self in: places find: 'b' kind: #control.
+        self assert: (self xOf: b) equals: 170
+             description: '16 + (356 * 2 // 5 = 142) + 12'.
+    ]
+
+    testANaturalChildKeepsItsWidthBesideAWeightedOne [
+        "The no-stretch rule, SCOPED rather than lost: an unweighted button in
+         a weighted row is measured as ever, and only the remainder is shared."
+        | places btn inside |
+        places := self place: (WinSpec row: {
+            WinSpec button: 'ab' event: #x id: #btn.
+            WinSpec stack: { WinSpec text: 'fill' id: #inside } id: #col
+        } weights: #(0 1) id: #main).
+        btn := self in: places find: 'btn' kind: #control.
+        inside := self in: places find: 'inside' kind: #control.
+        self assert: (self wOf: btn) equals: 48
+             description: 'the button is its natural 48, not a share'.
+        self assert: (self xOf: inside) equals: 76
+             description: 'and the column starts right after it: 16 + 48 + 12'.
+    ]
+
+    testAWeightlessRowIsUntouchedByTheFeature [
+        "Yesterday's rows must lay out to yesterday's pixels — the feature is
+         opt-in per child, not a new default."
+        | places a b |
+        places := self place: (WinSpec row: {
+            WinSpec button: 'ab' event: #x id: #a.
+            WinSpec button: 'cd' event: #y id: #b } id: #root).
+        a := self in: places find: 'a' kind: #control.
+        b := self in: places find: 'b' kind: #control.
+        self assert: (self wOf: a) equals: 48 description: 'natural width'.
+        self assert: (self xOf: b) equals: 76 description: 'the same 76 as before'.
     ]
 ]

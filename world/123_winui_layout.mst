@@ -207,18 +207,80 @@ Object subclass: WinSpecLayout [
         ^Array with: widest + (pad * 2) with: cursor - y + pad
     ]
 
-    "── row: natural widths, proportional shrink, 72px floor ────────────"
+    "── row: natural widths, proportional shrink, 72px floor ────────────
+
+     AND WEIGHTS, which are what make a LANDSCAPE window sayable at all.
+     Without them every composition is a tower: `row` hands children their
+     natural widths, so nothing can express `split this width into columns
+     and let each column be a stack` — and the Sound Editor came out 480x980
+     against the Mac's 740x580 because the spec had no way to say otherwise.
+
+     The rule keeps the no-stretch philosophy by SCOPING it: a child with no
+     #weight prop keeps its natural width exactly as before, and a row of
+     them behaves identically to yesterday's. A child CARRYING #weight has
+     asked for a share — the remainder after the natural children is divided
+     in proportion, floored at rowMinWidth, the last weighted child taking
+     the rounding remainder so the split is exact. A weighted child advances
+     the cursor by its SLOT whether or not it filled it, because columns
+     that jitter with their content are not columns."
+
+    WinSpecLayout class >> weightOf: aNode <WinNode> ^ <Integer> [
+        | w |
+        w := aNode at: #weight.
+        ^(w isNil or: [ w isNumber not ]) ifTrue: [ 0 ] ifFalse: [ (w max: 0) rounded ]
+    ]
 
     WinSpecLayout class >> walkRow: aNode <WinNode> x: x <Integer> y: y <Integer>
                        width: maxW <Integer> metrics: m <Array>
                        into: out <Object> ^ <Array> [
-        | gap pad kids n avail widths total cursor tallest size |
+        | gap pad kids n avail widths total cursor tallest size
+          wsum fixed remainder given slot |
         gap := self gapOf: aNode default: self defaultGap.
         pad := self padOf: aNode.
         kids := aNode children.
         n := kids size.
         n = 0 ifTrue: [ ^Array with: pad * 2 with: pad * 2 ].
         avail := (maxW - (pad * 2) - ((n - 1) * gap)) max: (n * self rowMinWidth).
+        wsum := 0.
+        kids do: [ :c | wsum := wsum + (self weightOf: c) ].
+
+        wsum > 0 ifTrue: [
+            "Weighted: naturals first, then the remainder by proportion."
+            widths := OrderedCollection new.
+            fixed := 0.
+            kids do: [ :c |
+                (self weightOf: c) = 0
+                    ifTrue: [
+                        slot := ((self measure: c width: avail metrics: m) at: 1)
+                                    max: self rowMinWidth.
+                        widths add: slot.
+                        fixed := fixed + slot ]
+                    ifFalse: [ widths add: nil ] ].
+            remainder := (avail - fixed) max: 0.
+            given := 0.
+            fixed := 0.   "reused: weighted pixels already handed out"
+            1 to: n do: [ :i | | w |
+                w := self weightOf: (kids at: i).
+                w > 0 ifTrue: [
+                    given := given + w.
+                    slot := given = wsum
+                        ifTrue: [ (remainder - fixed) max: self rowMinWidth ]
+                        ifFalse: [ (remainder * w // wsum) max: self rowMinWidth ].
+                    fixed := fixed + slot.
+                    widths at: i put: slot ] ].
+            cursor := x + pad.
+            tallest := 0.
+            1 to: n do: [ :i |
+                size := self place: (kids at: i) x: cursor y: y + pad
+                             width: (widths at: i) metrics: m into: out.
+                tallest := tallest max: (size at: 2).
+                "A weighted child advances by its SLOT; a natural one by what
+                 it took. Columns hold still; buttons stay snug."
+                cursor := cursor + ((self weightOf: (kids at: i)) > 0
+                    ifTrue: [ widths at: i ]
+                    ifFalse: [ size at: 1 ]) + gap ].
+            ^Array with: cursor - gap - x + pad with: tallest + (pad * 2) ].
+
         widths := OrderedCollection new.
         kids do: [ :c |
             widths add: (((self measure: c width: avail metrics: m) at: 1)
@@ -240,6 +302,7 @@ Object subclass: WinSpecLayout [
             cursor := cursor + (size at: 1) + gap ].
         ^Array with: cursor - gap - x + pad with: tallest + (pad * 2)
     ]
+
 
     "Scale proportionally, then shave one pixel at a time off whichever is
      currently widest until it fits — wingui's own two-step, and the shaving

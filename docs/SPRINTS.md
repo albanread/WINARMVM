@@ -977,6 +977,22 @@ isolated the patch path in one probe. Each prop now routes to ITS control —
 title to the card's STATIC, label to the readout, everything else to the
 control itself.
 
+**WG14d: weighted rows, because every composition was a tower.** The
+author's review, verbatim: we are led to create only vertical layouts, which
+is not suitable for the sound tool — layout is meant to be automatic, but we
+need more than just stack. The missing primitive was one, not many: `row`
+hands children their natural widths, so nothing could say `split this width
+into columns and let each column be a stack`. A child carrying `#weight` now
+asks for a share — naturals are measured first, the remainder divides by
+proportion with the last weighted child taking the rounding remainder so the
+split is exact, and a weighted child advances the cursor by its SLOT whether
+or not it filled it, because columns that jitter with their content are not
+columns. The no-stretch rule survives by SCOPING: a weightless row lays out
+to yesterday's pixels, asserted as such. The Sound Editor is the proof —
+re-specced landscape at 1150x720 (envelope, verbs, oscillators and sheet on
+the left; the twelve recipe sliders in two aligned columns of six on the
+right, the Mac's own 2x6) from a 480x980 tower, by changing only the spec.
+
 And the same single-backslash modulo bug the Mac's own sprite editor carries
 (`76_spriteed.mst:784` emits `\` where `\` is meant) was reproduced here
 through Python escaping and caught the same way — both panes blank, because
