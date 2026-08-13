@@ -932,8 +932,22 @@ Four findings, all from running it:
   Registration order is now kept explicitly beside it.
 * **`getPx:` per device pixel is 186,624 sends per repaint** — slow enough
   that the door declined the next click while the VM was busy and two thirds
-  of a stroke went missing. Asking once per CELL is 256. Still a full blast
-  per stroke, and the remaining cost is the honest one: the stores.
+  of a stroke went missing. Asking once per CELL is 256.
+
+**And then the blast went entirely** (same day, at the author's prompting:
+the declarative UI HAS all the information it needs to not re-blast — that
+is almost the feature of a patching system). The differ carries control
+changes and refuses to guess; pane pixels are outside the spec, so they get
+their own channel: a handler that changes what a pane shows INVALIDATES it —
+the whole pane, or a `{x. y. w. h}` region in the pane's own pixels — and
+the paint block is called once per dirty pane with that region. Regions
+union into a bounding box between paints; whole-pane absorbs regions; taking
+the damage clears it; a pane nobody invalidated is never painted at all.
+A pencil stroke now invalidates ONE CELL and repaints 729 pixels where the
+first cut rewrote 186,624 — and the proof is behavioural: the same 16-click
+diagonal that lost two thirds of its strokes to a busy VM now lands all 16.
+The pane's plane is retained between paints (it reallocates only on a size
+change), which is what makes partial repaint sound.
 
 And the same single-backslash modulo bug the Mac's own sprite editor carries
 (`76_spriteed.mst:784` emits `\` where `\` is meant) was reproduced here

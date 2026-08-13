@@ -35,6 +35,10 @@ TestCase subclass: WinUiToolWindowTests [
              do: [ self testARerenderInsideAHandlerIsDeferredNotDropped ].
         self runTest: #testTheCountersCountBothOutcomes
              do: [ self testTheCountersCountBothOutcomes ].
+        self runTest: #testDamageIsRecordedUnionedAndTakenOnce
+             do: [ self testDamageIsRecordedUnionedAndTakenOnce ].
+        self runTest: #testPaintRunsOncePerDirtyPaneAndOnlyThose
+             do: [ self testPaintRunsOncePerDirtyPaneAndOnlyThose ].
         ^self
     ]
 
@@ -135,5 +139,58 @@ TestCase subclass: WinUiToolWindowTests [
         self assert: WinToolWindow patchCount equals: 2 description: 'patches counted'.
         self assert: WinToolWindow rebuildCount equals: 1 description: 'rebuilds too'.
         WinToolWindow resetCounts.
+    ]
+
+    "── damage: the patch discipline extended to pixels ─────────────────"
+
+    testDamageIsRecordedUnionedAndTakenOnce [
+        | tool |
+        tool := WinToolWindow
+            register: #tDamage title: 'Damage' width: 300 height: 200
+            render: [ WinSpec window: 'D' id: #d body: (WinSpec stack: {} id: #root) ]
+            handler: [ :e :v | ]
+            paint: nil.
+        self assert: (tool damageFor: #grid) == #clean
+             description: 'an untouched pane is clean, not nil - nil MEANS whole'.
+        tool invalidatePane: #grid rect: #(27 27 27 27).
+        self assert: (tool damageFor: #grid) equals: #(27 27 27 27)
+             description: 'a region is recorded as given'.
+        tool invalidatePane: #grid rect: #(81 27 27 27).
+        self assert: (tool damageFor: #grid) equals: #(27 27 81 27)
+             description: 'two regions union into one bounding box'.
+        tool invalidatePane: #grid.
+        self assert: (tool damageFor: #grid) isNil
+             description: 'the WHOLE pane absorbs any region'.
+        tool invalidatePane: #grid rect: #(0 0 1 1).
+        self assert: (tool damageFor: #grid) isNil
+             description: 'and a later region cannot shrink it back'.
+        tool paintDirty.
+        self assert: (tool damageFor: #grid) == #clean
+             description: 'painting takes the damage - it does not linger'.
+    ]
+
+    testPaintRunsOncePerDirtyPaneAndOnlyThose [
+        "The claim the whole detour was for: a pane nobody invalidated is not
+         painted at all, and a dirty one is painted exactly once, with the
+         damage the handler recorded."
+        | calls tool |
+        calls := OrderedCollection new.
+        tool := WinToolWindow
+            register: #tPaintOnce title: 'PaintOnce' width: 300 height: 200
+            render: [ WinSpec window: 'P' id: #p body: (WinSpec stack: {} id: #root) ]
+            handler: [ :e :v | ]
+            paint: [ :t :paneId :region |
+                calls add: (Array with: paneId with: region) ].
+        tool invalidatePane: #grid rect: #(0 0 27 27).
+        tool paintDirty.
+        self assert: calls size equals: 1
+             description: 'one dirty pane, one call'.
+        self assert: (calls first at: 1) equals: 'grid'
+             description: 'named by its id'.
+        self assert: (calls first at: 2) equals: #(0 0 27 27)
+             description: 'carrying the damage the handler recorded'.
+        tool paintDirty.
+        self assert: calls size equals: 1
+             description: 'nothing dirty, nothing painted - not even once'.
     ]
 ]

@@ -139,6 +139,7 @@ Object subclass: WinSpriteEd [
         event == #toolPick ifTrue: [ ^self selectTool: #pick ].
         event == #clear ifTrue: [
             d clearFrame: self curFrame.
+            self invalidateGrid.
             ^self status: 'frame cleared' ].
 
         event == #red ifTrue: [ ^self setChannel: 1 to: value ].
@@ -154,6 +155,7 @@ Object subclass: WinSpriteEd [
             (d delFrame: self curFrame)
                 ifTrue: [
                     CurFrame := self curFrame min: d frameCount - 1.
+                    self invalidateGrid.
                     ^self status: 'frame deleted' ]
                 ifFalse: [ ^self status: 'the last frame stays' ] ].
 
@@ -163,9 +165,35 @@ Object subclass: WinSpriteEd [
         ^self
     ]
 
+    "── damage: the handler says WHAT it dirtied ────────────────────────
+     The differ carries the controls; these carry the pixels. A pencil stroke
+     invalidates ONE CELL's rect; a flood fill, a frame change or a palette
+     edit invalidates the whole pane, because their reach is unknowable or
+     total. The paint block is then called only for what is named here."
+
+    WinSpriteEd class >> invalidateGrid [
+        (WinToolWindow named: #spriteEd) ifNotNil: [ :t | t invalidatePane: #grid ].
+        ^self
+    ]
+
+    WinSpriteEd class >> invalidateSwatches [
+        (WinToolWindow named: #spriteEd) ifNotNil: [ :t | t invalidatePane: #swatches ].
+        ^self
+    ]
+
+    WinSpriteEd class >> invalidateCellX: x <Integer> y: y <Integer> [
+        | cell |
+        cell := self cellSize.
+        (WinToolWindow named: #spriteEd) ifNotNil: [ :t |
+            t invalidatePane: #grid
+              rect: (Array with: x * cell with: y * cell with: cell with: cell) ].
+        ^self
+    ]
+
     "THE SINGLE FUNNEL, as on the Mac: every gesture and every script arrives
      here, and the tool decides. The document's `did anything change` answers
-     are what stop a drag inside one cell from repainting on every message."
+     are what stop a drag inside one cell from repainting on every message —
+     a stroke that changed nothing invalidates nothing and paints nothing."
     WinSpriteEd class >> paintAt: point <Array> [
         | x y d |
         d := self doc.
@@ -176,8 +204,12 @@ Object subclass: WinSpriteEd [
         self tool == #pick ifTrue: [
             ^self selectColour: (d getPx: self curFrame x: x y: y) ].
         self tool == #fill
-            ifTrue: [ d floodFill: self curFrame x: x y: y color: self selColor ]
-            ifFalse: [ d setPx: self curFrame x: x y: y color: self selColor ].
+            ifTrue: [
+                (d floodFill: self curFrame x: x y: y color: self selColor)
+                    ifTrue: [ self invalidateGrid ] ]
+            ifFalse: [
+                (d setPx: self curFrame x: x y: y color: self selColor)
+                    ifTrue: [ self invalidateCellX: x y: y ] ].
         ^self
     ]
 
@@ -192,6 +224,8 @@ Object subclass: WinSpriteEd [
 
     WinSpriteEd class >> selectColour: i <Integer> [
         SelColor := (i max: 0) min: 15.
+        "The RING moved, and only the swatches show it."
+        self invalidateSwatches.
         ^self status: 'colour ' , SelColor printString
             , (SelColor = 0 ifTrue: [ ' (transparent)' ] ifFalse: [ '' ])
     ]
@@ -202,6 +236,7 @@ Object subclass: WinSpriteEd [
     ]
 
     WinSpriteEd class >> setChannel: i <Integer> to: v <Object> [
+        "A palette edit reaches every pixel of that colour, on BOTH surfaces."
         | c |
         c := self doc paletteAt: self selColor.
         self doc
@@ -209,6 +244,8 @@ Object subclass: WinSpriteEd [
             r: (i = 1 ifTrue: [ v ] ifFalse: [ c at: 1 ])
             g: (i = 2 ifTrue: [ v ] ifFalse: [ c at: 2 ])
             b: (i = 3 ifTrue: [ v ] ifFalse: [ c at: 3 ]).
+        self invalidateGrid.
+        self invalidateSwatches.
         ^self
     ]
 
@@ -217,7 +254,8 @@ Object subclass: WinSpriteEd [
          and `dupFrame:`'s -1 are both absorbed without a special case."
         (f < 0 or: [ f >= self doc frameCount ]) ifTrue: [ ^self ].
         CurFrame := f.
-        ^self
+        "A different frame is a different picture, all of it."
+        ^self invalidateGrid
     ]
 
     "── the sheet ───────────────────────────────────────────────────────"
@@ -247,10 +285,31 @@ Object subclass: WinSpriteEd [
      repaint is a second description of the picture, and two descriptions
      disagree."
 
-    WinSpriteEd class >> paintInto: tool <Object> [
-        self paintGridOn: (tool paneHwnd: #grid).
-        self paintSwatchesOn: (tool paneHwnd: #swatches).
+    "Called once per DIRTY pane, with the damage the handler recorded — nil
+     for all of it, a {x. y. w. h} rect in pane pixels for a region. A pane
+     nobody invalidated is never painted at all."
+    WinSpriteEd class >> paintPane: paneId <Object> damage: region <Object> in: tool <Object> [
+        paneId = 'grid' ifTrue: [
+            ^self paintGridOn: (tool paneHwnd: #grid) damage: region ].
+        paneId = 'swatches' ifTrue: [
+            ^self paintSwatchesOn: (tool paneHwnd: #swatches) ].
         ^self
+    ]
+
+    "The inclusive cell bounds {x0. y0. x1. y1} a pane-pixel rect touches —
+     the whole sprite when the damage is nil. PURE, and tested: this is the
+     arithmetic that turns `one stroke` into `one cell repainted`."
+    WinSpriteEd class >> cellRangeFor: region <Object> ^ <Array> [
+        | cell d |
+        d := self doc.
+        region isNil ifTrue: [
+            ^Array with: 0 with: 0 with: d width - 1 with: d height - 1 ].
+        cell := self cellSize.
+        ^Array
+            with: (((region at: 1) // cell) max: 0)
+            with: (((region at: 2) // cell) max: 0)
+            with: ((((region at: 1) + (region at: 3) - 1) // cell) min: d width - 1)
+            with: ((((region at: 2) + (region at: 4) - 1) // cell) min: d height - 1)
     ]
 
     "A pane has no plane until a renderer is attached to it, exactly as the
@@ -262,16 +321,16 @@ Object subclass: WinSpriteEd [
             on: Error do: [ :e | false ]
     ]
 
-    WinSpriteEd class >> paintGridOn: hwnd <Integer> [
-        "CELLS OUTSIDE, PIXELS INSIDE, and the order is the whole performance
-         story. Written the other way round — device pixel outermost, asking
-         the document for its index every time — this was one `getPx:` per
-         pixel, 186,624 of them for a 16x16 sprite, and the repaint took long
-         enough that the door DECLINED the next click while the VM was busy.
-         Two thirds of a stroke went missing and the drawing looked haunted.
-         Asking once per cell is 256 sends instead, and the stores that remain
-         are stores rather than message sends."
-        | d cell gw gh base stride idx c word x0 y0 px py |
+    WinSpriteEd class >> paintGridOn: hwnd <Integer> damage: region <Object> [
+        "CELLS OUTSIDE, PIXELS INSIDE, and only the DAMAGED cells at all —
+         which is the whole performance story told twice. The first cut asked
+         the document per device pixel: 186,624 sends for a 16x16 sprite,
+         slow enough that the door declined the next click while the VM was
+         busy and two thirds of a stroke went missing. Per cell brought that
+         to 256. The damage brings a pencil stroke to ONE — the handler knew
+         which cell it touched all along, and the pane's plane is retained, so
+         everything outside the region is simply still there."
+        | d cell gw gh base stride idx c word x0 y0 px py range |
         hwnd = 0 ifTrue: [ ^self ].
         (self attach: hwnd) ifFalse: [ ^self ].
         d := self doc.
@@ -281,8 +340,9 @@ Object subclass: WinSpriteEd [
         base := WinPixels planeFor: hwnd width: gw height: gh.
         base = 0 ifTrue: [ ^self ].
         stride := WinPixels strideFor: hwnd.
-        0 to: d height - 1 do: [ :cy |
-            0 to: d width - 1 do: [ :cx |
+        range := self cellRangeFor: region.
+        (range at: 2) to: (range at: 4) do: [ :cy |
+            (range at: 1) to: (range at: 3) do: [ :cx |
                 idx := d getPx: self curFrame x: cx y: cy.
                 c := idx = 0 ifTrue: [ nil ] ifFalse: [ d paletteAt: idx ].
                 word := c isNil
@@ -366,7 +426,8 @@ Object subclass: WinSpriteEd [
             handler: [ :event :value |
                 WinSpriteEd handle: event value: value.
                 (WinToolWindow named: #spriteEd) rerender ]
-            paint: [ :tool | WinSpriteEd paintInto: tool ].
+            paint: [ :tool :paneId :region |
+                WinSpriteEd paintPane: paneId damage: region in: tool ].
         ^self
     ]
 

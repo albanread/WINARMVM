@@ -1,0 +1,68 @@
+"72_winui_spriteed_tests.mst — WinUiSpriteEdTests: the Sprite Editor's pure
+ arithmetic, which is exactly the part the damage system leans on.
+
+ `cellRangeFor:` turns a pane-pixel damage rect into inclusive cell bounds,
+ and it is the whole difference between `one stroke repaints one cell` and
+ `one stroke repaints 65,536 pixels`. It is pure — the document's size and
+ the cell size are its only inputs — so the claim is checkable to the cell
+ with no window, no pane and no plane."
+
+TestCase subclass: WinUiSpriteEdTests [
+    WinUiSpriteEdTests class >> isEnabled ^ <Boolean> [
+        ^Smalltalk platformName == #windows
+    ]
+
+    runAll [
+        self runTest: #testNilDamageMeansEveryCell
+             do: [ self testNilDamageMeansEveryCell ].
+        self runTest: #testAOneCellRectTouchesExactlyThatCell
+             do: [ self testAOneCellRectTouchesExactlyThatCell ].
+        self runTest: #testARectAcrossACellEdgeTouchesBothCells
+             do: [ self testARectAcrossACellEdgeTouchesBothCells ].
+        self runTest: #testDamageIsClampedToTheSprite
+             do: [ self testDamageIsClampedToTheSprite ].
+        ^self
+    ]
+
+    testNilDamageMeansEveryCell [
+        | r d |
+        d := WinSpriteEd doc.
+        r := WinSpriteEd cellRangeFor: nil.
+        self assert: r equals: (Array with: 0 with: 0
+                                      with: d width - 1 with: d height - 1)
+             description: 'nil is the whole sprite, in cells'.
+    ]
+
+    testAOneCellRectTouchesExactlyThatCell [
+        "A pencil stroke's own damage: cell (3,5) at cell size 27 is the rect
+         {81. 135. 27. 27}, and it must come back as exactly that one cell —
+         the claim the whole detour was for."
+        | cell r |
+        cell := WinSpriteEd cellSize.
+        r := WinSpriteEd cellRangeFor:
+            (Array with: 3 * cell with: 5 * cell with: cell with: cell).
+        self assert: r equals: #(3 5 3 5)
+             description: 'one cell in, one cell out'.
+    ]
+
+    testARectAcrossACellEdgeTouchesBothCells [
+        | cell r |
+        cell := WinSpriteEd cellSize.
+        r := WinSpriteEd cellRangeFor:
+            (Array with: cell - 1 with: 0 with: 2 with: 1).
+        self assert: r equals: #(0 0 1 0)
+             description: 'two pixels straddling an edge touch two cells'.
+    ]
+
+    testDamageIsClampedToTheSprite [
+        "A union that grew past the plane's edge must not name cells the
+         document does not have — getPx: would answer 0 harmlessly, but the
+         paint loop would waste exactly the work the damage exists to save."
+        | d r |
+        d := WinSpriteEd doc.
+        r := WinSpriteEd cellRangeFor: (Array with: 0 with: 0 with: 99999 with: 99999).
+        self assert: r equals: (Array with: 0 with: 0
+                                      with: d width - 1 with: d height - 1)
+             description: 'an oversized rect clamps to the sprite'.
+    ]
+]

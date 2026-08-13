@@ -168,6 +168,17 @@ Object subclass: WinToolWindow [
     WinToolWindow class >> countRebuild [ RebuildCount := self rebuildCount + 1. ^self ]
     WinToolWindow class >> resetCounts [ PatchCount := 0. RebuildCount := 0. ^self ]
 
+    "The bounding box of two {x. y. w. h} rects — how damage regions coalesce
+     between paints."
+    WinToolWindow class >> union: a <Array> with: b <Array> ^ <Array> [
+        | x0 y0 x1 y1 |
+        x0 := (a at: 1) min: (b at: 1).
+        y0 := (a at: 2) min: (b at: 2).
+        x1 := ((a at: 1) + (a at: 3)) max: ((b at: 1) + (b at: 3)).
+        y1 := ((a at: 2) + (a at: 4)) max: ((b at: 2) + (b at: 4)).
+        ^Array with: x0 with: y0 with: x1 - x0 with: y1 - y0
+    ]
+
     "Where a tool's own failure goes. The transcript rather than `PaintError`,
      which has a reader but no writer outside the pane that owns it — and
      which nobody looking at a misbehaving tool would think to check."
@@ -178,11 +189,12 @@ Object subclass: WinToolWindow [
 
     "── an instance ─────────────────────────────────────────────────────"
 
-    | id title width height renderBlock handlerBlock paintBlock hwnd controls lastSpec nextId |
+    | id title width height renderBlock handlerBlock paintBlock hwnd controls lastSpec nextId damage |
 
     setId: anId <Symbol> title: aTitle <String> width: w <Integer> height: h <Integer>
     render: r <Object> handler: hh <Object> paint: pp <Object> ^ <WinToolWindow> [
         paintBlock := pp.
+        damage := Dictionary new.
         id := anId.
         title := aTitle.
         width := w.
@@ -250,9 +262,71 @@ Object subclass: WinToolWindow [
         ^self
     ]
 
-    paint [
+    "── damage: the patch discipline, extended to PIXELS ─────────────────
+
+     The differ carries control changes and refuses to guess; pane pixels are
+     outside the spec, so they need their own channel, and this is it. A
+     HANDLER that changes what a pane shows says so — the whole pane, or just
+     a region — and the paint block is then called ONCE PER DIRTY PANE with
+     that region. A pane nobody invalidated is not painted at all.
+
+     Before this existed the paint hook blasted every pane on every rerender:
+     186,624 pixel stores for a one-cell pencil stroke, long enough that the
+     door declined the NEXT stroke while the VM was busy. The information to
+     do better was in the system all along — the handler knows exactly which
+     cell it touched — which is the point: minimal update is the FEATURE of a
+     patching UI, not an optimisation of one."
+
+    invalidatePane: anId <Object> [
+        "The whole pane. nil damage MEANS everything, and it absorbs any
+         region already recorded — whole beats parts."
+        damage at: anId asString put: nil.
+        ^self
+    ]
+
+    invalidatePane: anId <Object> rect: r <Array> [
+        "A region, {x. y. w. h} in the pane's OWN pixels — the same space its
+         events arrive in. Regions between paints UNION into one bounding
+         box: between two paints there is rarely more than one event, and a
+         box is exact for the one case that matters (a stroke) while staying
+         one Array."
+        | k |
+        k := anId asString.
+        (damage includesKey: k)
+            ifTrue: [
+                (damage at: k) isNil ifTrue: [ ^self ].
+                damage at: k put: (WinToolWindow union: (damage at: k) with: r) ]
+            ifFalse: [ damage at: k put: r ].
+        ^self
+    ]
+
+    damageFor: anId <Object> ^ <Object> [
+        "The pending damage, for tests: #clean when nothing is recorded, nil
+         for the whole pane, a rect for a region."
+        ^damage at: anId asString ifAbsent: [ #clean ]
+    ]
+
+    "Every pane, whole — a rebuild replaced their windows, so everything they
+     showed is gone."
+    invalidateAllPanes [
+        controls do: [ :pair |
+            ((pair at: 3) == #control
+                and: [ WinSpec paneTypes includes: (pair at: 2) type ])
+                    ifTrue: [ damage at: (pair at: 2) idOrEmpty put: nil ] ].
+        ^self
+    ]
+
+    paintDirty [
+        "Take the damage FIRST and clear it, so a paint block that invalidates
+         (it should not, but an error handler might) cannot loop this."
+        | pending |
+        damage isEmpty ifTrue: [ ^self ].
+        pending := damage.
+        damage := Dictionary new.
         paintBlock isNil ifTrue: [ ^self ].
-        [ paintBlock value: self ] on: Error do: [ :e | WinToolWindow report: e messageText ].
+        pending keysAndValuesDo: [ :paneId :region |
+            [ paintBlock value: self value: paneId value: region ]
+                on: Error do: [ :e | WinToolWindow report: e messageText ] ].
         ^self
     ]
 
@@ -412,12 +486,12 @@ Object subclass: WinToolWindow [
         ops isEmpty ifTrue: [
             "NO OPS IS NOT NOTHING TO DO. A pane's contents are pixels, and a
              tool that paints one has changed what is on screen without
-             changing a single prop — a pencil stroke in the sprite editor is
-             exactly that. So the paint block runs on EVERY rerender, and the
+             changing a single prop — a pencil stroke is exactly that. The
              differ's `nothing changed` means nothing changed ABOUT THE
-             CONTROLS. Missing this drew a perfect grid that never updated."
+             CONTROLS; what changed about the PANES is whatever the handler
+             invalidated, and only that is painted."
             lastSpec := spec.
-            self paint.
+            self paintDirty.
             ^true ].
         ^self apply: ops spec: spec
     ]
@@ -458,7 +532,10 @@ Object subclass: WinToolWindow [
         places do: [ :p | self createFor: p ].
         WinToolWindow suppress: false.
         lastSpec := spec.
-        self paint.
+        "A rebuild replaced the pane WINDOWS, so whatever they showed is gone
+         whether or not anyone said so."
+        self invalidateAllPanes.
+        self paintDirty.
         ^true
     ]
 
@@ -480,7 +557,7 @@ Object subclass: WinToolWindow [
         WinToolWindow suppress: false.
         WinToolWindow countPatch.
         lastSpec := spec.
-        self paint.
+        self paintDirty.
         ^true
     ]
 
