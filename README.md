@@ -9,53 +9,121 @@ repo: *the Mac compiler is the seed, not the ceiling — different OS,
 different chip; we are using it to create the Windows compiler.* The
 AArch64 backend carried over; the OS layer (VirtualAlloc'd code cache with
 real icache maintenance, a Vectored Exception Handler decoding A64 `brk`,
-a hand-written non-unwinding AArch64 setjmp/longjmp, Win32 + WebView2 GUI
-shell) is this repo's own, and the compiler diverges where this system
-needs it to — each divergence marked and explained in place.
+a hand-written non-unwinding AArch64 setjmp/longjmp, and two GUI shells —
+Win32 + WebView2, and the Win32 + Direct3D 11 one written in Smalltalk) is
+this repo's own, and the compiler diverges where this system needs it to —
+each divergence marked and explained in place.
 
-**Status: the port is complete — P0 through P5.** The suite runs **1086
-passed / 0 failed / 10 ignored** (identical with the FFI knowledge base
-present and absent), plus **7650 in-language world assertions, 0 failed**.
+**Status: the port is complete — P0 through P5 — and Phase WG's native
+environment is built on top of it.** The in-language world suite runs
+**17,795 assertions, 0 failed**. The Rust suite runs **1,091 passed / 4
+failed / 13 ignored** in release, and the four are named rather than
+rounded off: three `it_tier1` fixtures compile an nmethod for a selector
+they never installed in the synthetic test universe's method dictionary,
+which the super-send rule below now correctly declines to key — the
+fixtures predate it and were missed when their siblings were updated; the
+fourth is order-dependent in `it_world`, which passes 11/11 when that
+binary runs on its own. Neither is a VM defect, and both are open.
+
 JIT, uncommon traps, deopt, guest-fatal recovery, moving GC under compiled
 frames, the FFI resolver, and the live-HTML programming environment all
 work, all native — VM, JIT, and the WebView2 engine hosting the GUI are
 each PE-verified ARM64. The port-defect ledger is closed: no test is gated
-on a Windows-divergence claim, and the two compiler defects found along
-the way are fixed here and cherry-pickable upstream (one of them cured a
-silent wrong-answer bug).
+on a Windows-divergence claim, and the compiler defects found along the way
+are fixed here and have flowed upstream — the S2 trap-site fix (a stale
+resident corrupting a deopt slot) and the OSR tiering gap are both in MACVM
+now, ported from this repo by name. A third, found by WG3's sub-floor
+canary, cured a silent wrong-answer bug: a customized **super-send** target
+carries the same `(receiver klass, selector)` pair as the override dynamic
+dispatch must reach, so letting it answer `CodeTable::lookup` made ordinary
+sends resolve the super target and skip the override — `WinLayout new`
+dispatched `^self basicNew` and never ran `initLayout`. An nmethod now
+declares whether it `owns_dynamic_key`; a non-owning one stays reachable
+through its call site's direct id link and simply never answers lookup.
 
-The 10 remaining gates are not port debt — they are two scoped slices of
-new work: `kqueue`-shaped readiness (`IoWorker` needs an IOCP or WSAPoll
-backend) and the winsock lifecycle. Both are named in
+The 13 ignored gates are not port debt. Ten are two scoped slices of new
+work — `kqueue`-shaped readiness (`IoWorker` needs an IOCP or WSAPoll
+backend) and the winsock lifecycle, both named in
 [`docs/sprints/sprint_p05_detail.md`](docs/sprints/sprint_p05_detail.md).
+The other three are `subfloor_probe`, deliberately out of contract: below
+the JIT's supported threshold the suite is asked to **survive**, not to be
+correct, so those probes assert the former and ignore the latter.
 
-**In progress: [Phase WG](docs/win_gui_design.md)** — a Windows-native
-environment *written in Smalltalk*, the way the Mac one is: UI VM on the
-UI thread, messaging an independent Smalltalk GUI layer, driving Win32 and
-COM through the FFI. WG0–WG3 have landed: `macvm-winui` boots a VM on
-the process's main thread, layers `world/winui.list`, and a guest Smalltalk
-doit registers a window class from winkb-queried struct offsets, opens a
-**visible** Windows-11 window — Mica backdrop attribute, system-themed
-titlebar, per-monitor-V2 DPI, all three set from Smalltalk through
-`dwmapi` — and closes it cleanly. Rust owns the message pump and nothing
-else. The window is scriptable rather than lookable-at: `MACVM_WINUI_CTL`
-arms the same control channel the web GUI uses, so `just gate-wg1` opens
-it, reads its client rect back through the FFI, captures a PNG and checks
-the PNG's own dimensions and pixels against it.
+**[Phase WG](docs/win_gui_design.md) — WG0 through WG14 have landed:** a
+Windows-native environment *written in Smalltalk*, the way the Mac one is.
+`macvm-winui` boots a UI VM on the process's main thread, layers
+`world/winui.list`, and drives Win32, Direct3D 11 and COM through the FFI.
+Rust owns the message pump and nothing else. Screenshots of everything
+below: [`docs/gallery-win/`](docs/gallery-win/).
 
-Windows then learned to call **into** Smalltalk (WG2): a Rust wndproc
-trampoline forwards an allowlisted set of messages into the UI VM as
-top-level entries — `WinShell>>window:message:wParam:lParam:` — with a
-depth guard, a busy guard, and P2's fault recovery underneath, measured at
-**8.8 µs** per round trip against `DefWindowProcW`'s 57 ns. WG3 put the
-environment's real message architecture behind that door: handlers **flag
-and return**, and a separate drain pass — woken by a private `WM_APP`
-message, backstopped by a timer, and suppressed while a modal move/size or
-menu loop is pumping — does the work later, on a fresh top-level entry,
-against the settled state. Measured: a burst of **200 `WM_SIZE` messages
-produces one layout pass**. Real `BUTTON`/`EDIT`/`SysListView32` controls,
-created and laid out by Smalltalk (`world/92_winui_controls.mst`), notify
-through the same door and have their meaning run in the drain.
+**The door and the drain (WG1–WG3).** A guest Smalltalk doit registers a
+window class from winkb-queried struct offsets and opens a **visible**
+Windows-11 window — Mica backdrop, system-themed titlebar, per-monitor-V2
+DPI, all three set from Smalltalk through `dwmapi`. Windows then calls
+**into** Smalltalk: a Rust wndproc trampoline forwards an allowlisted set
+of messages into the UI VM as top-level entries —
+`WinShell>>window:message:wParam:lParam:` — with a depth guard, a busy
+guard, and P2's fault recovery underneath, measured at **8.8 µs** per round
+trip against `DefWindowProcW`'s 57 ns. Behind that door sits the real
+message architecture: handlers **flag and return**, and a separate drain
+pass — woken by a private `WM_APP` message, backstopped by a timer,
+suppressed while a modal move/size or menu loop is pumping — does the work
+later, on a fresh top-level entry, against settled state. Measured: a burst
+of **200 `WM_SIZE` messages produces one layout pass**. The window is
+scriptable rather than lookable-at: `MACVM_WINUI_CTL` arms the same control
+channel the web GUI uses, so each `just gate-wgN` drives the real window and
+checks captured pixels against what it asked for.
+
+**The environment (WG4–WG9).** A view bar with Fluent glyphs and an accent
+underline over lazily-built views, a docked Transcript on a splitter, and a
+live metrics cluster reading `VmMetrics` off the primary. Then the tools,
+each on the primary's own live image: a syntax-coloured **Workspace**
+(Ctrl-D / Ctrl-P, ghost line), a four-pane **Browser** whose Accept persists
+through `image_store::flows` byte-identically to the web path, an
+**Outliner** over the live hierarchy, **Find** for Implementors and Senders
+that lands its selection in the Browser, a **Debugger** with the halt loop
+fronted natively and the UI still alive, a **Monitor** showing every running
+VM, and a **Tests** tab — SUnit moved out of the harness and into
+`world/85_sunit.mst`, so a `TestCase` written in the Browser is a real class
+in the primary. The editor panes left GDI for a cell grid on DirectWrite
+(WG6d), one renderer per pane, which is where the text plane came from.
+
+**The screen is memory (WG8, WG10–WG11).** Upstream's SM0/SM4 — a
+`D3D11_USAGE_DYNAMIC` texture the guest stores into through an `Alien`, plus
+a 256-word palette — landed as the **Canvas** view. Re-colouring costs the
+palette's size, not the screen's: 256 stores against 19,200 at 160×120. On
+that plane **all eight of upstream's games run unedited** (`git show
+upstream/main:` byte-for-byte): Life, FreeCell, Minesweeper, Plasma, Copper,
+Attractor, Julia, Breakout, plus galaxigans on the layer-0 shader — with
+sound through XAudio2. Getting there forced one contract fix worth naming:
+WINARM had independently allocated primitive ids 266–272 that upstream had
+given to GamePane shared memory, so the same Smalltalk meant two different
+things on two machines. WINARM's moved to 300–306, and an unimplemented
+primitive is now a **fallthrough to the method body**, not a crash — which
+is the contract upstream's game wrappers already rely on.
+
+**The declarative UI (WG14)** — *"a first class replacement here for the
+cocoa ui"*. Design of record:
+[`docs/win_declarative_ui.md`](docs/win_declarative_ui.md). It adopts the
+spec+bind contract of
+[`wingui`](https://github.com/albanread/wingui) (JSON-shaped node trees,
+id-based reconciliation, event names bound to handlers, full-spec republish
+with diffing) and implements the realizer **natively in the world layer**,
+over the `WinControl` factory, `winui_render` and the door — winscheme's own
+precedent, whose reconciler lives in Scheme rather than C++. `WinSpec` is
+pure and headless (build, normalize, validate, diff); `WinSpecLayout` is
+arithmetic with metrics passed in, testable to the pixel; `WinToolWindow` is
+the lifecycle the Mac never abstracted — registry, front-or-build,
+hide-on-close, teardown order, beat tick, and the event-depth discipline
+that coalesces N state changes into one reconcile. Pane pixels sit outside
+the spec, so they get their own channel: a handler **invalidates** a pane or
+a region in its own pixels, and the paint block runs once per dirty pane. A
+pencil stroke now repaints **729 pixels where the first cut rewrote
+186,624** — and the proof is behavioural, since the 16-click diagonal that
+lost two thirds of its strokes to a busy VM now lands all 16. The **Sprite
+Editor** and **Sound Editor** ship on it, about a fifth the size of the
+Cocoa ones they replace, both re-specced landscape by changing only the
+spec once `row` learned weighted children.
 
 ### Measured, on this machine (Snapdragon X / Oryon)
 
@@ -92,32 +160,51 @@ runtime (in-box on Win11-ARM).
 ```sh
 cargo build --release
 target/release/macvm run world/bench/fib.mst --world world
+cargo run --release -p win_gui            # macvm-winui — the Windows-native environment (Win32 + D3D11)
 cargo run --release -p macvm-gui          # the Strongtalk-style environment (Win32 + WebView2)
 ```
 
+Every GUI crate (`win_gui`, `gui`, `winui_host`, `winui_render`) is a
+**non-default** workspace member, so a bare `cargo build` / `cargo test` at
+the top builds and tests `macvm` alone and never links a window — which is
+also why the suite counts above are the VM's, not the environment's. Build
+them explicitly with `-p`. `winui_host` drops `winui_host.dll` beside
+`macvm-winui.exe`, where `LoadLibraryA` finds it.
+
 Env flags are unchanged from MACVM (`MACVM_JIT=off|threshold=N` — the
-threshold never goes below 20, rule 1; `MACVM_TRACE=…`, `MACVM_GC_STRESS=…`).
-Gates: `just gate-p00` … `gate-p03` are the port ladder; `just diff-p03` is
-the JIT-vs-interpreter differential (zero differences, stdout and exit
-status, across three JIT modes).
+threshold never goes below 20, rule 1; `MACVM_TRACE=…`, `MACVM_GC_STRESS=…`),
+plus `MACVM_WINUI_CTL` to arm the window's scripting channel.
+Gates: `just gate-p00` … `gate-p05` are the port ladder and `just gate-wg0`
+… `gate-wg9` the environment's, each driving the real window and checking
+captured pixels; `just diff-p03` is the JIT-vs-interpreter differential
+(zero differences, stdout and exit status, across three JIT modes);
+`just gate-cookbook` *evaluates* the fenced blocks in
+[`docs/winui-cookbook.md`](docs/winui-cookbook.md) against a live window,
+so the prose cannot rot silently.
 
 ### The three repos
 
 | repo | platform | role |
 |---|---|---|
-| [MACVM](https://github.com/albanread/MACVM) | macOS / Apple Silicon | the original; `upstream` remote — portable fixes cherry-pick both ways (two compiler fixes found here already flow back) |
+| [MACVM](https://github.com/albanread/MACVM) | macOS / Apple Silicon | the original; `upstream` remote — portable fixes cherry-pick both ways. Two compiler fixes found here are upstream by name (`545cde4`, `0ca505e`), and MACVM has since adopted **this repo's declarative UI** as its own app portability layer, citing the measurement that WG14's sprite editor carries zero Win32 — its `AppSpec` sprints run the Windows sprite and sound editors on Cocoa, unedited |
 | [WINVM](https://github.com/albanread/WINVM) | Windows / x86-64 | the first Windows port; its `MIGRATION.md` playbook seeded this one's OS layer |
 | **WINARMVM** (this repo) | **Windows / ARM64** | the Windows compiler grown from the MACVM seed |
 
 ### Not ported (yet), by design
 
-FFI is sprint **P5** (the `winkb` Windows-API knowledge base replaces
-`cocoa_data`; the ARM64 argument classifier is scoped work), and with it
-the POSIX-backed world files (dns, sockets, posix_io) — `IoWorker` needs
-an IOCP/WSAPoll backend, since `kqueue` has no Windows twin. Permanently
-macOS-only and cleanly gated: the Cocoa bridge and AppKit GUI
-(`cocoa_gui`), Accelerate bindings, AVFoundation (`abc_player`), and the
-Metal game pane.
+Still outstanding: the POSIX-backed world files (dns, sockets, posix_io),
+because `IoWorker` needs an IOCP/WSAPoll backend and `kqueue` has no
+Windows twin. FFI itself landed in **P5** — the `winkb` Windows-API
+knowledge base replaces `cocoa_data`, with an ARM64 argument classifier
+re-derived rather than copied from WINVM's x64 one.
+
+Permanently macOS-only and cleanly gated, as *implementations*: the Cocoa
+bridge and AppKit GUI (`cocoa_gui`), Accelerate bindings, AVFoundation
+(`abc_player`), and the Metal game pane. Their **capabilities** are not
+missing here — WG11 rebuilt the game pane on Direct3D 11 and sound on
+XAudio2 (`win_gui/src/sound/`), which is what lets upstream's eight games
+run unedited; the environment itself is `win_gui` + `winui_render` +
+`winui_host` rather than AppKit.
 
 The design of record — component disposition, the five OS seams, every
 measured correction (`Δ` entries), and the status log — is
