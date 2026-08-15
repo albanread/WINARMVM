@@ -80,11 +80,7 @@ impl InboxSender {
             // panic elsewhere while holding it leaves nothing torn — and one
             // poisoned sender must not turn every future cross-VM send into
             // a panic cascade.
-            let hook = self
-                .wake
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone();
+            let hook = self.wake.lock().unwrap_or_else(|e| e.into_inner()).clone();
             if let Some(w) = hook {
                 w();
             }

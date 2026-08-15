@@ -119,7 +119,11 @@ pub fn open_or_seed(world_dir: &Path, image_path: &Path) -> Result<Image, String
 /// individual per-method failures are collected into `errors` rather than
 /// aborting the whole import (so one malformed method doesn't lose the rest
 /// of the world).
-pub fn import_list_file(image: &Image, world_dir: &Path, list_file: &str) -> Result<ImportStats, String> {
+pub fn import_list_file(
+    image: &Image,
+    world_dir: &Path,
+    list_file: &str,
+) -> Result<ImportStats, String> {
     let list_path = world_dir.join(list_file);
     let list_text = std::fs::read_to_string(&list_path)
         .map_err(|e| format!("failed to read {}: {e}", list_path.display()))?;
@@ -169,11 +173,7 @@ pub fn import_list_file(image: &Image, world_dir: &Path, list_file: &str) -> Res
                 // adding a `<classVars: …>` pragma is picked up — but a
                 // method-only reopen (no pragma) does not wipe existing vars.
                 image
-                    .reimport_class_shell(
-                        &parsed.name,
-                        &parsed.instance_vars,
-                        &parsed.class_vars,
-                    )
+                    .reimport_class_shell(&parsed.name, &parsed.instance_vars, &parsed.class_vars)
                     .map_err(|e| {
                         format!("{filename}: reimport_class_shell({}): {e}", parsed.name)
                     })?;
@@ -426,7 +426,10 @@ mod tests {
         assert_eq!(names, vec!["Extra", "Foo"]);
 
         assert!(
-            image.classes_for_lists(&["nonexistent"]).unwrap().is_empty(),
+            image
+                .classes_for_lists(&["nonexistent"])
+                .unwrap()
+                .is_empty(),
             "a list name that doesn't exist answers no classes, not an error"
         );
 
@@ -459,7 +462,9 @@ mod tests {
         let image = Image::open_in_memory().unwrap();
         image.ensure_package_list_member("world", "object").unwrap();
         image.ensure_package_list_member("world", "object").unwrap();
-        image.ensure_package_list_member("world", "ordered").unwrap();
+        image
+            .ensure_package_list_member("world", "ordered")
+            .unwrap();
         assert_eq!(
             image.packages_in_list("world").unwrap(),
             vec!["object".to_string(), "ordered".to_string()]

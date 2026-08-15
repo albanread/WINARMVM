@@ -94,9 +94,43 @@ pub(crate) fn try_primitive(vm: &mut VmState, m: MethodOop, argc: u8) -> Primiti
     let scope = crate::memory::handles::HandleScope::enter(vm);
     let m_h = scope.handle(vm, m);
 
-    let desc = crate::runtime::primitives::prim_by_id(prim_id as u16)
-        .unwrap_or_else(|| panic!("try_primitive: unknown primitive id {prim_id}"));
+    // AN UNIMPLEMENTED PRIMITIVE IS A FALLTHROUGH, NOT A CRASH.
+    //
+    // A method may declare any number; whether this VM implements it is not the
+    // guest's business, and the Smalltalk contract for a primitive that does not
+    // happen is already exact — the method's own body runs. That is precisely
+    // what upstream's GamePane wrappers are written to rely on: `overscan:`
+    // (266) answers `^self` and `screenMemory` (269) answers `^nil` on a build
+    // that has not implemented them, so the games LOAD and degrade rather than
+    // fail to compile.
+    //
+    // It used to panic. Opening upstream's Minesweeper — which calls `overscan:`
+    // before anything else — killed the primary outright and took the user's
+    // image with it, from a build whose only sin was not having written that
+    // primitive yet.
+    let Some(desc) = crate::runtime::primitives::prim_by_id(prim_id as u16) else {
+        return PrimitiveOutcome::Fallthrough;
+    };
     let argc_usize = argc as usize;
+    // ARITY GUARD. The slice below is sized from the METHOD's declared argc,
+    // but the primitive indexes it by its OWN — so a method that declares
+    // `<primitive: N>` with the wrong number of arguments makes the primitive
+    // read past the end. That is a guest-triggerable PANIC in the VM, which no
+    // guest may ever cause, whatever it declares.
+    //
+    // Found by running upstream's Minesweeper: its `textMemory` is primitive
+    // 271 with no arguments, WINARM had independently allocated 271 to a
+    // one-argument `primWinkbStructSize:`, and the mismatched call took the
+    // whole primary down with `index out of bounds: the len is 1 but the
+    // index is 1`. (The id collision is its own defect — see docs/SPRINTS.md —
+    // but a collision must FAIL, not crash.)
+    //
+    // Failing is exactly right rather than merely safe: `Fallthrough` runs the
+    // method's Smalltalk body, which for every such wrapper is the `^nil`/
+    // `^self` that already means "this primitive did not happen".
+    if desc.argc as usize != argc_usize {
+        return PrimitiveOutcome::Fallthrough;
+    }
     let sp = vm.stack.sp;
     let base = sp - argc_usize - 1;
     // Holds receiver + up to `MAX_PRIMITIVE_ARGS` arguments. A method that
@@ -214,105 +248,124 @@ pub fn activate_method(
             // of the process and pinned every benchmark at interpreter speed.
             let sel = crate::oops::wrappers::SymbolOop::try_from(m.selector())
                 .expect("a method's selector is always a Symbol");
-            let existing = vm.code_table.lookup(k, sel).filter(|&id| {
-                vm.code_table
-                    .get(id)
-                    .is_some_and(|nm| matches!(nm.state, NmState::Alive))
-            });
-            // OSR-heal (see `Nmethod::osr_cold_sends` and the c2i hatch's
-            // twin of this arm): a half-warm OSR nmethod is replaced by a
-            // warm whole-body compile instead of being reused. On this path
-            // the warmth comes from the PREVIOUS interpreted call(s) —
-            // ordinary dispatch has been declining the OSR nmethod
-            // (`resolve_target_entry`), so this method has been
-            // interpreting end-to-end since the OSR compile.
-            let existing = match existing {
-                Some(id)
-                    if vm
-                        .code_table
+            // Same dispatch-truth gate as the c2i overflow trigger
+            // (`rt_interpret_call`'s own `is_dispatch_truth`, stubs.rs): a
+            // SUPER-dispatched activation runs an ANCESTOR method under the
+            // RECEIVER's klass — `(k, sel)` names the subclass override, not
+            // `m`, and compiling `m` customized under that key poisons every
+            // future normal send of `sel` to a `k` receiver (the WG3
+            // sub-floor canary: `WinLayout new`'s super-send compiled
+            // `Object class>>new` under `(WinLayout class, #new)` and every
+            // later `new` skipped `initLayout`). Declining here mirrors the
+            // c2i arm exactly; `Nmethod::owns_dynamic_key` backstops the
+            // same invariant structurally at install time.
+            let dispatch_truth = crate::runtime::lookup::lookup(vm, k, sel)
+                .is_some_and(|m2| m2.oop().raw() == m.oop().raw());
+            'trigger: {
+                if !dispatch_truth {
+                    break 'trigger; // fall through to plain interpreted activation
+                }
+                let existing = vm.code_table.lookup(k, sel).filter(|&id| {
+                    vm.code_table
                         .get(id)
-                        .is_some_and(|nm| nm.is_half_warm_osr()) =>
-                {
-                    let old_version = vm.code_table.get(id).unwrap().version;
-                    match crate::compiler::driver::compile_method_versioned(
-                        vm,
-                        k,
-                        m,
-                        old_version + 1,
-                    ) {
-                        Some(new_id) => {
-                            vm.stats.recompiles += 1;
-                            if vm.options.trace.is_enabled("jit") {
-                                eprintln!(
-                                    "[jit] OSR-heal: nm={} v{} -> nm={} (warm whole-body, \
+                        .is_some_and(|nm| matches!(nm.state, NmState::Alive))
+                });
+                // OSR-heal (see `Nmethod::osr_cold_sends` and the c2i hatch's
+                // twin of this arm): a half-warm OSR nmethod is replaced by a
+                // warm whole-body compile instead of being reused. On this path
+                // the warmth comes from the PREVIOUS interpreted call(s) —
+                // ordinary dispatch has been declining the OSR nmethod
+                // (`resolve_target_entry`), so this method has been
+                // interpreting end-to-end since the OSR compile.
+                let existing = match existing {
+                    Some(id)
+                        if vm
+                            .code_table
+                            .get(id)
+                            .is_some_and(|nm| nm.is_half_warm_osr()) =>
+                    {
+                        let old_version = vm.code_table.get(id).unwrap().version;
+                        match crate::compiler::driver::compile_method_versioned(
+                            vm,
+                            k,
+                            m,
+                            old_version + 1,
+                        ) {
+                            Some(new_id) => {
+                                vm.stats.recompiles += 1;
+                                if vm.options.trace.is_enabled("jit") {
+                                    eprintln!(
+                                        "[jit] OSR-heal: nm={} v{} -> nm={} (warm whole-body, \
                                      activate path)",
-                                    id.0, old_version, new_id.0
-                                );
+                                        id.0, old_version, new_id.0
+                                    );
+                                }
+                                crate::codecache::flush::make_not_entrant_lazy(vm, id);
+                                Some(new_id)
                             }
-                            crate::codecache::flush::make_not_entrant_lazy(vm, id);
-                            Some(new_id)
+                            None => Some(id),
                         }
-                        None => Some(id),
                     }
-                }
-                other => other,
-            };
-            let compiled = existing.or_else(|| crate::compiler::driver::compile_method(vm, k, m));
-            if let Some(id) = compiled {
-                if let Some(ic_idx) = ic_site {
-                    // Re-derived fresh, not threaded through `ic_site` — see
-                    // this function's doc comment for why a caller
-                    // `MethodOop` captured back in `send_generic` can no
-                    // longer be trusted here.
-                    let caller = vm.regs.method.expect("activate_method: no active method");
-                    let epoch = vm.ic_epoch;
-                    // THE RICHARDS STORM FIX (2026-07-09): seed the caller's
-                    // IC only when doing so LOSES no receiver-klass history —
-                    // Empty (first observation) or Mono on the SAME klass (a
-                    // pure interpreted→compiled target upgrade, incl. the
-                    // post-recompile re-seed the S14 compile-storm fix above
-                    // relies on). An UNCONDITIONAL `set_mono_compiled` here
-                    // stomped a genuinely polymorphic site back to
-                    // Mono(current receiver) on every over-threshold
-                    // dispatch: `ic_transition` would upgrade Mono(A)→
-                    // Poly[A,B], and this line immediately rewrote it to
-                    // Mono(B) — so the IC ping-ponged between Mono states
-                    // forever, `feedback::snapshot_profile`'s tag-only hash
-                    // never changed, `recompile::note_uncommon_trap` declined
-                    // every recompile as "profile unchanged", and each
-                    // customized compile of the CALLER baked whichever klass
-                    // had been stomped in last as a mono-inline KlassGuard —
-                    // whose fail-edge UncommonTrap then fired on roughly
-                    // every other call, ~160k deopts per warm Richards run
-                    // (`addInput:checkPriority:`'s `oldTask priority` site,
-                    // four Task subclasses; docs/PERF.md "Dual-arm branch
-                    // storm" CORRECTION entry has the full diagnosis).
-                    // Leaving a Poly/Mega/other-klass-Mono IC untouched costs
-                    // nothing: `enter_compiled` below runs either way (the
-                    // IC write is a dispatch cache, never load-bearing), and
-                    // the preserved Poly tag is exactly what lets the
-                    // existing recompile machinery re-lower the caller's
-                    // send to DominantWithSlowPath/Call — real dispatch, no
-                    // trap — which kills the storm through the front door.
-                    let seed_ok = match crate::interpreter::ic::ic_state(caller, ic_idx) {
-                        crate::interpreter::ic::IcState::Empty => true,
-                        crate::interpreter::ic::IcState::Mono => {
-                            InterpreterIc::at(caller, ic_idx).guard().raw() == k.oop().raw()
+                    other => other,
+                };
+                let compiled =
+                    existing.or_else(|| crate::compiler::driver::compile_method(vm, k, m));
+                if let Some(id) = compiled {
+                    if let Some(ic_idx) = ic_site {
+                        // Re-derived fresh, not threaded through `ic_site` — see
+                        // this function's doc comment for why a caller
+                        // `MethodOop` captured back in `send_generic` can no
+                        // longer be trusted here.
+                        let caller = vm.regs.method.expect("activate_method: no active method");
+                        let epoch = vm.ic_epoch;
+                        // THE RICHARDS STORM FIX (2026-07-09): seed the caller's
+                        // IC only when doing so LOSES no receiver-klass history —
+                        // Empty (first observation) or Mono on the SAME klass (a
+                        // pure interpreted→compiled target upgrade, incl. the
+                        // post-recompile re-seed the S14 compile-storm fix above
+                        // relies on). An UNCONDITIONAL `set_mono_compiled` here
+                        // stomped a genuinely polymorphic site back to
+                        // Mono(current receiver) on every over-threshold
+                        // dispatch: `ic_transition` would upgrade Mono(A)→
+                        // Poly[A,B], and this line immediately rewrote it to
+                        // Mono(B) — so the IC ping-ponged between Mono states
+                        // forever, `feedback::snapshot_profile`'s tag-only hash
+                        // never changed, `recompile::note_uncommon_trap` declined
+                        // every recompile as "profile unchanged", and each
+                        // customized compile of the CALLER baked whichever klass
+                        // had been stomped in last as a mono-inline KlassGuard —
+                        // whose fail-edge UncommonTrap then fired on roughly
+                        // every other call, ~160k deopts per warm Richards run
+                        // (`addInput:checkPriority:`'s `oldTask priority` site,
+                        // four Task subclasses; docs/PERF.md "Dual-arm branch
+                        // storm" CORRECTION entry has the full diagnosis).
+                        // Leaving a Poly/Mega/other-klass-Mono IC untouched costs
+                        // nothing: `enter_compiled` below runs either way (the
+                        // IC write is a dispatch cache, never load-bearing), and
+                        // the preserved Poly tag is exactly what lets the
+                        // existing recompile machinery re-lower the caller's
+                        // send to DominantWithSlowPath/Call — real dispatch, no
+                        // trap — which kills the storm through the front door.
+                        let seed_ok = match crate::interpreter::ic::ic_state(caller, ic_idx) {
+                            crate::interpreter::ic::IcState::Empty => true,
+                            crate::interpreter::ic::IcState::Mono => {
+                                InterpreterIc::at(caller, ic_idx).guard().raw() == k.oop().raw()
+                            }
+                            crate::interpreter::ic::IcState::Poly(_)
+                            | crate::interpreter::ic::IcState::Mega => false,
+                        };
+                        if seed_ok {
+                            InterpreterIc::at(caller, ic_idx).set_mono_compiled(vm, k, id, epoch);
                         }
-                        crate::interpreter::ic::IcState::Poly(_)
-                        | crate::interpreter::ic::IcState::Mega => false,
-                    };
-                    if seed_ok {
-                        InterpreterIc::at(caller, ic_idx).set_mono_compiled(vm, k, id, epoch);
                     }
-                }
-                match enter_compiled(vm, id, argc) {
-                    EnterResult::Completed => return SendOutcome::Normal,
-                    EnterResult::Nlr(step) => return SendOutcome::Nlr(step),
-                    EnterResult::Bailout => {
-                        // D1: sound to just fall through to the normal
-                        // interpreted body below, for this one call — no
-                        // observable effect could have preceded a bailout.
+                    match enter_compiled(vm, id, argc) {
+                        EnterResult::Completed => return SendOutcome::Normal,
+                        EnterResult::Nlr(step) => return SendOutcome::Nlr(step),
+                        EnterResult::Bailout => {
+                            // D1: sound to just fall through to the normal
+                            // interpreted body below, for this one call — no
+                            // observable effect could have preceded a bailout.
+                        }
                     }
                 }
             }

@@ -1,0 +1,191 @@
+"── 102_winui_colour.mst — WG5c D4: applying the colour ──────────────────
+ docs/sprints/sprint_wg5c_detail.md D4. The tokenizer (100) says WHAT to
+ colour and this file makes it happen, over the RichEdit surfaces 101
+ created. Nothing here draws anything: RichEdit does, told by
+ EM_SETCHARFORMAT over a selection.
+
+ THE WHOLE STRUCT IS DERIVED, not transcribed. `CHARFORMAT2W`'s size and
+ every offset come from winkb — and the interesting part is that
+ Win32Metadata records CHARFORMAT2W as INHERITING CHARFORMATW through a
+ `Base` field at offset 0, so `cbSize`/`dwMask`/`crTextColor` are looked up
+ on the base type. Asking the database rather than counting bytes is what
+ makes that a two-line fact instead of a silent off-by-92 bug.
+
+ THREE HAZARDS, all of which are about not making the editor worse:
+
+   1. RECOLOURING MOVES THE SELECTION. EM_SETCHARFORMAT applies to the
+      selection, so colouring N runs means N selection changes — and if the
+      caret is not put back exactly where the user left it, their next
+      keystroke lands somewhere else. Saved and restored around the whole
+      pass, and the scroll position with it.
+   2. IT WOULD FLICKER. N selection changes with redraw on is N repaints of
+      the pane. WM_SETREDRAW off for the duration, one InvalidateRect at the
+      end.
+   3. IT WOULD LOOP. EM_SETCHARFORMAT can itself raise EN_CHANGE, which is
+      what marks the pane dirty, which schedules another colouring. Guarded
+      by a flag that is set for exactly the length of the pass."
+
+Object subclass: WinShell [
+    <classVars: ColourScratch ColourRange Colouring PendingColour LastEditMs ColourPasses ColourRuns>
+
+    "── The CHARFORMAT2W buffer, built once ──────────────────────────────"
+
+    WinShell class >> colourScratch ^ <Integer> [
+        ColourScratch isNil ifTrue: [
+            ColourScratch := WinArena alloc: (WinApi sizeOf: 'CHARFORMAT2W') ].
+        ^ColourScratch
+    ]
+
+    WinShell class >> colourRangeScratch ^ <Integer> [
+        ColourRange isNil ifTrue: [ ColourRange := WinArena alloc: (WinApi sizeOf: 'CHARRANGE') ].
+        ^ColourRange
+    ]
+
+    WinShell class >> charFormatFor: aColorRef <Integer> ^ <Integer> [
+        "cbSize must be the FULL CHARFORMAT2W size even though every field we
+         set lives in the CHARFORMATW base — it is how RichEdit decides which
+         struct it was handed, and getting it wrong means the extended fields
+         are read from whatever follows our buffer.
+
+         dwMask says `only the colour is meaningful`, so the face, size and
+         effects the pane already has are left exactly alone. A mask that
+         claimed more would silently reset the font on every keystroke."
+        | p |
+        p := self colourScratch.
+        WinArena u32At: p + (WinApi offsetOf: 'CHARFORMATW' field: 'cbSize')
+            put: (WinApi sizeOf: 'CHARFORMAT2W').
+        WinArena u32At: p + (WinApi offsetOf: 'CHARFORMATW' field: 'dwMask')
+            put: (WinApi constant: 'CFM_COLOR').
+        WinArena u32At: p + (WinApi offsetOf: 'CHARFORMATW' field: 'dwEffects') put: 0.
+        WinArena u32At: p + (WinApi offsetOf: 'CHARFORMATW' field: 'crTextColor') put: aColorRef.
+        ^p
+    ]
+
+    "── Selection, in the control's own coordinates ──────────────────────"
+
+    WinShell class >> selectionOf: c <Object> ^ <Array> [
+        "EM_EXGETSEL rather than EM_GETSEL: the EX form uses a CHARRANGE with
+         32-bit members and so survives a document longer than 64K, which is
+         not hypothetical for a class's whole source."
+        | p |
+        p := self colourRangeScratch.
+        WinArena u32At: p put: 0.
+        WinArena u32At: p + 4 put: 0.
+        c send: (WinApi constant: 'EM_EXGETSEL') wParam: 0 lParam: p.
+        ^Array
+            with: (WinArena u32At: p + (WinApi offsetOf: 'CHARRANGE' field: 'cpMin'))
+            with: (WinArena u32At: p + (WinApi offsetOf: 'CHARRANGE' field: 'cpMax'))
+    ]
+
+    WinShell class >> select: c <Object> from: a <Integer> to: b <Integer> [
+        | p |
+        p := self colourRangeScratch.
+        WinArena u32At: p + (WinApi offsetOf: 'CHARRANGE' field: 'cpMin') put: a.
+        WinArena u32At: p + (WinApi offsetOf: 'CHARRANGE' field: 'cpMax') put: b.
+        c send: (WinApi constant: 'EM_EXSETSEL') wParam: 0 lParam: p.
+        ^self
+    ]
+
+    "── The pass ─────────────────────────────────────────────────────────"
+
+    WinShell class >> colourise: aName <Symbol> ^ <Integer> [
+        "Answers how many runs were coloured, so a gate can tell `it ran and
+         found nothing` from `it never ran`.
+
+         OFFSETS: the tokenizer counts in the guest String's own units and
+         EM_EXSETSEL counts in the control's. They agree for every character
+         below U+0080 and diverge above it — the same boundary rule WG5a
+         records for EM_GETSEL. Left as-is deliberately rather than
+         half-converted: the honest fix is one conversion at this boundary
+         when the panes first hold non-ASCII, and a partial one now would be
+         harder to find later than none."
+        | c src runs sel |
+        Colouring == true ifTrue: [ ^0 ].
+        c := self controlNamed: aName.
+        c isNil ifTrue: [ ^0 ].
+        src := c text.
+        (src isNil or: [ src isEmpty ]) ifTrue: [ ^0 ].
+        runs := WinSyntax colouredRunsFor: src.
+        Colouring := true.
+        sel := self selectionOf: c.
+        "Redraw OFF for the whole pass: N runs would otherwise be N repaints
+         of the pane, which is visible as a flicker and is most of the cost."
+        c send: (WinApi constant: 'WM_SETREDRAW') wParam: 0 lParam: 0.
+        [ runs do: [ :r |
+            self select: c from: (r at: 1) - 1 to: (r at: 1) - 1 + (r at: 2).
+            c send: (WinApi constant: 'EM_SETCHARFORMAT')
+                wParam: (WinApi constant: 'SCF_SELECTION')
+                lParam: (self charFormatFor: (WinSyntax colorFor: (r at: 3))) ] ]
+            ensure: [
+                "PUT THE CARET BACK, whatever happened. A colouring pass that
+                 raised half way through and left the selection on the last
+                 run it touched would move the user's cursor as a side effect
+                 of an error they never saw."
+                self select: c from: (sel at: 1) to: (sel at: 2).
+                c send: (WinApi constant: 'WM_SETREDRAW') wParam: 1 lParam: 0.
+                WinApi invalidateRect: c handle rect: 0 erase: 0.
+                Colouring := false ].
+        ColourPasses := (ColourPasses isNil ifTrue: [ 0 ] ifFalse: [ ColourPasses ]) + 1.
+        ColourRuns := runs size.
+        ^runs size
+    ]
+
+    "── The trigger: on idle, never per keystroke ────────────────────────"
+
+    WinShell class >> enableChangeNotifications: c <Object> [
+        "A RichEdit sends NO notifications by default — unlike a plain EDIT,
+         which is a difference that reads as `my EN_CHANGE handler never
+         fires` and has nothing to do with the handler. ENM_CHANGE turns it
+         on."
+        c ifNotNil: [ :x |
+            x send: (WinApi constant: 'EM_SETEVENTMASK')
+                wParam: 0 lParam: (WinApi constant: 'ENM_CHANGE') ].
+        ^self
+    ]
+
+    WinShell class >> noteEdit: aName <Symbol> [
+        "EN_CHANGE arrived. Record WHEN rather than colouring now: colouring
+         on every keystroke is how an editor earns a reputation for lag, and
+         the work is proportional to the whole document rather than to the
+         edit."
+        Colouring == true ifTrue: [ ^self ].
+        PendingColour := aName.
+        LastEditMs := Time millisecondClockValue.
+        ^self
+    ]
+
+    WinShell class >> colourQuietMs ^ <Integer> [
+        "Long enough that a burst of typing is one pass, short enough that it
+         feels immediate when you stop. 200ms is roughly the gap between
+         words for a fast typist."
+        ^200
+    ]
+
+    WinShell class >> serviceColourIdle ^ <Boolean> [
+        "Called from the drain. Answers whether it coloured anything, so the
+         pass count is a fact rather than an assumption."
+        | name |
+        PendingColour isNil ifTrue: [ ^false ].
+        (Time millisecondClockValue - LastEditMs) < self colourQuietMs ifTrue: [ ^false ].
+        "CLEARED BEFORE the pass, not after. Colouring can itself raise
+         EN_CHANGE; `Colouring` blocks `noteEdit:` for the duration, but
+         clearing first means that even if some other path sets it mid-pass
+         the request survives rather than being wiped by a stale assignment."
+        name := PendingColour.
+        PendingColour := nil.
+        self colourise: name.
+        ^true
+    ]
+
+    WinShell class >> isCodePane: aName <Symbol> ^ <Boolean> [
+        "The two surfaces 101 swapped, named in one place so the EN_CHANGE
+         route and any future colouring caller cannot disagree about which
+         controls are code."
+        ^aName == #browserSource or: [ aName == (self contentNameFor: #workspace) ]
+    ]
+
+    WinShell class >> colourPasses ^ <Integer> [
+        ^ColourPasses isNil ifTrue: [ 0 ] ifFalse: [ ColourPasses ] ]
+    WinShell class >> colourRuns ^ <Integer> [
+        ^ColourRuns isNil ifTrue: [ 0 ] ifFalse: [ ColourRuns ] ]
+]

@@ -33,6 +33,13 @@
      reason and nothing fails. The pure-Smalltalk half still runs."
 
 TestCase subclass: WinUiProbeTests [
+    WinUiProbeTests class >> isEnabled ^ <Boolean> [
+        "WG9-2: the gate that used to live only in
+         `99_run_all.mst`'s guards, moved here so DISCOVERY can see
+         it too (`TestRunner allTestClasses`). platform-gated; see 99_run_all.mst's bookkeeping note."
+        ^Smalltalk platformName == #windows
+    ]
+
 
     runAll [
         "The UTF-16 encoder and the WinRef sketch are pure Smalltalk — no

@@ -187,23 +187,26 @@ fn walk_expr(ctx: &mut WalkCtx, scope: &mut Scope, expr: &Expr) {
         Expr::Assign { name, value, .. } => {
             walk_expr(ctx, scope, value);
             let declared = match scope.lookup(name) {
-                Some(t) => t.map(ResolvedType::Written).unwrap_or(ResolvedType::Dynamic),
+                Some(t) => t
+                    .map(ResolvedType::Written)
+                    .unwrap_or(ResolvedType::Dynamic),
                 None => ivar_type(ctx.model, ctx.class_name, name),
             };
             let actual = synthesize(ctx, scope, value);
             let mut trail = Trail::new();
             if !subtype_of(ctx.model, ctx.class_name, &actual, &declared, &mut trail) {
-                ctx.errors.push(super::check::TypeError::AssignmentNotSubtype {
-                    site: AnnotationSite {
-                        class_name: ctx.class_name.to_string(),
-                        class_side: ctx.class_side,
-                        selector: Some(ctx.selector.to_string()),
-                        slot: format!("assignment to '{name}'"),
-                    },
-                    var_name: name.clone(),
-                    declared: declared.to_string(),
-                    actual: actual.to_string(),
-                });
+                ctx.errors
+                    .push(super::check::TypeError::AssignmentNotSubtype {
+                        site: AnnotationSite {
+                            class_name: ctx.class_name.to_string(),
+                            class_side: ctx.class_side,
+                            selector: Some(ctx.selector.to_string()),
+                            slot: format!("assignment to '{name}'"),
+                        },
+                        var_name: name.clone(),
+                        declared: declared.to_string(),
+                        actual: actual.to_string(),
+                    });
             }
         }
         Expr::Send {
@@ -218,7 +221,8 @@ fn walk_expr(ctx: &mut WalkCtx, scope: &mut Scope, expr: &Expr) {
                 walk_expr(ctx, scope, a);
             }
             let receiver_type = synthesize(ctx, scope, receiver);
-            let arg_types: Vec<ResolvedType> = args.iter().map(|a| synthesize(ctx, scope, a)).collect();
+            let arg_types: Vec<ResolvedType> =
+                args.iter().map(|a| synthesize(ctx, scope, a)).collect();
             let site = AnnotationSite {
                 class_name: ctx.class_name.to_string(),
                 class_side: ctx.class_side,
@@ -305,7 +309,13 @@ fn walk_expr(ctx: &mut WalkCtx, scope: &mut Scope, expr: &Expr) {
             walk_expr(ctx, scope, value);
             let actual = synthesize(ctx, scope, value);
             let mut trail = Trail::new();
-            if !subtype_of(ctx.model, ctx.class_name, &actual, ctx.declared_return, &mut trail) {
+            if !subtype_of(
+                ctx.model,
+                ctx.class_name,
+                &actual,
+                ctx.declared_return,
+                &mut trail,
+            ) {
                 ctx.errors.push(super::check::TypeError::ReturnNotSubtype {
                     site: AnnotationSite {
                         class_name: ctx.class_name.to_string(),
@@ -356,7 +366,9 @@ fn synthesize(ctx: &mut WalkCtx, scope: &Scope, expr: &Expr) -> ResolvedType {
     match expr {
         Expr::SelfRef(_) => ResolvedType::named("Self"),
         Expr::Var { name, .. } => match scope.lookup(name) {
-            Some(t) => t.map(ResolvedType::Written).unwrap_or(ResolvedType::Dynamic),
+            Some(t) => t
+                .map(ResolvedType::Written)
+                .unwrap_or(ResolvedType::Dynamic),
             None => ivar_type(ctx.model, ctx.class_name, name),
         },
         Expr::Lit { value, .. } => type_of_literal(value),
@@ -369,7 +381,8 @@ fn synthesize(ctx: &mut WalkCtx, scope: &Scope, expr: &Expr) -> ResolvedType {
             ..
         } => {
             let receiver_type = synthesize(ctx, scope, receiver);
-            let arg_types: Vec<ResolvedType> = args.iter().map(|a| synthesize(ctx, scope, a)).collect();
+            let arg_types: Vec<ResolvedType> =
+                args.iter().map(|a| synthesize(ctx, scope, a)).collect();
             let mut discard = Vec::new();
             super::send::check_send(
                 ctx.model,
@@ -404,7 +417,8 @@ fn synthesize(ctx: &mut WalkCtx, scope: &Scope, expr: &Expr) -> ResolvedType {
             else {
                 return ResolvedType::Dynamic; // parser-guaranteed non-empty; defensive fallback only
             };
-            let arg_types: Vec<ResolvedType> = args.iter().map(|a| synthesize(ctx, scope, a)).collect();
+            let arg_types: Vec<ResolvedType> =
+                args.iter().map(|a| synthesize(ctx, scope, a)).collect();
             let mut discard = Vec::new();
             super::send::check_send(
                 ctx.model,

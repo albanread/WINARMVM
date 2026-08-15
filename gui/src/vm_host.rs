@@ -809,11 +809,10 @@ fn worker_loop(
         Some(_) => {
             let img_path = image_path.clone();
             Arc::new(move || {
-                let img = image_store::Image::open(&img_path).map_err(|e| {
-                    macvm::runtime::VmError {
+                let img =
+                    image_store::Image::open(&img_path).map_err(|e| macvm::runtime::VmError {
                         msg: format!("worker image open: {e}"),
-                    }
-                })?;
+                    })?;
                 let mut h = VmHandle::boot_without_world(gui_vm_options());
                 crate::world_boot::load_world_from_image(&mut h, &img, WORLD_LISTS, WORLD_DOITS)
                     .map_err(|msg| macvm::runtime::VmError { msg })?;
@@ -934,11 +933,7 @@ pub(crate) fn gui_vm_options() -> macvm::runtime::VmOptions {
 /// Boots the real embedded VM (SPEC §16.2, `src/embed.rs`) against
 /// `world_dir` using [`gui_vm_options`] (JIT on by default). Used as the
 /// `.mst` fallback when the image database can't be established.
-fn boot_real_vm(
-    responses: Sender<VmResponse>,
-    wake: Waker,
-    world_dir: &Path,
-) -> Option<VmHandle> {
+fn boot_real_vm(responses: Sender<VmResponse>, wake: Waker, world_dir: &Path) -> Option<VmHandle> {
     let opts = gui_vm_options();
     match VmHandle::boot(opts, world_dir) {
         Ok(mut vm) => {
@@ -1269,7 +1264,10 @@ fn render_definition_results(img: &image_store::Image, query: &str) -> String {
         crate::preprocess::html_escape_text(query)
     );
     if hits.is_empty() {
-        return find_results_wrap(&head, "<div class=\"st-find-empty\">(no matching classes)</div>");
+        return find_results_wrap(
+            &head,
+            "<div class=\"st-find-empty\">(no matching classes)</div>",
+        );
     }
     let items: String = hits
         .iter()
@@ -1285,9 +1283,15 @@ fn render_definition_results(img: &image_store::Image, query: &str) -> String {
 /// either side, from image_store (SQL, no VM round trip).
 fn render_implementors_results(img: &image_store::Image, query: &str) -> String {
     let hits = img.implementors_of(query).unwrap_or_default();
-    let head = format!("Implementors of {}", crate::preprocess::html_escape_text(query));
+    let head = format!(
+        "Implementors of {}",
+        crate::preprocess::html_escape_text(query)
+    );
     if hits.is_empty() {
-        return find_results_wrap(&head, "<div class=\"st-find-empty\">(no implementors)</div>");
+        return find_results_wrap(
+            &head,
+            "<div class=\"st-find-empty\">(no implementors)</div>",
+        );
     }
     let items: String = hits
         .iter()
@@ -1479,7 +1483,7 @@ fn persist_editor_class(img: &image_store::Image, text: &str) -> String {
             image_store::Side::Instance
         };
         match stored.get(&(m.selector.clone(), m.is_class_side)) {
-            Some(old) if *old == m.source => {}                     // unchanged: skip
+            Some(old) if *old == m.source => {} // unchanged: skip
             Some(_) => {
                 let _ = img.create_or_reopen_method(&cls.name, side, &m.selector, "", &m.source);
                 changed += 1;
@@ -1705,7 +1709,9 @@ fn handle(
                 Some(selector) => {
                     world.create_or_reopen_method(&cls, mirror_side, &selector, category, &text);
                     let image_err = image.and_then(|img| {
-                        match img.create_or_reopen_method(&cls, img_side, &selector, category, &text) {
+                        match img
+                            .create_or_reopen_method(&cls, img_side, &selector, category, &text)
+                        {
                             Ok(Some(_)) => None,
                             Ok(None) => Some("class not found in the image".to_string()),
                             Err(e) => Some(e.to_string()),
@@ -1881,7 +1887,9 @@ fn handle(
                              to the running VM (instance shape is fixed once a class is defined)."
                         ),
                         Some(ie) => {
-                            format!("Added instance variable {name} to {cls}, but image issue: {ie}.")
+                            format!(
+                                "Added instance variable {name} to {cls}, but image issue: {ie}."
+                            )
                         }
                     }
                 }
@@ -1941,7 +1949,9 @@ fn handle(
                         id: widget_id,
                     }]
                 }
-                None => vec![VmResponse::Transcript(format!("(cannot open {root} hierarchy)"))],
+                None => vec![VmResponse::Transcript(format!(
+                    "(cannot open {root} hierarchy)"
+                ))],
             }
         }
         VmRequest::Find { tool, query } => {
@@ -2546,8 +2556,7 @@ impl CanvasCommands {
 /// dependency for the one place bulk binary crosses `evaluateJavaScript` (a
 /// `CanvasPixels` RGBA buffer). `atob` on the JS side decodes it.
 fn base64_encode(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
         let b0 = chunk[0] as usize;
@@ -3018,7 +3027,10 @@ mod tests {
         // base64 of 40*30*4 = 4800 bytes → 6400 chars (4800 is divisible by 3,
         // so no padding).
         assert_eq!(base64.len(), 6400, "base64 length must match 40x30 RGBA");
-        assert!(timing.contains("ms"), "must report compute time, got {timing:?}");
+        assert!(
+            timing.contains("ms"),
+            "must report compute time, got {timing:?}"
+        );
     }
 
     #[test]
@@ -3198,7 +3210,10 @@ mod tests {
             [VmResponse::SmapplFragment { html, .. }] => html.clone(),
             other => panic!("expected nav button fragment, got {other:?}"),
         };
-        let ns = nav_html.find(marker).expect("nav fragment has an action id") + marker.len();
+        let ns = nav_html
+            .find(marker)
+            .expect("nav fragment has an action id")
+            + marker.len();
         let ne = nav_html[ns..].find('"').unwrap() + ns;
         let nav_fired = handle(
             VmRequest::SmapplAction {
@@ -3244,7 +3259,9 @@ mod tests {
             &mut vm,
         );
         assert!(
-            codeview.iter().any(|r| matches!(r, VmResponse::SmapplFragment { html, .. }
+            codeview
+                .iter()
+                .any(|r| matches!(r, VmResponse::SmapplFragment { html, .. }
                 if html.contains("st-smappl-codeview") && html.contains("a &lt; b"))),
             "CodeView renders a source box with escaped source, got {codeview:?}"
         );
@@ -3292,8 +3309,7 @@ mod tests {
     #[test]
     fn add_variable_class_var_is_live_instance_var_awaits_restart() {
         OPEN_OUTLINERS.with(|o| o.borrow_mut().clear());
-        let tmp =
-            std::env::temp_dir().join(format!("macvm_addvar_{}.sqlite3", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("macvm_addvar_{}.sqlite3", std::process::id()));
         std::fs::remove_file(&tmp).ok();
         let image = open_or_seed_image(&test_world_dir(), &tmp).expect("seed");
         // Mirror the image (so the mock's Point superclass matches the VM's — the
@@ -3301,7 +3317,11 @@ mod tests {
         let mut world = mock_world_from_image(&image);
         let mut sel = BrowserSelection::default();
         let mut vm = test_vm_handle(macvm::runtime::JitMode::Off);
-        let add = |world: &mut MockWorld, sel: &mut BrowserSelection, vm: &mut VmHandle, cv: bool, name: &str| {
+        let add = |world: &mut MockWorld,
+                   sel: &mut BrowserSelection,
+                   vm: &mut VmHandle,
+                   cv: bool,
+                   name: &str| {
             handle(
                 VmRequest::SmapplAddVar {
                     cls: "Point".to_string(),
@@ -3429,8 +3449,7 @@ mod tests {
     fn open_class_drills_into_a_method_browser_with_a_back_link() {
         OPEN_OUTLINERS.with(|o| o.borrow_mut().clear());
         let world_dir = test_world_dir();
-        let tmp = std::env::temp_dir()
-            .join(format!("macvm_drill_{}.sqlite3", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("macvm_drill_{}.sqlite3", std::process::id()));
         std::fs::remove_file(&tmp).ok();
         let image = open_or_seed_image(&world_dir, &tmp).expect("seed");
         let mut vm = VmHandle::boot_without_world(macvm::runtime::VmOptions {
@@ -3438,7 +3457,8 @@ mod tests {
             jit: macvm::runtime::JitMode::Off,
             ..Default::default()
         });
-        crate::world_boot::load_world_from_image(&mut vm, &image, WORLD_LISTS, WORLD_DOITS).expect("db load");
+        crate::world_boot::load_world_from_image(&mut vm, &image, WORLD_LISTS, WORLD_DOITS)
+            .expect("db load");
         let mut world = MockWorld::seed();
         let mut sel = BrowserSelection::default();
 
@@ -3496,8 +3516,7 @@ mod tests {
     fn accept_refreshes_other_open_outliners_but_not_the_edited_one() {
         OPEN_OUTLINERS.with(|o| o.borrow_mut().clear());
         let world_dir = test_world_dir();
-        let tmp = std::env::temp_dir()
-            .join(format!("macvm_sync_{}.sqlite3", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("macvm_sync_{}.sqlite3", std::process::id()));
         std::fs::remove_file(&tmp).ok();
         let image = open_or_seed_image(&world_dir, &tmp).expect("seed");
         let mut vm = VmHandle::boot_without_world(macvm::runtime::VmOptions {
@@ -3505,7 +3524,8 @@ mod tests {
             jit: macvm::runtime::JitMode::Off,
             ..Default::default()
         });
-        crate::world_boot::load_world_from_image(&mut vm, &image, WORLD_LISTS, WORLD_DOITS).expect("db load");
+        crate::world_boot::load_world_from_image(&mut vm, &image, WORLD_LISTS, WORLD_DOITS)
+            .expect("db load");
         let mut world = MockWorld::seed();
         let mut sel = BrowserSelection::default();
 
@@ -3564,8 +3584,7 @@ mod tests {
     fn outliner_creates_and_versions_a_new_method_and_class() {
         OPEN_OUTLINERS.with(|o| o.borrow_mut().clear());
         let world_dir = test_world_dir();
-        let tmp =
-            std::env::temp_dir().join(format!("macvm_newmc_{}.sqlite3", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("macvm_newmc_{}.sqlite3", std::process::id()));
         std::fs::remove_file(&tmp).ok();
         let image = open_or_seed_image(&world_dir, &tmp).expect("seed");
         let mut vm = VmHandle::boot_without_world(macvm::runtime::VmOptions {
@@ -3573,7 +3592,8 @@ mod tests {
             jit: macvm::runtime::JitMode::Off,
             ..Default::default()
         });
-        crate::world_boot::load_world_from_image(&mut vm, &image, WORLD_LISTS, WORLD_DOITS).expect("db load");
+        crate::world_boot::load_world_from_image(&mut vm, &image, WORLD_LISTS, WORLD_DOITS)
+            .expect("db load");
         let mut world = MockWorld::seed();
         let mut sel = BrowserSelection::default();
 
@@ -3614,7 +3634,9 @@ mod tests {
             &mut vm,
         );
         assert!(
-            r.iter().any(|resp| matches!(resp, VmResponse::Transcript(t) if t.contains("Created WidgetX"))),
+            r.iter().any(
+                |resp| matches!(resp, VmResponse::Transcript(t) if t.contains("Created WidgetX"))
+            ),
             "new-class transcript, got {r:?}"
         );
         assert!(
@@ -3642,7 +3664,9 @@ mod tests {
             &mut vm,
         );
         assert!(
-            dup.iter().any(|resp| matches!(resp, VmResponse::Transcript(t) if t.contains("already exists"))),
+            dup.iter().any(
+                |resp| matches!(resp, VmResponse::Transcript(t) if t.contains("already exists"))
+            ),
             "duplicate class must be refused, got {dup:?}"
         );
 
@@ -3659,8 +3683,8 @@ mod tests {
     fn browser_save_source_new_method_and_new_class_get_a_home_in_the_image() {
         OPEN_OUTLINERS.with(|o| o.borrow_mut().clear());
         let world_dir = test_world_dir();
-        let tmp = std::env::temp_dir()
-            .join(format!("macvm_browser_home_{}.sqlite3", std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("macvm_browser_home_{}.sqlite3", std::process::id()));
         std::fs::remove_file(&tmp).ok();
         let image = open_or_seed_image(&world_dir, &tmp).expect("seed");
         let mut vm = VmHandle::boot_without_world(macvm::runtime::VmOptions {
@@ -3668,7 +3692,8 @@ mod tests {
             jit: macvm::runtime::JitMode::Off,
             ..Default::default()
         });
-        crate::world_boot::load_world_from_image(&mut vm, &image, WORLD_LISTS, WORLD_DOITS).expect("db load");
+        crate::world_boot::load_world_from_image(&mut vm, &image, WORLD_LISTS, WORLD_DOITS)
+            .expect("db load");
         let mut world = MockWorld::seed();
 
         // A new method on an existing class (Point, already used above).
@@ -3737,8 +3762,7 @@ mod tests {
     fn smappl_accept_versions_the_edit_and_makes_it_live() {
         OPEN_OUTLINERS.with(|o| o.borrow_mut().clear());
         let world_dir = test_world_dir();
-        let tmp = std::env::temp_dir()
-            .join(format!("macvm_accept_{}.sqlite3", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("macvm_accept_{}.sqlite3", std::process::id()));
         std::fs::remove_file(&tmp).ok();
         let image = open_or_seed_image(&world_dir, &tmp).expect("seed");
 
@@ -3747,7 +3771,8 @@ mod tests {
             jit: macvm::runtime::JitMode::Off,
             ..Default::default()
         });
-        crate::world_boot::load_world_from_image(&mut vm, &image, WORLD_LISTS, WORLD_DOITS).expect("db load");
+        crate::world_boot::load_world_from_image(&mut vm, &image, WORLD_LISTS, WORLD_DOITS)
+            .expect("db load");
         let mut world = MockWorld::seed();
         let mut selection = BrowserSelection::default();
 
@@ -3825,8 +3850,7 @@ mod tests {
     fn smappl_new_method_skips_live_compile_when_the_vm_lacks_the_class() {
         OPEN_OUTLINERS.with(|o| o.borrow_mut().clear());
         let world_dir = test_world_dir();
-        let tmp =
-            std::env::temp_dir().join(format!("macvm_m5gate_{}.sqlite3", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("macvm_m5gate_{}.sqlite3", std::process::id()));
         std::fs::remove_file(&tmp).ok();
         // world.list AND cocoaui.list both land in the SAME image
         // (import_all_lists) — the image knows about CocoaHelp.
@@ -3941,8 +3965,7 @@ mod tests {
     #[test]
     fn class_outliner_source_is_filled_from_the_image() {
         let world_dir = test_world_dir();
-        let tmp = std::env::temp_dir()
-            .join(format!("macvm_co_src_{}.sqlite3", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("macvm_co_src_{}.sqlite3", std::process::id()));
         std::fs::remove_file(&tmp).ok();
         let image = open_or_seed_image(&world_dir, &tmp).expect("seed");
 
@@ -3951,7 +3974,8 @@ mod tests {
             jit: macvm::runtime::JitMode::Off,
             ..Default::default()
         });
-        crate::world_boot::load_world_from_image(&mut vm, &image, WORLD_LISTS, WORLD_DOITS).expect("db load");
+        crate::world_boot::load_world_from_image(&mut vm, &image, WORLD_LISTS, WORLD_DOITS)
+            .expect("db load");
 
         let mut world = MockWorld::seed();
         let mut selection = BrowserSelection::default();
@@ -3999,7 +4023,8 @@ mod tests {
             jit: macvm::runtime::JitMode::Off,
             ..Default::default()
         });
-        crate::world_boot::load_world_from_image(&mut vm, &image, WORLD_LISTS, WORLD_DOITS).expect("db load");
+        crate::world_boot::load_world_from_image(&mut vm, &image, WORLD_LISTS, WORLD_DOITS)
+            .expect("db load");
 
         let html = vm
             .render_fragment("Button labeled: 'DB' action: [ :b | b ]")
@@ -4194,7 +4219,10 @@ mod tests {
             None,
             &mut vm,
         ));
-        assert_eq!(text, "abX'c\ndef", "inserted at the given caret, whole buffer back");
+        assert_eq!(
+            text, "abX'c\ndef",
+            "inserted at the given caret, whole buffer back"
+        );
         assert_eq!(cur, 3, "0-based caret advanced past the inserted char");
 
         // Undo restores the original document.
@@ -4220,7 +4248,8 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("macvm_edacc_{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let img = image_store::Image::open(&tmp.join("image.sqlite3")).unwrap();
-        img.create_or_reopen_class("Object", None, "Kernel", "", "").unwrap();
+        img.create_or_reopen_class("Object", None, "Kernel", "", "")
+            .unwrap();
         img.create_or_reopen_class("FooShape", Some("Object"), "App", "", "a")
             .unwrap();
         img.create_or_reopen_method("FooShape", image_store::Side::Instance, "m", "", "m [ ^a ]")
@@ -4238,10 +4267,8 @@ mod tests {
 
         // 2) A SHAPE change (add instance var `b`, add method `n`) parses and
         //    saves to the image — the old live-install path failed here.
-        vm.exec(
-            "EditorSession openOn: 'Object subclass: FooShape [ | a b | m [ ^a ] n [ ^b ] ]'",
-        )
-        .unwrap();
+        vm.exec("EditorSession openOn: 'Object subclass: FooShape [ | a b | m [ ^a ] n [ ^b ] ]'")
+            .unwrap();
         let ok = editor_accept_response(&mut vm, Some(&img), &tmp);
         match &ok {
             VmResponse::Transcript(t) => assert!(
@@ -4269,12 +4296,20 @@ mod tests {
     #[test]
     fn persist_editor_class_writes_only_the_diff() {
         let img = image_store::Image::open_in_memory().unwrap();
-        img.create_or_reopen_class("Object", None, "Kernel", "", "").unwrap();
-        img.create_or_reopen_class("Foo", Some("Object"), "App", "", "").unwrap();
+        img.create_or_reopen_class("Object", None, "Kernel", "", "")
+            .unwrap();
+        img.create_or_reopen_class("Foo", Some("Object"), "App", "", "")
+            .unwrap();
         img.create_or_reopen_method("Foo", image_store::Side::Instance, "bar", "", "bar [ ^1 ]")
             .unwrap();
-        img.create_or_reopen_method("Foo", image_store::Side::Instance, "gone", "", "gone [ ^0 ]")
-            .unwrap();
+        img.create_or_reopen_method(
+            "Foo",
+            image_store::Side::Instance,
+            "gone",
+            "",
+            "gone [ ^0 ]",
+        )
+        .unwrap();
         let versions_of = |sel: &str| {
             img.method_version_count("Foo", image_store::Side::Instance, sel)
                 .unwrap()
@@ -4302,7 +4337,11 @@ mod tests {
         // Save again with no edits — nothing is written (no version churn).
         let msg2 = persist_editor_class(&img, text);
         assert!(msg2.contains("no changes"), "{msg2}");
-        assert_eq!(versions_of("bar"), 2, "an unchanged save must not re-version");
+        assert_eq!(
+            versions_of("bar"),
+            2,
+            "an unchanged save must not re-version"
+        );
     }
 
     /// Polls `drain_responses` (accumulating across calls) until `pred`
@@ -4329,25 +4368,21 @@ mod tests {
     /// (docs/multi-smalltalk-worker.md §3.1/§9: event-driven, zero polling).
     #[test]
     fn worker_reply_is_dispatched_by_the_inbox_wake() {
-        let tmp_dir =
-            std::env::temp_dir().join(format!("macvm_wkwake_{}", std::process::id()));
+        let tmp_dir = std::env::temp_dir().join(format!("macvm_wkwake_{}", std::process::id()));
         std::fs::create_dir_all(&tmp_dir).unwrap();
         {
             let img = image_store::Image::open(&tmp_dir.join("image.sqlite3")).unwrap();
             image_store::import::import_world_dir(&img, &test_world_dir()).unwrap();
         }
-        let host = spawn_with_world_and_timeout(
-            Waker::none(),
-            tmp_dir,
-            Duration::from_secs(30),
-        );
+        let host = spawn_with_world_and_timeout(Waker::none(), tmp_dir, Duration::from_secs(30));
         host.submit(VmRequest::Doit {
             code: "Worker onReply: [:m | Transcript show: 'WKREPLY ', m payload printString]."
                 .to_string(),
         });
         host.submit(VmRequest::Doit {
-            code: "(Worker spawn: 'Worker onMessage: [:m | Worker reply: m payload + 1]') send: 41."
-                .to_string(),
+            code:
+                "(Worker spawn: 'Worker onMessage: [:m | Worker reply: m payload + 1]') send: 41."
+                    .to_string(),
         });
         // From here on, NOTHING drives the primary except the wake: the reply
         // envelope must arrive, queue WorkerInbox, dispatch, and print.
@@ -4542,11 +4577,8 @@ mod tests {
             let img = image_store::Image::open(&tmp_dir.join("image.sqlite3")).unwrap();
             image_store::import::import_world_dir(&img, &test_world_dir()).unwrap();
         }
-        let host = spawn_with_world_and_timeout(
-            Waker::none(),
-            tmp_dir.clone(),
-            Duration::from_secs(30),
-        );
+        let host =
+            spawn_with_world_and_timeout(Waker::none(), tmp_dir.clone(), Duration::from_secs(30));
 
         // The original worker serves a request.
         host.submit(VmRequest::Doit {
@@ -4611,7 +4643,8 @@ mod tests {
             jit: macvm::runtime::JitMode::Off,
             ..Default::default()
         });
-        crate::world_boot::load_world_from_image(&mut vm, &image, WORLD_LISTS, WORLD_DOITS).expect("db load");
+        crate::world_boot::load_world_from_image(&mut vm, &image, WORLD_LISTS, WORLD_DOITS)
+            .expect("db load");
 
         vm.exec(
             "Object subclass: FFIProbe [\n\
@@ -4650,7 +4683,8 @@ mod tests {
             jit: macvm::runtime::JitMode::Off,
             ..Default::default()
         });
-        crate::world_boot::load_world_from_image(&mut vm, &image, WORLD_LISTS, WORLD_DOITS).expect("db load");
+        crate::world_boot::load_world_from_image(&mut vm, &image, WORLD_LISTS, WORLD_DOITS)
+            .expect("db load");
 
         let parse_ms = |vm: &mut VmHandle| -> i64 {
             vm.eval("Time millisecondClockValue.")

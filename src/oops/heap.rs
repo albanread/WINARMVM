@@ -183,9 +183,10 @@ impl MemOop {
         #[cfg(debug_assertions)]
         {
             let bound = self.body_word_count();
-            debug_assert!(            index < bound,
-            "body_addr: index {index} out of bounds ({bound})"
-        );
+            debug_assert!(
+                index < bound,
+                "body_addr: index {index} out of bounds ({bound})"
+            );
         }
         self.body_ptr(index) as usize
     }
@@ -199,9 +200,10 @@ impl MemOop {
         #[cfg(debug_assertions)]
         {
             let bound = self.body_word_count();
-            debug_assert!(            index < bound,
-            "body_oop: index {index} out of bounds ({bound})"
-        );
+            debug_assert!(
+                index < bound,
+                "body_oop: index {index} out of bounds ({bound})"
+            );
         }
         Oop::from_raw(self.raw_body_word(index))
     }
@@ -215,9 +217,10 @@ impl MemOop {
         #[cfg(debug_assertions)]
         {
             let bound = self.body_word_count();
-            debug_assert!(            index < bound,
-            "set_body_oop: index {index} out of bounds ({bound})"
-        );
+            debug_assert!(
+                index < bound,
+                "set_body_oop: index {index} out of bounds ({bound})"
+            );
         }
         self.set_raw_body_word(index, v.raw());
     }
@@ -303,9 +306,10 @@ impl MemOop {
         #[cfg(debug_assertions)]
         {
             let bound = self.body_word_count();
-            debug_assert!(            index < bound,
-            "body_word_raw: index {index} out of bounds ({bound})"
-        );
+            debug_assert!(
+                index < bound,
+                "body_word_raw: index {index} out of bounds ({bound})"
+            );
         }
         self.raw_body_word(index)
     }
@@ -319,9 +323,10 @@ impl MemOop {
         #[cfg(debug_assertions)]
         {
             let bound = self.body_word_count();
-            debug_assert!(            index < bound,
-            "set_body_word_raw: index {index} out of bounds ({bound})"
-        );
+            debug_assert!(
+                index < bound,
+                "set_body_word_raw: index {index} out of bounds ({bound})"
+            );
         }
         self.set_raw_body_word(index, w);
     }

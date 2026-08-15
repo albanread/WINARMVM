@@ -469,10 +469,9 @@ fn field_content(
             "pointer" | "interface" | "delegate" | "enum" => {}
             "primitive" => match ftype_name.as_str() {
                 "f32" | "f64" | "f32[]" | "f64[]" => return Ok(FieldContent::HasFp(fname)),
-                "u8" | "u16" | "u32" | "u64" | "usize" | "i8" | "i16" | "i32" | "i64"
-                | "isize" | "bool" | "char" | "string" | "u8[]" | "u16[]" | "u32[]"
-                | "u64[]" | "i8[]" | "i16[]" | "i32[]" | "i64[]" | "usize[]" | "isize[]"
-                | "char[]" | "void*[]" => {}
+                "u8" | "u16" | "u32" | "u64" | "usize" | "i8" | "i16" | "i32" | "i64" | "isize"
+                | "bool" | "char" | "string" | "u8[]" | "u16[]" | "u32[]" | "u64[]" | "i8[]"
+                | "i16[]" | "i32[]" | "i64[]" | "usize[]" | "isize[]" | "char[]" | "void*[]" => {}
                 // The `_Anonymous_e__Union`-style placeholders land here:
                 // an anonymous union may hold anything, doubles included.
                 _ => return Ok(FieldContent::Unknown(fname)),
@@ -515,8 +514,14 @@ pub fn lookup_function(name: &str) -> Result<FnSig, WinkbError> {
 
 #[cfg(windows)]
 fn lookup_function_conn(conn: &rusqlite::Connection, name: &str) -> Result<FnSig, WinkbError> {
-    let (fid, dll, callconv, is_variadic, ret_type): (i64, Option<String>, Option<String>, i64, Option<i64>) =
-        conn.query_row(
+    let (fid, dll, callconv, is_variadic, ret_type): (
+        i64,
+        Option<String>,
+        Option<String>,
+        i64,
+        Option<i64>,
+    ) = conn
+        .query_row(
             "SELECT function_id, dll_name, callconv, is_variadic, return_type_id
                FROM functions WHERE function_name = ?1 LIMIT 1",
             [name],
@@ -1008,10 +1013,8 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn db_missing_is_not_an_error() {
-        let ghost = std::env::temp_dir().join(format!(
-            "winkb_no_such_db_{}.sqlite3",
-            std::process::id()
-        ));
+        let ghost =
+            std::env::temp_dir().join(format!("winkb_no_such_db_{}.sqlite3", std::process::id()));
         let _ = std::fs::remove_file(&ghost);
         match open_at(&ghost) {
             Err(WinkbError::DbMissing(p)) => assert_eq!(p, ghost),
@@ -1100,7 +1103,10 @@ mod tests {
 
         // The variadic booby trap names BOTH conventions.
         let m = unsupported("FakeVariadic");
-        assert!(m.contains("VARIADIC") && m.contains("GPRs") && m.contains("stack"), "{m}");
+        assert!(
+            m.contains("VARIADIC") && m.contains("GPRs") && m.contains("stack"),
+            "{m}"
+        );
 
         // An x86 calling-convention row refuses (extern "system" ≡
         // extern "C" assert).
@@ -1115,7 +1121,10 @@ mod tests {
         // exact case a size-only (Win-x64-style) classifier would have
         // silently modelled as one GPR.
         let m = unsupported("FakeTakesFpStruct");
-        assert!(m.contains("floating-point field") && m.contains("v0"), "{m}");
+        assert!(
+            m.contains("floating-point field") && m.contains("v0"),
+            "{m}"
+        );
 
         // 9–16 B FP-free: two-GPR territory, not expressible in one token.
         let m = unsupported("FakeTakesTriple");
@@ -1177,9 +1186,15 @@ mod tests {
         // BOOL returns — all G.
         let f = lookup_function("GetSystemMetrics").expect("GetSystemMetrics");
         assert_eq!(f.dll.to_ascii_lowercase(), "user32.dll");
-        assert_eq!((f.ret, f.params.as_slice()), (ArgClass::G, &[ArgClass::G][..]));
+        assert_eq!(
+            (f.ret, f.params.as_slice()),
+            (ArgClass::G, &[ArgClass::G][..])
+        );
         let f = lookup_function("MessageBeep").expect("MessageBeep");
-        assert_eq!((f.ret, f.params.as_slice()), (ArgClass::G, &[ArgClass::G][..]));
+        assert_eq!(
+            (f.ret, f.params.as_slice()),
+            (ArgClass::G, &[ArgClass::G][..])
+        );
 
         // A HANDLE param travels as one GPR (the FP-free ≤8 B struct row).
         let f = lookup_function("CloseHandle").expect("CloseHandle");
@@ -1230,7 +1245,10 @@ mod tests {
         // wsprintfA is genuinely variadic, yet this build records it
         // fixed-arity with only its two fixed params.
         let f = lookup_function("wsprintfA").expect("wsprintfA resolves in this build");
-        assert!(!f.is_variadic, "is_variadic became populated — revisit the module-doc Δ");
+        assert!(
+            !f.is_variadic,
+            "is_variadic became populated — revisit the module-doc Δ"
+        );
         assert_eq!(f.params.len(), 2);
 
         // COM: the two facts dynamic dispatch needs (D2's COM row).
@@ -1246,11 +1264,26 @@ mod tests {
         // Struct field offsets: WINVM's exemplar plus the three the
         // world's Windows clock branch (world/81) hardcodes — if the DB
         // and the world ever disagree, THIS is where it surfaces.
-        assert_eq!(lookup_struct_field("BITMAPINFOHEADER", "biWidth").unwrap(), 4);
-        assert_eq!(lookup_struct_field("BITMAPINFOHEADER", "biBitCount").unwrap(), 14);
-        assert_eq!(lookup_struct_field("TIME_ZONE_INFORMATION", "Bias").unwrap(), 0);
-        assert_eq!(lookup_struct_field("TIME_ZONE_INFORMATION", "StandardBias").unwrap(), 84);
-        assert_eq!(lookup_struct_field("TIME_ZONE_INFORMATION", "DaylightBias").unwrap(), 168);
+        assert_eq!(
+            lookup_struct_field("BITMAPINFOHEADER", "biWidth").unwrap(),
+            4
+        );
+        assert_eq!(
+            lookup_struct_field("BITMAPINFOHEADER", "biBitCount").unwrap(),
+            14
+        );
+        assert_eq!(
+            lookup_struct_field("TIME_ZONE_INFORMATION", "Bias").unwrap(),
+            0
+        );
+        assert_eq!(
+            lookup_struct_field("TIME_ZONE_INFORMATION", "StandardBias").unwrap(),
+            84
+        );
+        assert_eq!(
+            lookup_struct_field("TIME_ZONE_INFORMATION", "DaylightBias").unwrap(),
+            168
+        );
 
         // WINARM (WG0): the struct WG0 actually builds, and the size query
         // added for it. The two facts come from independent columns, so

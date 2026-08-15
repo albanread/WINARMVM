@@ -1,0 +1,331 @@
+"64_winui_shell_tests.mst — WinUiShellWg4Tests, the headless half of WG4's
+ acceptance (docs/ROADMAP.md's WG4 row). Same split WG3 drew and for the same
+ reason: everything here runs with no window, no pump, no Win32 and no winkb,
+ so it runs on every machine this suite runs on. Anything that needs a real
+ window — a click reaching a view-bar button, a SetWindowPos actually moving
+ a child, a metrics push arriving from the Rust watchdog — belongs to
+ `just gate-wg4`, driven through MACVM_WINUI_CTL against one real window.
+
+ WHAT IS WORTH HAVING IN-LANGUAGE, and it is again the big half:
+
+   * The extended `WinLayout` is still PURE. Bottom-anchored bands and the
+     view bar's row slicing are arithmetic, and arithmetic can be checked
+     exactly rather than approximately — which is why the assertions below
+     are equalities and relationships, never screenshots.
+   * The VIEW REGISTRY and the lazy-build bookkeeping are guest state. That a
+     view is built once, that switching twice does not build twice, and that
+     an unknown view is declined rather than half-applied are all claims about
+     Smalltalk objects, provable without a handle in sight.
+
+ LOADING: as 63 — `WinShell`, `WinLayout` and `WinControl` live in the
+ conditional winui layer, so world/tests/tests.list names ../90 through ../93
+ above this file."
+
+TestCase subclass: WinUiShellWg4Tests [
+    WinUiShellWg4Tests class >> isEnabled ^ <Boolean> [
+        "WG9-2: the gate that used to live only in
+         `99_run_all.mst`'s guards, moved here so DISCOVERY can see
+         it too (`TestRunner allTestClasses`). platform-gated; see 99_run_all.mst's bookkeeping note."
+        ^Smalltalk platformName == #windows
+    ]
+
+
+    runAll [
+        "Layout first: it is what the WG4 row is actually about, and it is the
+         part that needs nothing from the machine."
+        self runTest: #testBottomBandHugsTheBottomEdge
+             do: [ self testBottomBandHugsTheBottomEdge ].
+        self runTest: #testFillTakesWhatIsBetweenTheStacks
+             do: [ self testFillTakesWhatIsBetweenTheStacks ].
+        self runTest: #testCollapsingTheDockGivesItsHeightToTheFill
+             do: [ self testCollapsingTheDockGivesItsHeightToTheFill ].
+        self runTest: #testShellLayoutScalesWithDpi
+             do: [ self testShellLayoutScalesWithDpi ].
+        self runTest: #testPackRowPacksLeftAndAnchorsRight
+             do: [ self testPackRowPacksLeftAndAnchorsRight ].
+        self runTest: #testWg3LayoutIsUnchanged do: [ self testWg3LayoutIsUnchanged ].
+
+        "Then the registry, which is guest state and equally window-free."
+        self runTest: #testViewRegistryIsIdempotent do: [ self testViewRegistryIsIdempotent ].
+        self runTest: #testUnknownViewIsDeclined do: [ self testUnknownViewIsDeclined ].
+        self runTest: #testTranscriptKeepsNewestFirst
+             do: [ self testTranscriptKeepsNewestFirst ].
+        self runTest: #testTranscriptIsBounded do: [ self testTranscriptIsBounded ].
+
+        "WG4 D3/D4/D5: the parts of the new chrome that are still PURE — a
+         glyph table, two bit extractions and a clamp. Everything needing a
+         window (a paint arriving, a drag captured, focus moving) is in
+         `just gate-wg4`, which is the same line WG3 drew."
+        self runTest: #testEveryViewHasItsOwnGlyph do: [ self testEveryViewHasItsOwnGlyph ].
+        self runTest: #testSignedWordsHandleNegatives do: [ self testSignedWordsHandleNegatives ].
+        self runTest: #testDockHeightClampsBothEnds do: [ self testDockHeightClampsBothEnds ].
+        self runTest: #testSplitterBandSitsAboveTheDock do: [ self testSplitterBandSitsAboveTheDock ].
+
+        "WG5a D1: the selection rule, which is PURE and is the Mac's own — so
+         it is tested with the Mac's own cases and no window in sight."
+        self runTest: #testEmptySelectionEvaluatesEverything
+             do: [ self testEmptySelectionEvaluatesEverything ].
+        self runTest: #testNonEmptySelectionWins do: [ self testNonEmptySelectionWins ].
+        self runTest: #testPrintItInsertsAfterTheSelection
+             do: [ self testPrintItInsertsAfterTheSelection ].
+
+        "WG6a: the Outliner's pure parts — the group label and the composed
+         TVINSERTSTRUCTW size, which is the one struct in this port whose
+         recorded size cannot be used directly."
+        self runTest: #testCountsGoOnGroupRows do: [ self testCountsGoOnGroupRows ].
+        self runTest: #testTvInsertSizeIsComposedNotTaken
+             do: [ self testTvInsertSizeIsComposedNotTaken ]
+    ]
+
+    "── WG6a: the Outliner ───────────────────────────────────────────────"
+
+    testCountsGoOnGroupRows [
+        "`instance methods (42)` answers a question; `Point (17)` invites one
+         — seventeen what? So counts live on the group rows only, and the
+         label builder is where that rule is enforced."
+        self assert: (WinShell outlineGroupLabel: 'instance methods' count: 42)
+                = 'instance methods (42)'
+            description: 'a group row carries its count'.
+        self assert: (WinShell outlineGroupLabel: 'class variables' count: 0)
+                = 'class variables (0)'
+            description: 'and the builder is total, even where the caller will not use it'
+    ]
+
+    testTvInsertSizeIsComposedNotTaken [
+        "THE ONE STRUCT WHOSE RECORDED SIZE IS A TRAP. Win32Metadata records
+         TVINSERTSTRUCTW as 24 bytes because its third member is an anonymous
+         UNION held as a type reference rather than inline — so the recorded
+         size covers the two handles and the union's START. Allocating 24 and
+         letting TVM_INSERTITEMW write into it is a 48-byte heap overwrite.
+
+         Asserted as a RELATIONSHIP rather than as 72, so it stays true if the
+         struct ever grows: the composed size must exceed the recorded one,
+         and must be exactly the union offset plus a whole TVITEMW."
+        | recorded composed |
+        recorded := WinApi sizeOf: 'TVINSERTSTRUCTW'.
+        composed := WinShell tvInsertSize.
+        self assert: composed > recorded
+            description: 'the composed size must exceed the misleading recorded one'.
+        self assert: composed = (WinShell tvItemOffset + (WinApi sizeOf: 'TVITEMW'))
+            description: 'and must be the union offset plus a whole TVITEMW'
+    ]
+
+    "── WG5a D1: selection-or-everything ─────────────────────────────────"
+
+    testEmptySelectionEvaluatesEverything [
+        "A collapsed caret means `run the whole buffer`, and the insertion
+         point is its END — so Print It on an unselected workspace appends
+         rather than overwriting."
+        | t |
+        t := WinShell evalTargetFor: '3 + 4' loc: 2 len: 0.
+        self assert: (t at: 1) equals: '3 + 4'.
+        self assert: (t at: 2) equals: 5
+    ]
+
+    testNonEmptySelectionWins [
+        "A real selection is what runs, and nothing else — the property that
+         makes a Workspace usable as a scratchpad full of half-finished lines."
+        | t |
+        t := WinShell evalTargetFor: 'foo. 3 + 4. bar' loc: 5 len: 5.
+        self assert: (t at: 1) equals: '3 + 4'
+    ]
+
+    testPrintItInsertsAfterTheSelection [
+        "The insertion point is the END of the selection, so Print It writes
+         after what it evaluated rather than replacing it."
+        | t |
+        t := WinShell evalTargetFor: 'foo. 3 + 4. bar' loc: 5 len: 5.
+        self assert: (t at: 2) equals: 10
+    ]
+
+    "── WG4 D3: the glyph table ──────────────────────────────────────────"
+
+    testEveryViewHasItsOwnGlyph [
+        "Each registered view draws a DISTINCT Fluent glyph. A table that
+         answered the same code point twice would render two tabs identically
+         and look like a layout bug rather than a table bug."
+        | codes |
+        WinShell registerShellViews.
+        codes := WinShell views collect: [ :v | WinShell glyphCodeFor: (v at: 1) ].
+        self assert: codes asSet size equals: codes size.
+        "...and every one is in the Private Use Area the icon font occupies,
+         which is what makes a wrong constant visible here rather than as a
+         box on screen."
+        codes do: [ :c |
+            self assert: (c >= 16rE700 and: [ c <= 16rF8FF ]) equals: true ]
+    ]
+
+    "── WG4 D5: lParam's two signed halves ───────────────────────────────"
+
+    testSignedWordsHandleNegatives [
+        "A pointer dragged ABOVE the client area reports a negative y, packed
+         as a 16-bit two's-complement half. Read unsigned it is 65000-odd, and
+         the dock jumps to its clamp instead of following the pointer — so this
+         is the arithmetic that decides whether a drag feels broken."
+        self assert: (WinShell hiWordSigned: 16r00640064) equals: 100.
+        self assert: (WinShell loWordSigned: 16r00640064) equals: 100.
+        "y = -10 packs as 0xFFF6 in the high half."
+        self assert: (WinShell hiWordSigned: 16rFFF60064) equals: -10.
+        self assert: (WinShell loWordSigned: 16r0064FFF6) equals: -10
+    ]
+
+    "── WG4 D5: the dock's clamp ─────────────────────────────────────────"
+
+    testDockHeightClampsBothEnds [
+        "The clamp is the layout's own business: a dock that could swallow the
+         window could not be undone with the gesture that made it."
+        WinShell transcriptHeight: 0.
+        self assert: WinShell transcriptHeight equals: WinShell transcriptMinHeight.
+        WinShell transcriptHeight: 100000.
+        self assert: (WinShell transcriptHeight < 100000) equals: true.
+        WinShell transcriptHeight: 150.
+        self assert: WinShell transcriptHeight equals: 150
+    ]
+
+    testSplitterBandSitsAboveTheDock [
+        "Bottom bands stack upward in the order added, so the splitter — added
+         after the transcript — must land ABOVE it, touching it."
+        | l r |
+        l := WinLayout new
+            add: #viewbar height: 34;
+            fill: #content;
+            addBottom: #transcript height: 120;
+            addBottom: #splitter height: 8;
+            yourself.
+        r := l rectsIn: 1000 by: 700 dpi: 96.
+        self assert: (((r at: #splitter) at: 2) < ((r at: #transcript) at: 2)) equals: true.
+        self assert: ((r at: #splitter) at: 4) equals: 8
+    ]
+
+    "── the layout ───────────────────────────────────────────────────────"
+
+    shellLayout ^ <WinLayout> [
+        ^WinLayout new
+            add: #viewbar height: 34;
+            fill: #content;
+            addBottom: #transcript height: 120;
+            yourself
+    ]
+
+    testBottomBandHugsTheBottomEdge [
+        "The dock's bottom edge sits one margin above the client's — the same
+         relationship the top band has with the top edge, which is what makes
+         the window look composed rather than merely arranged."
+        | r dock |
+        r := self shellLayout rectsIn: 1000 by: 700 dpi: 96.
+        dock := r at: #transcript.
+        self assert: (dock at: 4) equals: 120.
+        self assert: (dock at: 2) + (dock at: 4) + 10 equals: 700
+    ]
+
+    testFillTakesWhatIsBetweenTheStacks [
+        "No overlap, no gap unaccounted for: the three bands plus four margins
+         are exactly the client height. Stated as an equation because a
+         layout that merely 'looks right' at one size is not a layout."
+        | r bar content dock |
+        r := self shellLayout rectsIn: 1000 by: 700 dpi: 96.
+        bar := r at: #viewbar. content := r at: #content. dock := r at: #transcript.
+        self assert: (bar at: 2) equals: 10.
+        self assert: (bar at: 2) + (bar at: 4) + 10 equals: (content at: 2).
+        self assert: (content at: 2) + (content at: 4) + 10 equals: (dock at: 2).
+        self assert: 10 + (bar at: 4) + 10 + (content at: 4) + 10 + (dock at: 4) + 10
+             equals: 700
+    ]
+
+    testCollapsingTheDockGivesItsHeightToTheFill [
+        "Collapse is a height change, not a structural one — so the fill grows
+         by exactly what the dock gave up, and nothing else moves."
+        | l open collapsed |
+        l := self shellLayout.
+        open := ((l rectsIn: 1000 by: 700 dpi: 96) at: #content) at: 4.
+        l setBottom: #transcript height: 0.
+        collapsed := ((l rectsIn: 1000 by: 700 dpi: 96) at: #content) at: 4.
+        self assert: collapsed - open equals: 120
+    ]
+
+    testShellLayoutScalesWithDpi [
+        "WG3's own DPI property, extended to the new grammar: the same layout
+         at 150% is exactly proportional, because everything is computed in
+         DIPs and scaled once."
+        | r |
+        r := self shellLayout rectsIn: 1500 by: 1050 dpi: 144.
+        self assert: ((r at: #viewbar) at: 4) equals: 34 * 144 // 96.
+        self assert: ((r at: #transcript) at: 4) equals: 120 * 144 // 96.
+        self assert: ((r at: #viewbar) at: 2) equals: 10 * 144 // 96
+    ]
+
+    testPackRowPacksLeftAndAnchorsRight [
+        "The view bar: buttons from the left, metrics hugging the right edge —
+         the arithmetic that replaces AppKit's autoresizing masks."
+        | row lefts rights |
+        row := self shellLayout
+            packRow: (Array with: 10 with: 10 with: 980 with: 34)
+            left: (Array with: 96 with: 96)
+            right: (Array with: 320)
+            gap: 6 dpi: 96.
+        lefts := row at: 1. rights := row at: 2.
+        self assert: lefts size equals: 2.
+        self assert: ((lefts at: 1) at: 1) equals: 10.
+        self assert: ((lefts at: 2) at: 1) equals: 10 + 96 + 6.
+        self assert: rights size equals: 1.
+        "Right edge of the right-anchored cell == right edge of the band."
+        self assert: ((rights at: 1) at: 1) + ((rights at: 1) at: 3) equals: 990
+    ]
+
+    testWg3LayoutIsUnchanged [
+        "WG4 extended WinLayout in place. WG3's own shell layout must compute
+         exactly what it did before — the regression this whole file exists to
+         make impossible to introduce quietly."
+        | r |
+        r := WinLayout shell rectsIn: 900 by: 600 dpi: 96.
+        self assert: ((r at: #button) at: 4) equals: 32.
+        self assert: ((r at: #status) at: 4) equals: 26.
+        self assert: ((r at: #button) at: 2) equals: 10.
+        self assert: ((r at: #status) at: 2) equals: 10 + 32 + 10.
+        "The fill still reaches the bottom margin."
+        self assert: ((r at: #list) at: 2) + ((r at: #list) at: 4) + 10 equals: 600
+    ]
+
+    "── the view registry ────────────────────────────────────────────────"
+
+    testViewRegistryIsIdempotent [
+        "Registering the same view twice leaves one entry: `buildControls` is
+         idempotent by WG3's own rule (`cycle: 10` opens ten windows in one
+         VM), so everything it calls must be too."
+        | before |
+        WinShell registerShellViews.
+        before := WinShell views size.
+        WinShell registerShellViews.
+        self assert: WinShell views size equals: before.
+        self assert: (WinShell views anySatisfy: [ :v | (v at: 1) == #welcome ]) equals: true
+    ]
+
+    testUnknownViewIsDeclined [
+        "An unknown view answers false and changes nothing — a switch that
+         half-applied would leave every content child hidden and the window
+         blank, which is the failure mode this return value exists to prevent."
+        | active |
+        WinShell registerShellViews.
+        active := WinShell activeView.
+        self assert: (WinShell switchToView: #noSuchViewAnywhere) equals: false.
+        self assert: WinShell activeView equals: active
+    ]
+
+    "── the transcript dock ──────────────────────────────────────────────"
+
+    testTranscriptKeepsNewestFirst [
+        "Reverse-chronological, as on the Mac: a log to glance at."
+        WinShell resetTranscript.
+        WinShell appendTranscript: 'first'.
+        WinShell appendTranscript: 'second'.
+        self assert: WinShell transcriptFirstLine equals: 'second'
+    ]
+
+    testTranscriptIsBounded [
+        "A dock that grew without bound would be a leak with a view onto it."
+        WinShell resetTranscript.
+        1 to: 250 do: [ :i | WinShell appendTranscript: i printString ].
+        self assert: WinShell transcriptLineCount equals: 200.
+        self assert: WinShell transcriptFirstLine equals: '250'
+    ]
+]

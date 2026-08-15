@@ -103,15 +103,15 @@ pub fn capture_png(h: HWND, path: &str) -> std::result::Result<(), String> {
         bi.bmiHeader.biCompression = BI_RGB.0;
 
         let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
-        let dib: HBITMAP = match CreateDIBSection(Some(mem), &bi, DIB_RGB_COLORS, &mut bits, None, 0)
-        {
-            Ok(b) if !b.is_invalid() && !bits.is_null() => b,
-            _ => {
-                let _ = DeleteDC(mem);
-                ReleaseDC(Some(h), screen);
-                return Err("CreateDIBSection failed".into());
-            }
-        };
+        let dib: HBITMAP =
+            match CreateDIBSection(Some(mem), &bi, DIB_RGB_COLORS, &mut bits, None, 0) {
+                Ok(b) if !b.is_invalid() && !bits.is_null() => b,
+                _ => {
+                    let _ = DeleteDC(mem);
+                    ReleaseDC(Some(h), screen);
+                    return Err("CreateDIBSection failed".into());
+                }
+            };
         let old: HGDIOBJ = SelectObject(mem, dib.into());
 
         // PW_RENDERFULLCONTENT (0x2) is the flag that makes this work at all

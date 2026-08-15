@@ -1,0 +1,403 @@
+"128_winui_help.mst — Help, the last of the Mac's four views to reach Windows.
+
+ The Mac's is `world/71_cocoahelp.mst`: a topic sidebar, a find field, and a
+ document view with real typography. Its ONE structural idea is worth more
+ than any of that and is copied exactly: EVERY WORD LIVES IN THIS FILE, as
+ Smalltalk methods. v1 read `docs/macvm_help.md` relative to the process's
+ working directory and broke under any launcher that was not its own script.
+ An environment that cannot explain itself unless you started it from the
+ right folder is not documented, it is merely accompanied.
+
+ THE CONTENT IS NOT COPIED, and that is not laziness. Half of the Mac's text
+ describes Cocoa — NSWindows, the Tools menu's own conventions, an
+ AppleScript surface this port does not have and will not. Prose that told a
+ Windows user about `⌘-D` would be worse than no prose at all. What is copied
+ is the SHAPE: eleven-ish topics from `Welcome` to `Under the Hood`, each a
+ method, each answering plain lines.
+
+ IT IS A TOOL WINDOW, where the Mac also puts it, and its reader is a
+ `textGrid` pane — the declarative UI's third pane type, and the first thing
+ to use it. That is deliberate: long prose in a stack of STATIC controls
+ would be a paragraph per control and a rebuild per scroll, where the cell
+ grid is one upload and is what every reading surface in this shell already
+ uses.
+
+ ASCII ONLY, asserted per character in the tests. A guest String is UTF-8
+ bytes and the grid takes codepoints, so one em-dash arrives as three cells
+ of rubbish — the sixth sighting of that trap in this port, and the first
+ where the whole file is prose."
+
+Object subclass: WinHelp [
+    <classVars: Topic Scroll>
+
+    "── the topics ──────────────────────────────────────────────────────
+     Title and selector. `Array with:` reaches five and these are two, but
+     the Mac's own comment about that family topping out is worth keeping in
+     mind for anyone who extends this table."
+
+    WinHelp class >> topics ^ <OrderedCollection> [
+        | t |
+        t := OrderedCollection new.
+        t add: { 'Welcome'.      #welcomeText }.
+        t add: { 'The Shell'.    #shellText }.
+        t add: { 'Smalltalk'.    #languageText }.
+        t add: { 'Tools'.        #toolsText }.
+        t add: { 'Games'.        #gamesText }.
+        t add: { 'Under the Hood'. #internalsText }.
+        ^t
+    ]
+
+    WinHelp class >> topic ^ <Integer> [ ^Topic isNil ifTrue: [ 1 ] ifFalse: [ Topic ] ]
+    WinHelp class >> scroll ^ <Integer> [ ^Scroll isNil ifTrue: [ 0 ] ifFalse: [ Scroll ] ]
+    WinHelp class >> topicTitle ^ <String> [ ^(self topics at: self topic) at: 1 ]
+
+    WinHelp class >> lines ^ <OrderedCollection> [
+        "The current topic's text, split into lines. Answered as a collection
+         rather than a String because everything downstream - the reader, the
+         scroll, the tests - counts in lines."
+        ^self linesOf: (self perform: ((self topics at: self topic) at: 2))
+    ]
+
+    WinHelp class >> linesOf: aString <String> ^ <OrderedCollection> [
+        | out run |
+        out := OrderedCollection new.
+        run := ''.
+        aString do: [ :ch |
+            ch asInteger = 10
+                ifTrue: [ out add: run. run := '' ]
+                ifFalse: [ run := run , (String with: ch) ] ].
+        out add: run.
+        ^out
+    ]
+
+    "── the reader's shape ──────────────────────────────────────────────"
+
+    WinHelp class >> cols ^ <Integer> [ ^76 ]
+    WinHelp class >> rows ^ <Integer> [ ^26 ]
+
+    "The lines actually on screen, and the scroll CLAMPED - a topic shorter
+     than the window must not be scrollable into empty space, and one longer
+     must not be scrollable past its last line."
+    WinHelp class >> visibleLines ^ <OrderedCollection> [
+        | all out top |
+        all := self lines.
+        top := self clampedScroll.
+        out := OrderedCollection new.
+        top + 1 to: ((top + self rows) min: all size) do: [ :i |
+            out add: (all at: i) ].
+        ^out
+    ]
+
+    WinHelp class >> clampedScroll ^ <Integer> [
+        ^(self scroll max: 0) min: ((self lines size - self rows) max: 0)
+    ]
+
+    "── colour by line KIND, which is all the markup this needs ─────────
+     A heading is a line the author underlined or prefixed; a bullet starts
+     with a dash; everything else is prose. Deciding that HERE, purely, is
+     what lets the tests assert the rendering without a window."
+
+    WinHelp class >> colourOf: aLine <String> ^ <Integer> [
+        aLine isEmpty ifTrue: [ ^16r000000 ].
+        (aLine startsWith: '# ') ifTrue: [ ^16r0000C0 ].
+        (aLine startsWith: '- ') ifTrue: [ ^16r006000 ].
+        (aLine startsWith: '  ') ifTrue: [ ^16r606060 ].
+        ^16r000000
+    ]
+
+    "── the spec ────────────────────────────────────────────────────────"
+
+    WinHelp class >> spec ^ <WinNode> [
+        | buttons |
+        buttons := OrderedCollection new.
+        1 to: self topics size do: [ :i |
+            buttons add: (WinSpec
+                button: ((i = self topic ifTrue: [ '* ' ] ifFalse: [ '' ])
+                            , ((self topics at: i) at: 1))
+                event: ('topic' , i printString) asSymbol
+                id: ('topic' , i printString) asSymbol) ].
+        ^WinSpec window: 'Help' id: #helpWin body: (WinSpec stack: {
+            WinSpec heading: self topicTitle id: #title.
+            WinSpec grid: buttons columns: 3 id: #topicGrid.
+            WinSpec textGrid: #reader columns: self cols rows: self rows.
+            WinSpec row: {
+                WinSpec button: 'Page up' event: #pageUp id: #bUp.
+                WinSpec button: 'Page down' event: #pageDown id: #bDown.
+                WinSpec text: 'line ' , (self clampedScroll + 1) printString
+                        , ' of ' , self lines size printString id: #where
+            } id: #nav
+        } id: #root)
+    ]
+
+    "── events ──────────────────────────────────────────────────────────"
+
+    WinHelp class >> handle: event <Symbol> value: value <Object> [
+        event == #pageUp ifTrue: [
+            Scroll := self clampedScroll - (self rows - 2).
+            ^self invalidate ].
+        event == #pageDown ifTrue: [
+            Scroll := self clampedScroll + (self rows - 2).
+            ^self invalidate ].
+        1 to: self topics size do: [ :i |
+            event == ('topic' , i printString) asSymbol ifTrue: [
+                Topic := i.
+                Scroll := 0.
+                ^self invalidate ] ].
+        ^self
+    ]
+
+    WinHelp class >> invalidate [
+        (WinToolWindow named: #help) ifNotNil: [ :t | t invalidatePane: #reader ].
+        ^self
+    ]
+
+    "── the reader ──────────────────────────────────────────────────────"
+
+    WinHelp class >> paintReaderOn: hwnd <Integer> [
+        "The cell grid, filled from `visibleLines` and nothing else. Whole
+         every time and unapologetically: a text pane's `damage` is almost
+         always `all of it` - a scroll moves every row - and 76x26 cells is
+         two thousand stores, which is a thousandth of what the sprite grid
+         was doing before its damage rule."
+        | base row col |
+        hwnd = 0 ifTrue: [ ^self ].
+        (WinRender cellWidthFor: hwnd) = 0 ifTrue: [
+            ([ WinRender attach: hwnd points: 9 dpi: WinShell editorMetricsDpi ]
+                on: Error do: [ :e | false ]) ifFalse: [ ^self ] ].
+        base := WinRender gridFor: hwnd cols: self cols rows: self rows.
+        base = 0 ifTrue: [ ^self ].
+        WinRender clear: hwnd to: 16r000000 on: 16rFFFFFF.
+        row := 0.
+        self visibleLines do: [ :line |
+            row < self rows ifTrue: [
+                col := 0.
+                line do: [ :chr |
+                    col < self cols ifTrue: [
+                        WinRender at: base col: col row: row cols: self cols
+                            put: (chr asInteger < 32 ifTrue: [ 32 ] ifFalse: [ chr asInteger ])
+                            fg: (self colourOf: line)
+                            bg: 16rFFFFFF ].
+                    col := col + 1 ].
+                row := row + 1 ] ].
+        WinRender caretFor: hwnd col: 0 row: 0 visible: false.
+        WinRender present: hwnd.
+        ^self
+    ]
+
+    "── registration ────────────────────────────────────────────────────"
+
+    WinHelp class >> install [
+        WinToolWindow
+            register: #help title: 'Help' width: 720 height: 760
+            render: [ WinHelp spec ]
+            handler: [ :event :value |
+                WinHelp handle: event value: value.
+                (WinToolWindow named: #help) rerender ]
+            paint: [ :tool :paneId :region |
+                paneId = 'reader' ifTrue: [
+                    WinHelp paintReaderOn: (tool paneHwnd: #reader) ] ].
+        ^self
+    ]
+
+    "── the content, and every word of it is here ───────────────────────"
+
+    WinHelp class >> nl ^ <String> [ ^String with: (Character value: 10) ]
+
+    WinHelp class >> welcomeText ^ <String> [
+        ^'# MACVM on Windows/ARM64', self nl,
+'', self nl,
+'This is a Smalltalk environment whose user interface is written in', self nl,
+'Smalltalk. The window you are reading this in was built from a', self nl,
+'description, by code you can open and edit, in the image that is', self nl,
+'running it.', self nl,
+'', self nl,
+'# Where to start', self nl,
+'', self nl,
+'- Workspace: type an expression, press Ctrl-D to run it.', self nl,
+'- Browser: read and change any class in the image.', self nl,
+'- Demos menu: nine upstream games, running unedited.', self nl,
+'- Tools menu: the Sprite Editor and the Sound Editor.', self nl,
+'', self nl,
+'# The one idea worth having first', self nl,
+'', self nl,
+'Nothing here is a special case. The shell is objects, the games are', self nl,
+'objects, this help text is a method on a class called WinHelp, and', self nl,
+'all of it is reachable from the Browser while it runs.', self nl,
+'', self nl,
+'  Try it: open the Browser, find WinHelp, and read welcomeText.', self nl,
+'  You are looking at its output.'
+    ]
+
+    WinHelp class >> shellText ^ <String> [
+        ^'# The shell', self nl,
+'', self nl,
+'The environment is one native window with a bar of views along the', self nl,
+'top, and tool windows summoned from the Tools menu.', self nl,
+'', self nl,
+'# The views', self nl,
+'', self nl,
+'- Workspace   an expression scratchpad. Ctrl-D runs, Ctrl-P prints.', self nl,
+'- Browser     classes, methods, and Accept to compile.', self nl,
+'- Outliner    the image as a live tree.', self nl,
+'- Find        senders, implementors, and text across the world.', self nl,
+'- Editor      a file-scale editor over the same code.', self nl,
+'- Debugger    a halted process, its frames, and F5/F10/F11.', self nl,
+'- Canvas      pixels: the demos draw here.', self nl,
+'- Tests       SUnit over the whole world corpus.', self nl,
+'- Transcript  what the system has been saying.', self nl,
+'- Metrics     memory, JIT, code, allocation, GC.', self nl,
+'', self nl,
+'# Two VMs', self nl,
+'', self nl,
+'There are two Smalltalk VMs in this process. The UI VM owns the', self nl,
+'window and the message loop; the PRIMARY runs your code. That is', self nl,
+'why a long computation does not freeze the window, and why a demo', self nl,
+'keeps drawing while you type in the Workspace.', self nl,
+'', self nl,
+'  A doit you run in the Workspace is sent to the primary and its', self nl,
+'  answer comes back. The window keeps pumping the whole time.'
+    ]
+
+    WinHelp class >> languageText ^ <String> [
+        ^'# Smalltalk in one screen', self nl,
+'', self nl,
+'Everything is an object. You do things by SENDING MESSAGES.', self nl,
+'', self nl,
+'  3 + 4                    a binary message, + , to 3', self nl,
+'  Transcript showCr: ''hi''  a keyword message, showCr:', self nl,
+'  42 printString           a unary message', self nl,
+'', self nl,
+'# The three kinds, in precedence order', self nl,
+'', self nl,
+'- Unary    binds tightest:   2 factorial + 1  is 3', self nl,
+'- Binary   next:             2 + 3 * 4        is 20, not 14', self nl,
+'- Keyword  loosest:          d at: 1 put: 2', self nl,
+'', self nl,
+'There is no operator precedence beyond that. Use parentheses.', self nl,
+'', self nl,
+'# Blocks', self nl,
+'', self nl,
+'A block is code in brackets, an object you can pass and call.', self nl,
+'', self nl,
+'  [ :x | x * x ] value: 5          answers 25', self nl,
+'  1 to: 5 do: [ :i | ... ]         a loop is a message', self nl,
+'  x > 0 ifTrue: [ ... ]            so is a conditional', self nl,
+'', self nl,
+'# Defining a class', self nl,
+'', self nl,
+'  Object subclass: Point2 [', self nl,
+'      | x y |', self nl,
+'      Point2 class >> x: ax y: ay [ ^self new setX: ax y: ay ]', self nl,
+'      setX: ax y: ay [ x := ax. y := ay. ^self ]', self nl,
+'      + other [ ^Point2 x: x + other x y: y + other y ]', self nl,
+'  ]'
+    ]
+
+    WinHelp class >> toolsText ^ <String> [
+        ^'# Tools', self nl,
+'', self nl,
+'Tool windows are separate top-level windows, summoned from the', self nl,
+'Tools menu and hidden rather than destroyed when closed, so their', self nl,
+'state survives and reopening is instant.', self nl,
+'', self nl,
+'# Sprite Editor', self nl,
+'', self nl,
+'Draws the 16-colour sprites the games use.', self nl,
+'', self nl,
+'- Click the grid to paint, click a swatch to choose a colour.', self nl,
+'- pencil paints one cell, fill floods, pick takes a colour.', self nl,
+'- Frames: Add, Dup, Del, and First/Prev/Next to move between them.', self nl,
+'- Save writes a sheet CLASS into the image. It is only source.', self nl,
+'', self nl,
+'  A saved sheet is used from a game like this:', self nl,
+'    | s | s := MySheet installOn: pane. s moveTo: 40 y: 60.', self nl,
+'', self nl,
+'# Sound Editor', self nl,
+'', self nl,
+'An instrument panel over the same synthesizer the games use.', self nl,
+'', self nl,
+'- Play auditions the recipe. Preset steps the twelve built-ins.', self nl,
+'- Random rolls a new one; Mutate nudges what you have.', self nl,
+'- The picture is the envelope: attack, decay, sustain, release,', self nl,
+'  with the frequency sweep drawn under it in amber.', self nl,
+'- Save writes a sheet class, as the Sprite Editor does.', self nl,
+'', self nl,
+'# How a tool is written', self nl,
+'', self nl,
+'A tool is three things: a title, a block that answers a SPEC, and', self nl,
+'a block that handles an EVENT. No window code, no control code, no', self nl,
+'layout code. See WinDemoTool for the smallest complete example.'
+    ]
+
+    WinHelp class >> gamesText ^ <String> [
+        ^'# Games', self nl,
+'', self nl,
+'The Demos menu runs upstream''s games unedited. That is the point:', self nl,
+'the same Smalltalk runs on mac, windows, arm and x64, and a game', self nl,
+'we had to edit to load would disprove it.', self nl,
+'', self nl,
+'- Life, FreeCell, Minesweeper, Julia, Attractor, Plasma,', self nl,
+'  Text Pages, Copper, Breakout, Galaxigans.', self nl,
+'', self nl,
+'Escape stops a running demo. So does Demos > Stop Demo.', self nl,
+'', self nl,
+'# The pane is a fantasy console', self nl,
+'', self nl,
+'GamePane is a hardware SPEC, not a drawing library. A game writes', self nl,
+'to emulated hardware the way a cartridge writes to a video chip:', self nl,
+'', self nl,
+'- an indexed pixel plane, one byte per pixel', self nl,
+'- a palette, where changing one entry recolours the whole screen', self nl,
+'- a text plane of character cells', self nl,
+'- hardware sprites with their own 16 colours', self nl,
+'- a background shader, which is the platform''s own', self nl,
+'', self nl,
+'# Shaders are the hardware emulation', self nl,
+'', self nl,
+'A game ships one shader source, in Metal. This port translates it', self nl,
+'to HLSL and compiles it at runtime. Where a machine has no shader,', self nl,
+'the software path draws the same scene - the demo degrades to the', self nl,
+'compiler, never to a black screen.'
+    ]
+
+    WinHelp class >> internalsText ^ <String> [
+        ^'# Under the hood', self nl,
+'', self nl,
+'# The door', self nl,
+'', self nl,
+'Windows messages reach Smalltalk through one function with a', self nl,
+'CLOSED list of messages it will route. Everything else goes', self nl,
+'straight to DefWindowProc. A handler RECORDS and returns; the work', self nl,
+'happens later, in a drain pass, where the VM is provably not', self nl,
+'inside a callback.', self nl,
+'', self nl,
+'# The declarative UI', self nl,
+'', self nl,
+'A tool window''s contents are DATA. The tool answers a tree of', self nl,
+'nodes; the realizer builds controls from it. When state changes', self nl,
+'the tool answers a NEW tree, and a differ works out the smallest', self nl,
+'change: one caption, not one window.', self nl,
+'', self nl,
+'  Node identity is (type, id). Same identity, changed props means', self nl,
+'  patch in place. Different identity means rebuild that subtree.', self nl,
+'  When the differ cannot express a change it says so, and the', self nl,
+'  whole window is republished. Declining is the feature.', self nl,
+'', self nl,
+'Pixels are outside the spec, so panes have their own channel: a', self nl,
+'handler says what it dirtied, and only that is repainted.', self nl,
+'', self nl,
+'# The JIT', self nl,
+'', self nl,
+'Methods are interpreted until they are hot, then compiled. Loops', self nl,
+'tier up on their back edges and switch to compiled code while', self nl,
+'still running - on-stack replacement. Metrics shows the counts.'
+    ]
+
+    "── the scripted surface ────────────────────────────────────────────"
+
+    WinHelp class >> helpTopic ^ <String> [ ^self topicTitle ]
+    WinHelp class >> helpLineCount ^ <Integer> [ ^self lines size ]
+    WinHelp class >> helpShow: i <Integer> [ ^self handle: ('topic' , i printString) asSymbol value: nil ]
+]
+
+WinHelp install.

@@ -1,5 +1,11 @@
 [workspace]
-members = [".", "gui", "image_store", "ffi_gen", "win_gui"]
+members = [".", "gui", "image_store", "ffi_gen", "win_gui", "winui_host", "winui_render"]
+# WINARM (WG5b-2): `winui_host` joins - the Windows GUI's host service, a
+# cdylib over `image_store::flows` reached through the FFI's new `library:`
+# part. It is a NON-default member like every GUI-side crate here, so a bare
+# `cargo build`/`cargo test` at the top is unchanged; build it explicitly
+# with `cargo build -p winui_host`, which drops `winui_host.dll` beside
+# `win_gui.exe` where `LoadLibraryA` finds it.
 # WINARM (WG1): `win_gui` joins — the Windows-native Smalltalk UI's host
 # (`macvm-winui`, docs/win_gui_design.md §2/§3 row WG1). It is a NON-default
 # member like every GUI in this tree, so a bare `cargo build`/`cargo test` at

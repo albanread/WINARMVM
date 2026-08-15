@@ -35,6 +35,13 @@
  (WG0's Δ 6, inherited, not re-litigated)."
 
 TestCase subclass: WinUiDoorTests [
+    WinUiDoorTests class >> isEnabled ^ <Boolean> [
+        "WG9-2: the gate that used to live only in
+         `99_run_all.mst`'s guards, moved here so DISCOVERY can see
+         it too (`TestRunner allTestClasses`). platform-gated; see 99_run_all.mst's bookkeeping note."
+        ^Smalltalk platformName == #windows
+    ]
+
 
     runAll [
         "The address channel is a primitive and needs nothing else — not
@@ -64,6 +71,35 @@ TestCase subclass: WinUiDoorTests [
         self runTest: #testHandlerReturnsLResult do: [ self testHandlerReturnsLResult ].
         self runTest: #testHandlerStateSurvives do: [ self testHandlerStateSurvives ].
         self runTest: #testAllowlistMatchesWinkb do: [ self testAllowlistMatchesWinkb ].
+        self runTest: #testPaintstructOffsetsMatchWinkb
+             do: [ self testPaintstructOffsetsMatchWinkb ].
+    ]
+
+    testPaintstructOffsetsMatchWinkb [
+        "`perform_paint` decodes PAINTSTRUCT with TRANSCRIBED offsets, because
+         the VM crate cannot reach winkb — the database belongs to the guest
+         layer. §2's rule is that a struct member is read at a winkb-queried
+         offset and never at a transcribed one, and this is the one place that
+         cannot obey it. So the transcription is checked HERE, from the side
+         that can ask.
+
+         IT WAS WRONG, and expensively. `rcPaint` was read at 8 from WG6c-1
+         until WG6f, which is `fErase` — so every paint decoded
+         `[fErase, left, top, right]` as `[left, top, right, bottom]`. A
+         full-client invalidation (every one we issue ourselves) has left and
+         top at 0, so the garbage decoded to (0,0) and looked perfect. A
+         PARTIAL one — Windows' own, when a window is dragged across the pane
+         — decoded to nonsense and the whole document was redrawn displaced
+         over the copy already there. That is the smearing the author reported
+         and that two rounds of guest-side fixes went straight past."
+        self assert: (WinApi offsetOf: 'PAINTSTRUCT' field: 'hdc') = 0
+            description: 'PAINTSTRUCT.hdc is at 0'.
+        self assert: (WinApi offsetOf: 'PAINTSTRUCT' field: 'fErase') = 8
+            description: 'and fErase at 8 — which is what rcPaint was read at'.
+        self assert: (WinApi offsetOf: 'PAINTSTRUCT' field: 'rcPaint') = 12
+            description: 'rcPaint is at 12, and `perform_paint`''s PS_RCPAINT must '
+                , 'say 12, but winkb reports '
+                , (WinApi offsetOf: 'PAINTSTRUCT' field: 'rcPaint') printString
     ]
 
     "── D2: the address channel ──────────────────────────────────────────"

@@ -300,6 +300,20 @@ Object subclass: WinShell [
                 ClickCount CommonControlsReady SelectRequest ListRowCount
                 LastMeaningfulNotify ControlsEnabled RowScratch>
 
+    "── the WG3 hooks, as delegations ────────────────────────────────────
+     91 defines these as no-ops; this file supplies WG3's behaviour. They are
+     one line each so that a LATER layer (93, WG4's shell) can override the
+     hook and still reach this file's work by name — `super` cannot serve
+     that purpose, because reopening a class creates no superclass link to
+     its own previous definition, and a hook that could only be replaced
+     wholesale would force every later sprint to copy this one."
+
+    WinShell class >> buildControls ^ <OrderedCollection> [ ^self wg3BuildControls ]
+    WinShell class >> applyLayout ^ <Integer> [ ^self wg3ApplyLayout ]
+    WinShell class >> serviceCommand: anId <Integer> code: aCode <Integer> from: aHandle <Integer> [
+        ^self wg3ServiceCommand: anId code: aCode from: aHandle
+    ]
+
     "── the switch WG1's and WG2's gates need ────────────────────────────
      `tests_wg3.md` item 1 asks for WG2's entire gate to pass unchanged
      `with the drain installed and NO CONTROL CREATED`, and that phrase is
@@ -338,6 +352,11 @@ Object subclass: WinShell [
     ]
 
     WinShell class >> ownsControlId: anId <Integer> ^ <Boolean> [
+        "WG12: a MENU id counts too. This answer decides whether the door
+         returns 0 (handled) or falls through to DefWindowProcW, so a menu the
+         shell owns but does not claim would work by accident today and break
+         the moment anything else wanted that message."
+        (self ownsMenuId: anId) ifTrue: [ ^true ].
         ^(self controlWithId: anId) notNil
     ]
 
@@ -366,9 +385,14 @@ Object subclass: WinShell [
         WinArena u32At: icc + (WinApi offsetOf: 'INITCOMMONCONTROLSEX' field: 'dwSize')
                  put: (WinApi sizeOf: 'INITCOMMONCONTROLSEX').
         WinArena u32At: icc + (WinApi offsetOf: 'INITCOMMONCONTROLSEX' field: 'dwICC')
-                 put: (((WinApi constant: 'ICC_LISTVIEW_CLASSES')
+                 put: ((((WinApi constant: 'ICC_LISTVIEW_CLASSES')
                         bitOr: (WinApi constant: 'ICC_TREEVIEW_CLASSES'))
-                        bitOr: (WinApi constant: 'ICC_STANDARD_CLASSES')).
+                        bitOr: (WinApi constant: 'ICC_STANDARD_CLASSES'))
+                        "WG14c: `msctls_trackbar32` lives in ICC_BAR_CLASSES and
+                         in no other set. Without this bit a slider's
+                         CreateWindowExW answers NULL and, as the comment above
+                         says, nothing else says why."
+                        bitOr: (WinApi constant: 'ICC_BAR_CLASSES')).
         CommonControlsReady := WinApi asBool: (WinApi initCommonControls: icc).
         CommonControlsReady ifFalse: [
             ^self error: 'WinShell: InitCommonControlsEx failed (GetLastError ' ,
@@ -387,7 +411,7 @@ Object subclass: WinShell [
 
     "── D3: the controls ─────────────────────────────────────────────────"
 
-    WinShell class >> buildControls ^ <OrderedCollection> [
+    WinShell class >> wg3BuildControls ^ <OrderedCollection> [
         "Called from `openMain`, at open time — never from a doit (Δ2) and
          never from a handler (§2.4a). Idempotent, because `cycle: 10` opens
          ten windows in one VM and a second call must build children for the
@@ -537,7 +561,7 @@ Object subclass: WinShell [
 
     "── D4: the layout, run BY THE DRAIN ─────────────────────────────────"
 
-    WinShell class >> applyLayout ^ <Integer> [
+    WinShell class >> wg3ApplyLayout ^ <Integer> [
         "Compute every rect from the settled client size, then one SetWindowPos
          per control. Answers how many moved.
 
@@ -629,7 +653,7 @@ Object subclass: WinShell [
 
     "── the MEANING of a control message, run in the drain ───────────────"
 
-    WinShell class >> serviceCommand: anId <Integer> code: aCode <Integer> from: aHandle <Integer> [
+    WinShell class >> wg3ServiceCommand: anId <Integer> code: aCode <Integer> from: aHandle <Integer> [
         "The button's action. Two SendMessageW's into two other controls and a
          list-view insertion — synchronous Win32 work, i.e. exactly what a
          message handler may not do — running here, one pass later, with the VM
@@ -664,6 +688,14 @@ Object subclass: WinShell [
          member of the storm class that reaches this layer at all. Recorded but
          not treated as news, so `lastMeaningfulNotify` answers the thing a test
          (or a user) actually asked about rather than whatever was drawn last."
+        "WG6a: the Outliner fills a class's own rows when it is selected.
+         TVN_SELCHANGEDW arrives as 4294966845 — the UNSIGNED form of -451,
+         which is how every tree-view notification code arrives. Comparing it
+         against a signed constant would silently never match and the tree
+         would simply never populate, with nothing to see."
+        (aCode = (WinApi constant: 'TVN_SELCHANGEDW')
+            and: [ c name == self outlinerName ])
+                ifTrue: [ self populateSelectedClass ].
         aCode = (WinApi constant: 'NM_CUSTOMDRAW') ifFalse: [
             LastMeaningfulNotify := Array with: aHandle with: anId with: aCode ].
         ^self

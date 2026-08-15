@@ -126,8 +126,8 @@ fn parse_list(text: &str) -> Vec<String> {
 /// of existing class CocoaToolbarAction". Observed live 2026-07-20.
 fn read_all_lists(world_dir: &Path) -> Result<Vec<String>, String> {
     let mut names: Vec<String> = Vec::new();
-    let dir = fs::read_dir(world_dir)
-        .map_err(|e| format!("reading {}: {e}", world_dir.display()))?;
+    let dir =
+        fs::read_dir(world_dir).map_err(|e| format!("reading {}: {e}", world_dir.display()))?;
     let mut lists: Vec<PathBuf> = dir
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().is_some_and(|x| x == "list"))
@@ -191,8 +191,7 @@ pub fn export_world_dir(image: &Image, world_dir: &Path) -> Result<ExportStats, 
     let mut present: HashSet<(String, String, String)> = HashSet::new();
     let mut last_occ: HashMap<(String, String, String), usize> = HashMap::new();
     for (idx, f) in files.iter().enumerate() {
-        let text =
-            fs::read_to_string(f).map_err(|e| format!("reading {}: {e}", f.display()))?;
+        let text = fs::read_to_string(f).map_err(|e| format!("reading {}: {e}", f.display()))?;
         for c in mst::parse_mst_source(&text) {
             for m in &c.methods {
                 let side = if m.is_class_side { "class" } else { "instance" };
@@ -211,8 +210,7 @@ pub fn export_world_dir(image: &Image, world_dir: &Path) -> Result<ExportStats, 
     //   Deleted (tombstone) → remove the method from the file (every occurrence);
     //   Absent (unknown to the image) → leave untouched — never delete blindly.
     for (idx, f) in files.iter().enumerate() {
-        let text =
-            fs::read_to_string(f).map_err(|e| format!("reading {}: {e}", f.display()))?;
+        let text = fs::read_to_string(f).map_err(|e| format!("reading {}: {e}", f.display()))?;
         let mut new_text = text.clone();
         for c in mst::parse_mst_source(&text) {
             for m in &c.methods {
@@ -269,7 +267,11 @@ pub fn export_world_dir(image: &Image, world_dir: &Path) -> Result<ExportStats, 
             .map_err(|e| format!("listing {}'s methods: {e}", c.name))?
             .into_iter()
             .filter(|m| {
-                !present.contains(&(c.name.clone(), m.side.as_str().to_string(), m.selector.clone()))
+                !present.contains(&(
+                    c.name.clone(),
+                    m.side.as_str().to_string(),
+                    m.selector.clone(),
+                ))
             })
             .map(|m| m.source)
             .collect();
@@ -387,7 +389,11 @@ mod tests {
         // A fresh export must be a pure no-op: `Ui` already lives in ui.list, so
         // nothing may be re-emitted for it.
         let s = export_world_dir(&image, &dir).unwrap();
-        assert_eq!(s, ExportStats::default(), "fresh export must touch nothing, got {s:?}");
+        assert_eq!(
+            s,
+            ExportStats::default(),
+            "fresh export must touch nothing, got {s:?}"
+        );
 
         let adds_path = dir.join(ADDITIONS_FILE);
         let adds = fs::read_to_string(&adds_path).unwrap_or_default();
@@ -396,7 +402,9 @@ mod tests {
             "a class from a sibling list must NOT be duplicated into the additions file: {adds}"
         );
         assert!(
-            !fs::read_to_string(dir.join("world.list")).unwrap().contains(ADDITIONS_FILE),
+            !fs::read_to_string(dir.join("world.list"))
+                .unwrap()
+                .contains(ADDITIONS_FILE),
             "no additions file to register, so world.list must be left alone"
         );
 
@@ -431,7 +439,12 @@ mod tests {
 
         // 2) Edit a method in the image → spliced into the owning file, alone.
         image
-            .set_method_source("Foo", Side::Instance, "x", "x [\n        ^x ifNil: [ 0 ]\n    ]")
+            .set_method_source(
+                "Foo",
+                Side::Instance,
+                "x",
+                "x [\n        ^x ifNil: [ 0 ]\n    ]",
+            )
             .unwrap();
         let s = export_world_dir(&image, &dir).unwrap();
         assert_eq!(
@@ -440,58 +453,98 @@ mod tests {
             "exactly one edit spliced, got {s:?}"
         );
         let after = fs::read_to_string(dir.join("10_foo.mst")).unwrap();
-        assert!(after.contains("ifNil: [ 0 ]"), "edited body present: {after}");
-        assert!(after.contains("bump ["), "untouched method preserved: {after}");
+        assert!(
+            after.contains("ifNil: [ 0 ]"),
+            "edited body present: {after}"
+        );
+        assert!(
+            after.contains("bump ["),
+            "untouched method preserved: {after}"
+        );
         // Idempotent again after the edit.
-        assert_eq!(export_world_dir(&image, &dir).unwrap(), ExportStats::default());
+        assert_eq!(
+            export_world_dir(&image, &dir).unwrap(),
+            ExportStats::default()
+        );
 
         // 3) New method on an EXISTING class → appended to that class's home
         // file (next to its siblings), not the catch-all additions file.
         image
-            .create_or_reopen_method("Foo", Side::Instance, "reset", "", "reset [\n        x := 0\n    ]")
+            .create_or_reopen_method(
+                "Foo",
+                Side::Instance,
+                "reset",
+                "",
+                "reset [\n        x := 0\n    ]",
+            )
             .unwrap();
         let s = export_world_dir(&image, &dir).unwrap();
         assert_eq!(s.methods_added, 1, "one new method, got {s:?}");
         let foo_txt = fs::read_to_string(dir.join("10_foo.mst")).unwrap();
-        assert!(foo_txt.contains("reset ["), "new method appended to home file: {foo_txt}");
+        assert!(
+            foo_txt.contains("reset ["),
+            "new method appended to home file: {foo_txt}"
+        );
         assert!(
             !dir.join(ADDITIONS_FILE).exists()
-                || fs::read_to_string(dir.join(ADDITIONS_FILE)).unwrap().is_empty(),
+                || fs::read_to_string(dir.join(ADDITIONS_FILE))
+                    .unwrap()
+                    .is_empty(),
             "a homed method must not spill into the additions file"
         );
-        assert_eq!(export_world_dir(&image, &dir).unwrap(), ExportStats::default());
+        assert_eq!(
+            export_world_dir(&image, &dir).unwrap(),
+            ExportStats::default()
+        );
 
         // 4) Delete a method in the image → removed from its file, siblings kept.
         image.remove_method("Foo", Side::Instance, "bump").unwrap();
         let s = export_world_dir(&image, &dir).unwrap();
         assert_eq!(s.methods_removed, 1, "one deletion exported, got {s:?}");
         let foo_txt = fs::read_to_string(dir.join("10_foo.mst")).unwrap();
-        assert!(!foo_txt.contains("bump ["), "deleted method gone: {foo_txt}");
+        assert!(
+            !foo_txt.contains("bump ["),
+            "deleted method gone: {foo_txt}"
+        );
         assert!(foo_txt.contains("x ["), "other methods kept: {foo_txt}");
 
         // 5) A brand-new class → the additions file, with its full definition.
         let lo = image.next_load_order().unwrap();
-        image.add_class("Gadget", Some("Object"), "", "", "", "", lo).unwrap();
+        image
+            .add_class("Gadget", Some("Object"), "", "", "", "", lo)
+            .unwrap();
         image
             .create_or_reopen_method("Gadget", Side::Instance, "go", "", "go [ ^42 ]")
             .unwrap();
         let s = export_world_dir(&image, &dir).unwrap();
         assert_eq!((s.classes_added, s.methods_added), (1, 1), "{s:?}");
         let adds = fs::read_to_string(dir.join(ADDITIONS_FILE)).unwrap();
-        assert!(adds.contains("Object subclass: Gadget ["), "new class in additions: {adds}");
+        assert!(
+            adds.contains("Object subclass: Gadget ["),
+            "new class in additions: {adds}"
+        );
 
         // 6) Round-trip: re-import the exported tree.
         let image2 = Image::open(&dir.join("image2.sqlite3")).unwrap();
         crate::import::import_world_dir(&image2, &dir).unwrap();
         assert!(
-            image2.method_source("Foo", Side::Instance, "reset").unwrap().is_some(),
+            image2
+                .method_source("Foo", Side::Instance, "reset")
+                .unwrap()
+                .is_some(),
             "added method round-trips"
         );
         assert!(
-            image2.method_source("Foo", Side::Instance, "bump").unwrap().is_none(),
+            image2
+                .method_source("Foo", Side::Instance, "bump")
+                .unwrap()
+                .is_none(),
             "deleted method stays gone"
         );
-        assert!(image2.class_exists("Gadget").unwrap(), "new class round-trips");
+        assert!(
+            image2.class_exists("Gadget").unwrap(),
+            "new class round-trips"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

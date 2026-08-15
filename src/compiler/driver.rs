@@ -894,7 +894,12 @@ fn compile_method_full(
                 }
             };
             for (i, e) in ir_method.pool.iter().enumerate() {
-                eprintln!("  pool[{i}] = {:#x} {:?} {}", e.value, e.kind, named(e.value));
+                eprintln!(
+                    "  pool[{i}] = {:#x} {:?} {}",
+                    e.value,
+                    e.kind,
+                    named(e.value)
+                );
             }
             eprintln!("==== END IR {sel} ====");
         }
@@ -946,8 +951,7 @@ fn compile_method_full(
     {
         static LOG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         if *LOG.get_or_init(|| std::env::var_os("MACVM_F3C_COUNT").is_some()) {
-            let (freed, crossing, freed_ext) =
-                regalloc::f3c_census(&ir_method, &regalloc_result);
+            let (freed, crossing, freed_ext) = regalloc::f3c_census(&ir_method, &regalloc_result);
             if crossing > 0 {
                 let sel = crate::oops::wrappers::SymbolOop::try_from(method.selector())
                     .map(|s| s.as_string())
@@ -1213,29 +1217,36 @@ fn compile_method_full(
         reload_pos: req.reload_pos,
     });
     let frame_slots_for_osr = regalloc_result.frame_slots;
-    let (blob, block_pcs, verified_entry_off, emitted_ic_sites, safepoint_pcs, osr_off, emitted_literal_ids) =
-        emit::emit(
-            &mut asm,
-            &ir_method,
-            &regalloc_result,
-            stub_poll_addr,
-            must_be_boolean_addr,
-            alloc_slow_addr,
-            box_double_addr,
-            box_float64x2_addr,
-            box_float32x4_addr,
-            box_int32x4_addr,
-            call_primitive_addr,
-            nlr_originate_addr,
-            prim_shim,
-            // S24 A1: a block nmethod has NO receiver-klass customization
-            // (design §2.1 — every closure is a closure_klass instance;
-            // instvar soundness comes from prefix-stable layouts, not an
-            // entry guard), so verified_entry == entry.
-            if method.is_block() { None } else { Some(guard) },
-            osr_req.as_ref(),
-            emit_frameless,
-        );
+    let (
+        blob,
+        block_pcs,
+        verified_entry_off,
+        emitted_ic_sites,
+        safepoint_pcs,
+        osr_off,
+        emitted_literal_ids,
+    ) = emit::emit(
+        &mut asm,
+        &ir_method,
+        &regalloc_result,
+        stub_poll_addr,
+        must_be_boolean_addr,
+        alloc_slow_addr,
+        box_double_addr,
+        box_float64x2_addr,
+        box_float32x4_addr,
+        box_int32x4_addr,
+        call_primitive_addr,
+        nlr_originate_addr,
+        prim_shim,
+        // S24 A1: a block nmethod has NO receiver-klass customization
+        // (design §2.1 — every closure is a closure_klass instance;
+        // instvar soundness comes from prefix-stable layouts, not an
+        // entry guard), so verified_entry == entry.
+        if method.is_block() { None } else { Some(guard) },
+        osr_req.as_ref(),
+        emit_frameless,
+    );
 
     // Debugger (MACVM_DBG_IR's second half): the same selector match also
     // dumps the EMITTED LISTING — the assembler's own per-instruction lines,
@@ -1327,12 +1338,11 @@ fn compile_method_full(
     let mut oopmaps: Vec<OopMap> = vec![OopMap::empty()];
     let mut safepoint_pcdescs: Vec<PcDesc> = Vec::with_capacity(safepoint_pcs.len());
     // F3: const-uniform vregs' slots are never written — exclude from GC maps.
-    let f3_skip: std::collections::HashSet<u32> =
-        crate::compiler::ir::const_smi_vregs(&ir_method)
-            .keys()
-            .chain(crate::compiler::ir::const_pool_vregs(&ir_method).keys())
-            .copied()
-            .collect();
+    let f3_skip: std::collections::HashSet<u32> = crate::compiler::ir::const_smi_vregs(&ir_method)
+        .keys()
+        .chain(crate::compiler::ir::const_pool_vregs(&ir_method).keys())
+        .copied()
+        .collect();
     for sp in &safepoint_pcs {
         let map = oopmap::build_for_position(
             &regalloc_result.intervals,
@@ -1419,10 +1429,7 @@ fn compile_method_full(
             selector: s.selector,
             argc: s.argc,
             state: match resolved.or(*f1) {
-                Some((klass, target)) => CompiledIcState::Mono {
-                    klass,
-                    target,
-                },
+                Some((klass, target)) => CompiledIcState::Mono { klass, target },
                 None => CompiledIcState::Unresolved,
             },
             // S13 step 10d: `super_resolutions` is `Some` iff this is a
@@ -1438,9 +1445,26 @@ fn compile_method_full(
     // value read after a resume bci is spilled (S12 spill-all), so
     // `scopes::resolve_frame_loc` alone resolves receiver/slots/stack; a
     // value not live at the safepoint is dead -> Nil.
-    let (deopt_scopes, deopt_pcdescs) =
-        build_deopt_metadata(&ir_method, &regalloc_result, &safepoint_pcs, &emitted_literal_ids);
+    let (deopt_scopes, deopt_pcdescs) = build_deopt_metadata(
+        &ir_method,
+        &regalloc_result,
+        &safepoint_pcs,
+        &emitted_literal_ids,
+    );
 
+    // The dynamic-dispatch key `(rcvr_klass, key_selector)` belongs to this
+    // nmethod ONLY if dynamic lookup actually resolves that pair to the
+    // method being compiled. A customized compile of a SUPER-send target
+    // (`Object class>>new` compiled for a subclass metaclass because the
+    // subclass's own `new` override super-sends into it) carries the SAME
+    // pair as the override that dynamic dispatch must reach — installing it
+    // into `by_key` would let ordinary sends resolve the raw super target
+    // and silently bypass the override (the WG3 sub-floor canary's root
+    // cause). Blocks never consult `by_key` (S24 A1 filler keys), so they
+    // pass `true` vacuously.
+    let owns_dynamic_key = method.is_block()
+        || crate::runtime::lookup::lookup_uncached(vm, rcvr_klass, key_selector)
+            .is_some_and(|m| m.oop().raw() == method.oop().raw());
     let mut nm = Nmethod {
         id: NmethodId(0), // overwritten by CodeTable::install
         osr_cold_sends: if osr_bci.is_some() {
@@ -1450,6 +1474,7 @@ fn compile_method_full(
         },
         key_klass: rcvr_klass,
         key_selector,
+        owns_dynamic_key,
         code: h,
         entry_off: 0,
         verified_entry_off,
@@ -1519,9 +1544,7 @@ fn compile_method_full(
         .iter()
         .zip(super_resolutions.iter().zip(&f1_resolutions))
     {
-        let patch_target = resolved
-            .or(*f1)
-            .map_or(resolve_addr, |(_, target)| target);
+        let patch_target = resolved.or(*f1).map_or(resolve_addr, |(_, target)| target);
         vm.code_cache.patch_branch26_at(h, site.off, patch_target);
     }
     // F1 deps: every direct-patched proven-self site pins (klass, selector)
@@ -1529,13 +1552,9 @@ fn compile_method_full(
     // its `bl` bypasses dynamic dispatch entirely.
     for (site, f1) in emitted_ic_sites.iter().zip(&f1_resolutions) {
         if let Some((k, _)) = f1 {
-            let dup = nm
-                .inline_deps
-                .iter()
-                .any(|(dk, ds)| {
-                    dk.oop().raw() == k.oop().raw()
-                        && ds.oop().raw() == site.selector.oop().raw()
-                });
+            let dup = nm.inline_deps.iter().any(|(dk, ds)| {
+                dk.oop().raw() == k.oop().raw() && ds.oop().raw() == site.selector.oop().raw()
+            });
             if !dup {
                 nm.inline_deps.push((*k, site.selector));
             }
@@ -1635,10 +1654,11 @@ fn build_deopt_metadata(
     // R2: pool-literal-uniform vregs rematerialize on deopt via
     // ValueLoc::ConstPool(pool word index) — translate PoolLit through the
     // assembler literal table (dense id order == pool word order).
-    let f3_pool: std::collections::HashMap<u32, u32> = crate::compiler::ir::const_pool_vregs(ir_method)
-        .into_iter()
-        .map(|(v, pl)| (v, literal_ids[pl as usize].0))
-        .collect();
+    let f3_pool: std::collections::HashMap<u32, u32> =
+        crate::compiler::ir::const_pool_vregs(ir_method)
+            .into_iter()
+            .map(|(v, pl)| (v, literal_ids[pl as usize].0))
+            .collect();
     let extra_oop_live = &regalloc_result.extra_oop_live;
     let n_slots = ir_method.argc as usize + ir_method.ntemps as usize;
     let mut rec = ScopeDescRecorder::new();
@@ -1726,7 +1746,14 @@ fn build_deopt_metadata(
                     // itself); everywhere else the pin (regalloc) keeps it
                     // live, so `resolve_frame_loc` distinguishes the two
                     // cases exactly.
-                    match resolve_frame_loc(ctx_vreg, position, intervals, extra_oop_live, &f3_const, &f3_pool) {
+                    match resolve_frame_loc(
+                        ctx_vreg,
+                        position,
+                        intervals,
+                        extra_oop_live,
+                        &f3_const,
+                        &f3_pool,
+                    ) {
                         // Pre-def window (the prologue alloc's own safepoint):
                         // hand the interpreter a FRESH nil-filled Context via
                         // the Elided path — NOT `CtxLoc::None`. The deopt
@@ -1751,7 +1778,16 @@ fn build_deopt_metadata(
                         temps: ir_method
                             .ctx_vregs
                             .iter()
-                            .map(|&v| resolve_frame_loc(v, position, intervals, extra_oop_live, &f3_const, &f3_pool))
+                            .map(|&v| {
+                                resolve_frame_loc(
+                                    v,
+                                    position,
+                                    intervals,
+                                    extra_oop_live,
+                                    &f3_const,
+                                    &f3_pool,
+                                )
+                            })
                             .collect(),
                     }
                 };
@@ -1803,20 +1839,38 @@ fn build_deopt_metadata(
                             let pending_stack = level
                                 .caller_pending_stack
                                 .iter()
-                                .map(|&v| resolve_frame_loc(v, position, intervals, extra_oop_live, &f3_const, &f3_pool))
+                                .map(|&v| {
+                                    resolve_frame_loc(
+                                        v,
+                                        position,
+                                        intervals,
+                                        extra_oop_live,
+                                        &f3_const,
+                                        &f3_pool,
+                                    )
+                                })
                                 .collect();
                             let inl_receiver = resolve_frame_loc(
                                 level.receiver,
                                 position,
                                 intervals,
                                 extra_oop_live,
-                    &f3_const,
-                    &f3_pool,
+                                &f3_const,
+                                &f3_pool,
                             );
                             let mut inl_slots: Vec<_> = level
                                 .slots
                                 .iter()
-                                .map(|&v| resolve_frame_loc(v, position, intervals, extra_oop_live, &f3_const, &f3_pool))
+                                .map(|&v| {
+                                    resolve_frame_loc(
+                                        v,
+                                        position,
+                                        intervals,
+                                        extra_oop_live,
+                                        &f3_const,
+                                        &f3_pool,
+                                    )
+                                })
                                 .collect();
                             // S14 step 7-IV-c: a slot holding an ELIDED-CLOSURE
                             // phantom overrides its (filler) vreg location — the
@@ -1847,7 +1901,16 @@ fn build_deopt_metadata(
                 let mut stack: Vec<_> = raw
                     .stack
                     .iter()
-                    .map(|&v| resolve_frame_loc(v, position, intervals, extra_oop_live, &f3_const, &f3_pool))
+                    .map(|&v| {
+                        resolve_frame_loc(
+                            v,
+                            position,
+                            intervals,
+                            extra_oop_live,
+                            &f3_const,
+                            &f3_pool,
+                        )
+                    })
                     .collect();
                 // S14 step 7-IV-c: phantom stack entries override their filler
                 // vregs (a block-arg send's guard-cold reexecute stack; in-callee
@@ -1870,6 +1933,124 @@ fn build_deopt_metadata(
         }
     }
     rec.pack()
+}
+
+// ── F0: frameless-leaf eligibility (docs/frameless_leaf_methods.md) ─────────
+
+/// Would this compiled unit qualify for frameless emission? Exhaustive over
+/// [`ir::Ir`] — a NEW op added to the enum fails to compile here until someone
+/// decides its column, so eligibility fails CLOSED by construction (§2).
+///
+/// Eligible = ops that neither call (a `bl` clobbers x30, the leaf's only
+/// return-address home), nor reach a safepoint (`Alloc`/`Poll` — a frameless
+/// body must never be observable by GC), nor carry a trap/deopt edge
+/// (a frameless unit is DEOPT-FREE: no metadata, no nil-fills). `StoreField`
+/// qualifies because its write barrier is the INLINE card-dirty sequence
+/// (`emit_store_field` — branches only, no call). Float ops are excluded in
+/// v1, TIGHTER than the design doc: the d8–d15 residency tier is
+/// callee-saved and not worth distinguishing until a float leaf matters.
+///
+/// The regalloc half (§2 "register discipline"): no spill slots, no
+/// x21–x27 residents — a leaf that needs stack or callee-saved registers
+/// falls back to framed.
+fn frameless_eligible(m: &ir::IrMethod, ra: &regalloc::RegallocResult) -> bool {
+    use crate::compiler::ir::Ir as I;
+    let ops_ok = m
+        .blocks
+        .iter()
+        .flat_map(|b| b.code.iter())
+        .all(|op| match op {
+        I::ConstSmi { .. }
+        | I::ConstPool { .. }
+        | I::Move { .. }
+        | I::Param { .. }
+        | I::LoadKlass { .. }
+        | I::LoadField { .. }
+        | I::StoreField { .. }
+        | I::SmiCmpBr { .. }
+        | I::SmiCmpVal { .. }
+        | I::RefCmpVal { .. }
+        | I::BoolNot { .. }
+        // R1/R2: proven-in-range ops have no trap, no call, no safepoint —
+        // pure ALU/memory ops (the PutNC barrier is the inline card
+        // sequence, same license as StoreField).
+        | I::SmiArithNoOv { .. }
+        | I::RefCmpBr { .. }
+        | I::SmiArithNoOvImm { .. }
+        | I::ArrayAtNC { .. }
+        | I::ArrayAtPutNC { .. }
+        | I::Jump { .. }
+        | I::BoolBr { .. }
+        | I::Ret { .. }
+        | I::RetSelf => true,
+        I::SmiArith { .. } // overflow edge (v2: trap-once, recompile framed)
+        | I::ArrayAt { .. } // bounds edge
+        | I::ArrayAtPut { .. }
+        | I::ByteAt { .. } // Z2: same bounds/klass trap edges as ArrayAt
+        | I::ByteAtPut { .. }
+        | I::SmiShift { .. } // Z3: overflow/range trap edge
+        | I::FUnbox { .. } // float family: v1 exclusion, see above
+        | I::FBox { .. }
+        | I::FArith { .. }
+        | I::FCmpBr { .. }
+        | I::FCmpVal { .. }
+        | I::FConst { .. }
+        | I::VecArith { .. }
+        | I::GuardKlass { .. }
+        | I::GuardKlassIn { .. } // deopt-adjacent fail edge + its CallSend slow block
+        | I::CallSend { .. }
+        | I::CallRuntime { .. }
+        | I::Alloc { .. }
+        | I::Poll
+        | I::UncommonTrap { .. }
+        | I::NlrReturn { .. }
+        | I::Bailout { .. } => false,
+    });
+    ops_ok
+        && ra.frame_slots == 0
+        && ra.intervals.iter().all(|iv| {
+            iv.resident_reg.is_none()
+                && !matches!(iv.assignment, Some(regalloc::Assignment::Spill(_)))
+        })
+}
+
+/// F0's whole deliverable: the running eligible/total census, so the design's
+/// coverage claim ("richards' accessor swarm") is measured before F1 emits a
+/// single different byte. Log per-unit + totals with `MACVM_FRAMELESS_COUNT=1`.
+fn note_frameless_stats(eligible: bool, holder: &str, sel: &str) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static ELIGIBLE: AtomicU64 = AtomicU64::new(0);
+    static TOTAL: AtomicU64 = AtomicU64::new(0);
+    let total = TOTAL.fetch_add(1, Ordering::Relaxed) + 1;
+    let elig = if eligible {
+        ELIGIBLE.fetch_add(1, Ordering::Relaxed) + 1
+    } else {
+        ELIGIBLE.load(Ordering::Relaxed)
+    };
+    // Env read cached once (the env::var-on-a-hot-path 2x lesson).
+    static LOG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *LOG.get_or_init(|| std::env::var_os("MACVM_FRAMELESS_COUNT").is_some()) {
+        if eligible {
+            eprintln!("frameless-eligible: {holder}>>{sel} ({elig}/{total})");
+        } else {
+            eprintln!("frameless-no:       {holder}>>{sel} ({elig}/{total})");
+        }
+    }
+}
+
+fn holder_name_for_log(vm: &VmState, k: KlassOop) -> String {
+    let _ = vm;
+    crate::runtime::error::name_of(k.name())
+}
+
+/// F3 (docs/frameless_leaf_methods.md §5): frameless emission is ON by
+/// default — F2 measured a consistent (if modest, ~2-4% richards) win with
+/// every gate green, and the F1 contract asserts keep an eligibility hole
+/// loud. `MACVM_FRAMELESS=0` is the kill switch (cached once — the
+/// env-var-on-a-hot-path lesson).
+fn frameless_emission_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("MACVM_FRAMELESS").is_none_or(|v| v != "0"))
 }
 
 #[cfg(test)]
@@ -2514,6 +2695,18 @@ mod tests {
         set_mono_smi_plus_ic(&mut vm, method);
 
         let smi_klass = vm.universe.smi_klass;
+        // INSTALL IT, so the fixture matches what it claims to test. Since the
+        // WG3 sub-floor fix, an nmethod only claims the `by_key` slot when it
+        // is what dispatch REALLY resolves to for (klass, selector) — a
+        // super-send target aliasing the slot was the bug that fix exists for.
+        // This method was never in the dictionary, so it legitimately does not
+        // own the slot and the lookup below answered None. Making it the real
+        // dispatch winner keeps the test's intent (an eligible method installs
+        // and is findable by key) and stops it asserting a state the runtime
+        // deliberately no longer produces.
+        let m_sel = SymbolOop::try_from(method.selector()).unwrap();
+        crate::runtime::lookup::install_method(&mut vm, smi_klass, m_sel, method);
+
         let id = compile_method(&mut vm, smi_klass, method).expect("eligible method must compile");
 
         let nm = vm
@@ -2599,8 +2792,9 @@ mod tests {
         let ra = regalloc::regalloc(&ir_method);
 
         let mut asm = JasmAssembler::new();
-        let (_blob, _pcs, _ve, _ic, safepoint_pcs, _osr_off, lids) =
-            emit::emit(&mut asm, &ir_method, &ra, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, None, None, false);
+        let (_blob, _pcs, _ve, _ic, safepoint_pcs, _osr_off, lids) = emit::emit(
+            &mut asm, &ir_method, &ra, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, None, None, false,
+        );
         assert_eq!(
             safepoint_pcs.len(),
             2,
@@ -2753,8 +2947,9 @@ mod tests {
         let ra = regalloc::regalloc(&ir_method);
 
         let mut asm = JasmAssembler::new();
-        let (_blob, _pcs, _ve, _ic, safepoint_pcs, _osr_off, lids) =
-            emit::emit(&mut asm, &ir_method, &ra, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, None, None, false);
+        let (_blob, _pcs, _ve, _ic, safepoint_pcs, _osr_off, lids) = emit::emit(
+            &mut asm, &ir_method, &ra, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, None, None, false,
+        );
 
         let (blob, pcdescs) = build_deopt_metadata(&ir_method, &ra, &safepoint_pcs, &lids);
 
@@ -2809,118 +3004,4 @@ mod tests {
             );
         }
     }
-}
-
-// ── F0: frameless-leaf eligibility (docs/frameless_leaf_methods.md) ─────────
-
-/// Would this compiled unit qualify for frameless emission? Exhaustive over
-/// [`ir::Ir`] — a NEW op added to the enum fails to compile here until someone
-/// decides its column, so eligibility fails CLOSED by construction (§2).
-///
-/// Eligible = ops that neither call (a `bl` clobbers x30, the leaf's only
-/// return-address home), nor reach a safepoint (`Alloc`/`Poll` — a frameless
-/// body must never be observable by GC), nor carry a trap/deopt edge
-/// (a frameless unit is DEOPT-FREE: no metadata, no nil-fills). `StoreField`
-/// qualifies because its write barrier is the INLINE card-dirty sequence
-/// (`emit_store_field` — branches only, no call). Float ops are excluded in
-/// v1, TIGHTER than the design doc: the d8–d15 residency tier is
-/// callee-saved and not worth distinguishing until a float leaf matters.
-///
-/// The regalloc half (§2 "register discipline"): no spill slots, no
-/// x21–x27 residents — a leaf that needs stack or callee-saved registers
-/// falls back to framed.
-fn frameless_eligible(m: &ir::IrMethod, ra: &regalloc::RegallocResult) -> bool {
-    use crate::compiler::ir::Ir as I;
-    let ops_ok = m.blocks.iter().flat_map(|b| b.code.iter()).all(|op| match op {
-        I::ConstSmi { .. }
-        | I::ConstPool { .. }
-        | I::Move { .. }
-        | I::Param { .. }
-        | I::LoadKlass { .. }
-        | I::LoadField { .. }
-        | I::StoreField { .. }
-        | I::SmiCmpBr { .. }
-        | I::SmiCmpVal { .. }
-        | I::RefCmpVal { .. }
-        | I::BoolNot { .. }
-        // R1/R2: proven-in-range ops have no trap, no call, no safepoint —
-        // pure ALU/memory ops (the PutNC barrier is the inline card
-        // sequence, same license as StoreField).
-        | I::SmiArithNoOv { .. }
-        | I::RefCmpBr { .. }
-        | I::SmiArithNoOvImm { .. }
-        | I::ArrayAtNC { .. }
-        | I::ArrayAtPutNC { .. }
-        | I::Jump { .. }
-        | I::BoolBr { .. }
-        | I::Ret { .. }
-        | I::RetSelf => true,
-        I::SmiArith { .. } // overflow edge (v2: trap-once, recompile framed)
-        | I::ArrayAt { .. } // bounds edge
-        | I::ArrayAtPut { .. }
-        | I::ByteAt { .. } // Z2: same bounds/klass trap edges as ArrayAt
-        | I::ByteAtPut { .. }
-        | I::SmiShift { .. } // Z3: overflow/range trap edge
-        | I::FUnbox { .. } // float family: v1 exclusion, see above
-        | I::FBox { .. }
-        | I::FArith { .. }
-        | I::FCmpBr { .. }
-        | I::FCmpVal { .. }
-        | I::FConst { .. }
-        | I::VecArith { .. }
-        | I::GuardKlass { .. }
-        | I::GuardKlassIn { .. } // deopt-adjacent fail edge + its CallSend slow block
-        | I::CallSend { .. }
-        | I::CallRuntime { .. }
-        | I::Alloc { .. }
-        | I::Poll
-        | I::UncommonTrap { .. }
-        | I::NlrReturn { .. }
-        | I::Bailout { .. } => false,
-    });
-    ops_ok
-        && ra.frame_slots == 0
-        && ra.intervals.iter().all(|iv| {
-            iv.resident_reg.is_none()
-                && !matches!(iv.assignment, Some(regalloc::Assignment::Spill(_)))
-        })
-}
-
-/// F0's whole deliverable: the running eligible/total census, so the design's
-/// coverage claim ("richards' accessor swarm") is measured before F1 emits a
-/// single different byte. Log per-unit + totals with `MACVM_FRAMELESS_COUNT=1`.
-fn note_frameless_stats(eligible: bool, holder: &str, sel: &str) {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static ELIGIBLE: AtomicU64 = AtomicU64::new(0);
-    static TOTAL: AtomicU64 = AtomicU64::new(0);
-    let total = TOTAL.fetch_add(1, Ordering::Relaxed) + 1;
-    let elig = if eligible {
-        ELIGIBLE.fetch_add(1, Ordering::Relaxed) + 1
-    } else {
-        ELIGIBLE.load(Ordering::Relaxed)
-    };
-    // Env read cached once (the env::var-on-a-hot-path 2x lesson).
-    static LOG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    if *LOG.get_or_init(|| std::env::var_os("MACVM_FRAMELESS_COUNT").is_some()) {
-        if eligible {
-            eprintln!("frameless-eligible: {holder}>>{sel} ({elig}/{total})");
-        } else {
-            eprintln!("frameless-no:       {holder}>>{sel} ({elig}/{total})");
-        }
-    }
-}
-
-fn holder_name_for_log(vm: &VmState, k: KlassOop) -> String {
-    let _ = vm;
-    crate::runtime::error::name_of(k.name())
-}
-
-/// F3 (docs/frameless_leaf_methods.md §5): frameless emission is ON by
-/// default — F2 measured a consistent (if modest, ~2-4% richards) win with
-/// every gate green, and the F1 contract asserts keep an eligibility hole
-/// loud. `MACVM_FRAMELESS=0` is the kill switch (cached once — the
-/// env-var-on-a-hot-path lesson).
-fn frameless_emission_on() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("MACVM_FRAMELESS").is_none_or(|v| v != "0"))
 }

@@ -1,0 +1,359 @@
+"── 119_winui_demos.mst — WG10: the gallery ──────────────────────────────
+ `docs/sprints/upstream_review_2026-08-12.md` said it plainly: the demos are the
+ reason to build SM0, not a sprint of their own. So these are not decoration.
+ Each one is a claim about the machinery underneath, and each would fail
+ visibly and specifically if that claim were wrong.
+
+   Life   the INDEXED plane (SM4). Generations are computed as slots, never as
+          colours, so the palette themes a running simulation without the rules
+          knowing a colour exists. Wrong neighbour arithmetic does not look
+          slightly off — Life either stabilises into gliders or turns to static,
+          and there is no middle.
+   Julia  the DIRECT BGRA plane (SM0). Per-pixel arithmetic at full rate from
+          Smalltalk, which is the claim `the VM writes video memory` makes.
+          A stride error tilts it; a fixed-point error flattens it.
+
+ FIXED POINT, NOT FLOATS, and it is the difference between a demo and a
+ slideshow. A Float per pixel ALLOCATES on a tagged-integer VM, and Julia is
+ 160x120x24 iterations — six hundred thousand allocations a frame, each one GC
+ pressure, to compute numbers that fit in a tagged integer with room to spare.
+ 12-bit fraction: the interesting part of the plane is |z| < 2, so z*4096 lives
+ in +/-8192 and its square in 67 million. Nowhere near the 62-bit tag boundary.
+
+ THE RULES ARE PURE. `WinLife stepGrid:width:height:` takes a grid and answers a
+ grid; `WinJulia colourAtX:y:...` takes coordinates and answers a colour. Both
+ are checkable with no window, no plane and no GPU, which is why WG10 has real
+ tests rather than a screenshot someone looked at once."
+
+Object subclass: WinLife [
+
+    WinLife class >> emptyGridWidth: w <Integer> height: h <Integer> ^ <Array> [
+        "Filled EXPLICITLY. `Array new:` answers nils here and there is no
+         `new:withAll:`, and a grid of nils fails later as `does not
+         understand +` inside the neighbour count — a long way from the cause."
+        | g n |
+        n := w * h.
+        g := Array new: n.
+        1 to: n do: [ :i | g at: i put: 0 ].
+        ^g
+    ]
+
+    WinLife class >> at: g <Array> x: x <Integer> y: y <Integer> width: w <Integer> ^ <Integer> [
+        "Reads OFF THE EDGE answer 0 — a dead border rather than a wrap.
+
+         Both are defensible and the choice has to be made once, here, because
+         a neighbour count that wrapped on one axis and clamped on the other
+         would produce a Life that looks almost right and is not: gliders would
+         die at one edge and survive at another."
+        (x < 0 or: [ y < 0 or: [ x >= w ] ]) ifTrue: [ ^0 ].
+        (y * w) + x + 1 > g size ifTrue: [ ^0 ].
+        ^g at: (y * w) + x + 1
+    ]
+
+    WinLife class >> neighboursOf: g <Array> x: x <Integer> y: y <Integer>
+                     width: w <Integer> ^ <Integer> [
+        | n |
+        n := 0.
+        -1 to: 1 do: [ :dy |
+            -1 to: 1 do: [ :dx |
+                (dx = 0 and: [ dy = 0 ]) ifFalse: [
+                    n := n + (self at: g x: x + dx y: y + dy width: w) ] ] ].
+        ^n
+    ]
+
+    WinLife class >> stepGrid: g <Array> width: w <Integer> height: h <Integer> ^ <Array> [
+        "Conway, unmodified: a live cell with 2 or 3 neighbours lives, a dead
+         cell with exactly 3 is born, everything else dies.
+
+         INTO A FRESH GRID, never in place. Stepping in place makes a cell's
+         fate depend on whether its neighbour was visited yet, which is not
+         Life — it is a cellular automaton nobody has a name for, and it looks
+         enough like Life to be believed."
+        | out |
+        out := self emptyGridWidth: w height: h.
+        0 to: h - 1 do: [ :y |
+            0 to: w - 1 do: [ :x |
+                | n alive |
+                n := self neighboursOf: g x: x y: y width: w.
+                alive := (self at: g x: x y: y width: w) = 1.
+                ((alive and: [ n = 2 or: [ n = 3 ] ]) or: [ alive not and: [ n = 3 ] ])
+                    ifTrue: [ out at: (y * w) + x + 1 put: 1 ] ] ].
+        ^out
+    ]
+
+    WinLife class >> seedGridWidth: w <Integer> height: h <Integer> ^ <Array> [
+        "A deterministic seed — no Random, because a gallery capture that
+         differed every run could not be compared with the last one, and
+         `it looked fine` is not a regression test.
+
+         The pattern is a cheap hash over (x, y) that is dense enough to stay
+         alive for hundreds of generations and sparse enough not to saturate,
+         plus an explicit GLIDER in the corner so there is one object on screen
+         whose behaviour a reader can check by eye."
+        | g |
+        g := self emptyGridWidth: w height: h.
+        0 to: h - 1 do: [ :y |
+            0 to: w - 1 do: [ :x |
+                (((x * 7) + (y * 13) + ((x * y) // 3)) \\ 5) = 0
+                    ifTrue: [ g at: (y * w) + x + 1 put: 1 ] ] ].
+        #( #(1 0) #(2 1) #(0 2) #(1 2) #(2 2) ) do: [ :p |
+            g at: (((p at: 2) + 1) * w) + (p at: 1) + 2 put: 1 ].
+        ^g
+    ]
+
+    WinLife class >> population: g <Array> ^ <Integer> [
+        | n | n := 0.
+        g do: [ :c | n := n + c ].
+        ^n ]
+]
+
+Object subclass: WinJulia [
+
+    WinJulia class >> shift ^ <Integer> [ ^12 ]
+    WinJulia class >> one ^ <Integer> [ ^4096 ]
+    WinJulia class >> maxIter ^ <Integer> [ ^24 ]
+
+    WinJulia class >> escapeAtX: zx0 <Integer> y: zy0 <Integer>
+                      cx: cx <Integer> cy: cy <Integer> ^ <Integer> [
+        "Iterations before |z| escapes 2, or `maxIter`. FIXED POINT throughout —
+         see the file note; a Float here would allocate six hundred thousand
+         times a frame.
+
+         PURE over four integers, so the whole of Julia is checkable with no
+         window: a point inside the set must answer `maxIter`, and a point well
+         outside must answer a small number."
+        "EVERYTHING CONSTANT IS HOISTED, and the difference is not marginal.
+         `[ i < self maxIter ] whileTrue:` re-sends `maxIter` on every one of
+         460,000 iterations a frame, and `bitShift: s negated` computes the
+         negation each time — three extra sends per iteration in a loop whose
+         body is six. Measured: 130 ms a frame before, and the arithmetic was
+         never the cost.
+
+         The rule this is an instance of: on a message-send machine, a constant
+         inside a hot loop is not free just because it is cheap."
+        | zx zy i limit down cap xx yy |
+        zx := zx0. zy := zy0.
+        down := 0 - self shift.
+        cap := self maxIter.
+        limit := 4 * self one.
+        i := 0.
+        [ i < cap ] whileTrue: [
+            xx := (zx * zx) bitShift: down.
+            yy := (zy * zy) bitShift: down.
+            xx + yy > limit ifTrue: [ ^i ].
+            zy := ((2 * zx * zy) bitShift: down) + cy.
+            zx := xx - yy + cx.
+            i := i + 1 ].
+        ^cap
+    ]
+
+    WinJulia class >> paletteFor: ph <Integer> ^ <Array> [
+        "The colour table, built ONCE PER FRAME rather than per pixel. There are
+         25 possible escape values and 19,200 pixels, so computing the colour
+         inside the pixel loop did the same 25 sums 768 times each."
+        | out |
+        out := Array new: self maxIter + 1.
+        0 to: self maxIter do: [ :i |
+            out at: i + 1 put: (self colourForEscape: i phase: ph) ].
+        ^out
+    ]
+
+    WinJulia class >> colourForEscape: i <Integer> phase: ph <Integer> ^ <Integer> [
+        "Inside the set is BLACK, and that is not a style choice — it is the
+         one region where the iteration said nothing, and colouring it would
+         invent a value the arithmetic never produced."
+        | v |
+        i >= self maxIter ifTrue: [ ^WinPixels bgraR: 0 g: 0 b: 0 ].
+        v := ((i * 10) + ph) bitAnd: 255.
+        ^WinPixels bgraR: v g: (255 - v) b: ((v * 3) bitAnd: 255)
+    ]
+]
+
+Object subclass: WinShell [
+    <classVars: LifeGrid LifeGeneration JuliaCx JuliaCy JuliaPal JuliaH>
+
+    "── Life, on the indexed plane ──────────────────────────────────────"
+
+    WinShell class >> lifeWidth ^ <Integer> [ ^160 ]
+    WinShell class >> lifeHeight ^ <Integer> [ ^120 ]
+    WinShell class >> lifeGeneration ^ <Integer> [
+        ^LifeGeneration isNil ifTrue: [ 0 ] ifFalse: [ LifeGeneration ] ]
+    WinShell class >> lifePopulation ^ <Integer> [
+        ^LifeGrid isNil ifTrue: [ 0 ] ifFalse: [ WinLife population: LifeGrid ] ]
+
+    WinShell class >> resetLife [
+        LifeGrid := WinLife seedGridWidth: self lifeWidth height: self lifeHeight.
+        LifeGeneration := 0.
+        ^self
+    ]
+
+    WinShell class >> drawLifeOn: hwnd <Integer> ^ <Boolean> [
+        "One generation, written as SLOTS. The rules never see a colour, and
+         the palette below can theme a running simulation without touching a
+         single cell — which is the whole of what SM4 buys, demonstrated on
+         something that is obviously computing rather than obviously cycling."
+        | w h ix stride pal |
+        LifeGrid isNil ifTrue: [ self resetLife ].
+        w := self lifeWidth. h := self lifeHeight.
+        (WinPixels planeFor: hwnd width: w height: h) = 0 ifTrue: [ ^false ].
+        ix := WinPixels indexPlaneFor: hwnd.
+        ix = 0 ifTrue: [ ^false ].
+        stride := WinPixels indexStrideFor: hwnd.
+        stride = 0 ifTrue: [ ^false ].
+        LifeGrid := WinLife stepGrid: LifeGrid width: w height: h.
+        LifeGeneration := self lifeGeneration + 1.
+        0 to: h - 1 do: [ :y | self lifeRow: y indices: ix stride: stride width: w ].
+        pal := WinPixels paletteFor: hwnd.
+        pal = 0 ifTrue: [ ^false ].
+        "Two slots used, 256 written: the rest are set to the dead colour so a
+         stray index can never show as uninitialised memory."
+        0 to: (WinPixels paletteLenFor: hwnd) - 1 do: [ :i |
+            WinPixels palette: pal at: i put: (WinPixels bgraR: 16 g: 16 b: 24) ].
+        WinPixels palette: pal at: 1 put: (WinPixels bgraR: 120 g: 255 b: 160).
+        ^true
+    ]
+
+    WinShell class >> lifeRow: y <Integer> indices: ix <Integer>
+                      stride: stride <Integer> width: w <Integer> [
+        "One row of slots. Entered h times a frame, so it compiles."
+        | rowBase |
+        rowBase := y * w.
+        0 to: w - 1 do: [ :x |
+            WinPixels indexAt: ix x: x y: y stride: stride
+                put: (LifeGrid at: rowBase + x + 1) ].
+        ^self
+    ]
+
+    "── Julia, on the direct plane ──────────────────────────────────────"
+
+    "── THE ROW IS A METHOD, and WHY — corrected 2026-08-12 ──────────────
+     The first version of this note said `tier-up counts method entries, not
+     loop back-edges — there is no on-stack replacement`. That was WRONG on
+     both counts, and the correction is worth more than the original claim.
+
+     THE VM DOES OSR (`src/runtime/osr.rs`, live since 0ed9d65). The
+     interpreter counts BACK-EDGES (`src/interpreter/mod.rs:602`) and offers
+     the running frame for replacement every `LOOP_COUNTER_LIMIT` = 10,000 of
+     them. A loop in an INSTALLED method, entered once, enters compiled code
+     at back-edge 10,001. Measured, same loop, same arithmetic:
+
+         installed class-side method   4 ms   osrEntries +1, osrDeclined  0
+         identical loop in a block   146 ms   osrEntries  0, osrDeclined +50
+
+     THE REAL BOUNDARY IS INSTALLED vs ANONYMOUS. `rt_osr_request` declines
+     any frame whose method dynamic lookup cannot re-find
+     (`src/runtime/osr.rs:102`) — the guard exists so an OSR nmethod is never
+     installed under a (klass, selector) key that dispatch would resolve to a
+     different method. A workspace doit is an anonymous, never-installed
+     `#doIt` run on nil; every BLOCK runs under the placeholder selector
+     `#aBlock` (`src/bytecode/builder.rs:620`). Neither can ever pass. So a
+     loop typed at doit top level, or timed inside
+     `Time millisecondsToRun: [ ... ]`, is declined every 10,000 back-edges
+     forever and runs interpreted end to end.
+
+     WHICH IS WHAT THE ORIGINAL MEASUREMENT MEASURED. The 119 ms figure was a
+     loop inside a timing BLOCK; the 11 ms figure was 19,200 calls to an
+     installed method, tiering on the invocation counter at call #20. The
+     conclusion drawn from it — that this VM has no OSR — was an artefact of
+     the harness, not a fact about the compiler.
+
+     AND THE COMPILER HAS AN ARITY ENVELOPE, which this file tripped: argc > 5
+     is `NoPermanent`, and so is any SEND SITE with argc > 7
+     (`src/compiler/driver.rs:234-281`). `juliaRow:` was written with EIGHT
+     keywords, so it could never compile by either path — and its own comment
+     claimed it did. Now four, with the per-frame constants in class vars.
+
+     THE TWO DURABLE RULES, then. A hot loop belongs in an INSTALLED method
+     with argc <= 5. Anything timed from a workspace measures the interpreter,
+     so a benchmark must call an installed method and time the CALL."
+
+    WinShell class >> drawJuliaOn: hwnd <Integer> width: w <Integer> height: h <Integer> ^ <Boolean> [
+        "c moves with the phase, so the set BREATHES — a still Julia and a
+         frozen one look identical, which is the same reason the plasma moves."
+        | base stride ph cx cy pal |
+        base := WinPixels planeFor: hwnd width: w height: h.
+        base = 0 ifTrue: [ ^false ].
+        stride := WinPixels strideFor: hwnd.
+        stride = 0 ifTrue: [ ^false ].
+        ph := self plasmaPhase.
+        "c ~ (-0.79, 0.15), nudged by the phase. Fixed point, so the nudge is
+         integer arithmetic on the same scale as everything else."
+        cx := (0 - 3236) + ((ph \\ 64) - 32).
+        cy := 614 + (((ph // 2) \\ 32) - 16).
+        "The colour table is built ONCE PER FRAME. There are 25 possible escape
+         values and 19,200 pixels, so computing colours in the pixel loop did
+         the same 25 sums 768 times each."
+        pal := WinJulia paletteFor: ph.
+        "THE PER-FRAME CONSTANTS GO IN CLASS VARS, and it is an arity fix, not
+         a style choice: passing them made `juliaRow:` an 8-keyword method
+         (argc 8 > 5 => NoPermanent) AND made this method's send site argc 8 > 7
+         => NoPermanent too, so neither could ever compile. Set once a frame,
+         read h*w times; the row method is now argc 4 and inside the envelope."
+        JuliaCx := cx. JuliaCy := cy. JuliaPal := pal. JuliaH := h.
+        0 to: h - 1 do: [ :y |
+            self juliaRow: y base: base stride: stride width: w ].
+        PlasmaPhase := ph + 2.
+        ^true
+    ]
+
+    WinShell class >> juliaRow: y <Integer> base: base <Integer>
+                      stride: stride <Integer> width: w <Integer> [
+        "One row. ARGC 4, deliberately — five or fewer is the compiler's
+         envelope (`src/compiler/driver.rs:236`), and the eight-keyword version
+         this replaces could never compile while claiming in its own comment
+         that it did. The per-frame constants come from class vars set once by
+         `drawJuliaOn:`.
+
+         Entered h times a frame, so it tiers up on the INVOCATION counter
+         after the first frame — and its own 320-iteration inner loop would
+         OSR anyway at back-edge 10,001, because this is an installed method.
+         Both paths are open to it now; neither was before."
+        | zy one half zx esc cx cy pal |
+        one := WinJulia one.
+        cx := JuliaCx. cy := JuliaCy. pal := JuliaPal.
+        half := JuliaH // 2.
+        zy := (y - half) * one // half * 3 // 2.
+        half := w // 2.
+        0 to: w - 1 do: [ :x |
+            zx := (x - half) * one // half * 3 // 2.
+            esc := WinJulia escapeAtX: zx y: zy cx: cx cy: cy.
+            WinPixels at: base x: x y: y stride: stride put: (pal at: esc + 1) ].
+        ^self
+    ]
+]
+
+"── the gallery's two lines into the Canvas ──────────────────────────────
+ `drawGalleryOn:` and `canvasLabel` are the whole of the wiring. 116 owns the
+ pane, the grid and the HUD; this file owns what goes in the plane. Adding a
+ demo touches neither the renderer nor the render path."
+
+Object subclass: WinShell [
+
+    WinShell class >> drawGalleryOn: hwnd <Integer> ^ <Boolean> [
+        "#game: THE GUEST STANDS DOWN. When an upstream game owns the pane its
+         frames arrive from the host — drawn in the primary, uploaded by the
+         pump — and the plane already holds the picture. Answering true without
+         touching it means a WM_PAINT re-presents the GAME's frame instead of
+         overwriting it with ours, which is exactly what a repaint did the first
+         time a game ran here: the plasma HUD reappeared over Life."
+        self canvasMode == #game  ifTrue: [ ^true ].
+        self canvasMode == #life  ifTrue: [ ^self drawLifeOn: hwnd ].
+        self canvasMode == #julia ifTrue: [
+            ^self drawJuliaOn: hwnd width: self canvasPlaneWidth height: self canvasPlaneHeight ].
+        ^false
+    ]
+
+    WinShell class >> canvasLabel ^ <String> [
+        "#game draws NO label — the pane belongs to the game, including the
+         cells. Answering empty is what makes the HUD row vanish."
+        self canvasMode == #game ifTrue: [ ^'' ].
+        self canvasMode == #life ifTrue: [
+            ^'CANVAS life - gen ' , self lifeGeneration printString
+                , ', ' , self lifePopulation printString , ' alive, indexed plane' ].
+        self canvasMode == #julia ifTrue: [
+            ^'CANVAS julia - fixed point, no Floats, direct BGRA' ].
+        self canvasMode == #palette ifTrue: [
+            ^'CANVAS palette - 256 stores/frame, 19200 pixels move' ].
+        ^'CANVAS plasma - 19200 stores/frame, direct BGRA'
+    ]
+]

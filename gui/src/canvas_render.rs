@@ -29,8 +29,7 @@ pub fn render_canvas(width: u32, height: u32) -> String {
     // (a Pixmap, `../docs/CANVAS.md` pixel path) blitted in one putImageData —
     // the right primitive for a per-pixel image. The GUI holds no Mandelbrot
     // knowledge; any other pixel drawing is just another button/Workspace eval.
-    let mandelbrot_code =
-        format!("Mandelbrot new pixelsForWidth: {width} height: {height}");
+    let mandelbrot_code = format!("Mandelbrot new pixelsForWidth: {width} height: {height}");
     // The libm function-plot demo (world/37_waves.mst) — the VECTOR command
     // path (`canvasEval`), same generic transport, different pipeline.
     let waves_code = format!("WaveChart new commandsForWidth: {width} height: {height}");
@@ -69,7 +68,10 @@ mod tests {
         // The Mandelbrot demo routes through the GENERIC pixel path, carrying
         // its Smalltalk (sized to this canvas) in a data attribute — no
         // Mandelbrot-specific canvas action exists.
-        assert!(html.contains("data-canvas-action=\"eval-pixels\""), "{html}");
+        assert!(
+            html.contains("data-canvas-action=\"eval-pixels\""),
+            "{html}"
+        );
         assert!(
             html.contains("data-canvas-eval=\"Mandelbrot new pixelsForWidth: 420 height: 220\""),
             "{html}"
@@ -79,9 +81,7 @@ mod tests {
             "{html}"
         );
         assert!(
-            html.contains(
-                "data-canvas-eval=\"BenchmarkDashboard chartForWidth: 420 height: 220\""
-            ),
+            html.contains("data-canvas-eval=\"BenchmarkDashboard chartForWidth: 420 height: 220\""),
             "{html}"
         );
         assert!(html.contains("data-canvas-action=\"clear\""), "{html}");

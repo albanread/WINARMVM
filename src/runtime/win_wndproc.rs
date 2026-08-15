@@ -38,6 +38,22 @@
 //! so the two halves can disagree safely — but only in the direction of doing
 //! *less*.
 //!
+//! **WG4 D5 admitted `WM_MOUSEMOVE`, deliberately, and it is the exception
+//! that proves the rule.** The transcript splitter is dragged, and a drag is
+//! made of exactly the message this list was written to keep out. Three things
+//! make the cost acceptable rather than merely tolerated:
+//!
+//! * the allowlist scan is the FIRST thing `macvm_wndproc` does, so an
+//!   off-drag storm is a handful of integer compares and a `DefWindowProcW`;
+//! * the door only ever RECORDS (§2.4a flag-and-drain), so a move that
+//!   arrives mid-drag costs a flag, not a VM entry;
+//! * `WinShell` answers `#defwindowproc` when no drag is active, which is the
+//!   two-sided property above doing its job — the expensive half is gated by
+//!   the side that knows whether it is needed.
+//!
+//! `WM_NCHITTEST` and `WM_SETCURSOR` stay off the list and always have. If a
+//! future sprint wants one of them, it owes the same three-part argument.
+//!
 //! ## D3 — the depth guard, and exactly what it covers
 //!
 //! `DispatchMessageW` re-enters: `DefWindowProcW` generates nested messages, a
@@ -106,6 +122,13 @@ extern "system" {
     /// re-entrancy the whole flag-and-drain pattern exists to avoid.
     /// `drain_wake_is_post_not_send` is the test that says so.
     fn PostMessageW(hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> i32;
+    /// WINARM (WG6c-1). `BeginPaint` VALIDATES the invalid region as a side
+    /// effect, which is the whole reason a paint cannot be flag-and-drained:
+    /// without it Windows re-sends `WM_PAINT` immediately and forever. The
+    /// `PAINTSTRUCT` is opaque here -- only `hdc` at 0 and `rcPaint` at 8 are
+    /// read, and those two offsets are fixed by the API contract itself.
+    fn BeginPaint(hwnd: isize, ps: *mut u8) -> isize;
+    fn EndPaint(hwnd: isize, ps: *const u8) -> i32;
 }
 
 #[link(name = "kernel32")]
@@ -179,6 +202,75 @@ pub const WM_APP_DRAIN: u32 = 0x8000 + 7;
 /// BUILD error rather than a test.
 const _WM_APP_DRAIN_IS_PRIVATE: () = assert!(WM_APP_DRAIN >= 0x8000);
 
+/// WINARM (WG6c-3, finished in WG7): **File In** — the guest asking the host
+/// to restart the primary on a file it has just written.
+///
+/// A private message rather than an allowlisted one, and handled by the
+/// TRAMPOLINE rather than routed to `WinShell`, for the same reason
+/// [`WM_APP_DRAIN`] is: its meaning is the HOST's, not Smalltalk's. The guest
+/// cannot restart the primary — it IS one of the two VMs involved — so what
+/// crosses here is a request, recorded and acted on by the pump between
+/// dispatches. Restarting from inside the door would be a VM entry joining a
+/// thread that is waiting on the VM.
+///
+/// The FILE is not carried: the guest writes to a path both sides derive the
+/// same way (`GetTempPathW` here, `std::env::temp_dir()` there — both read
+/// TMP/TEMP), so nothing has to marshal a string through a `wParam`.
+pub const WM_APP_FILEIN: u32 = 0x8000 + 8;
+const _WM_APP_FILEIN_IS_PRIVATE: () = assert!(WM_APP_FILEIN >= 0x8000);
+
+/// WINARM (WG9-2): **Load the test corpus** — the guest asking the host to
+/// restart the primary with `world/tests/tests.list`'s classes loaded on top of
+/// the world.
+///
+/// A private message for the same reason [`WM_APP_FILEIN`] is: the work is
+/// "join the primary's thread and boot a new one", which a wndproc must never
+/// do. It carries no payload — the corpus's location is derived on the host
+/// side from the world directory, exactly as file-in's path is.
+pub const WM_APP_LOADTESTS: u32 = 0x8000 + 9;
+const _WM_APP_LOADTESTS_IS_PRIVATE: () = assert!(WM_APP_LOADTESTS >= 0x8000);
+
+/// Set by the trampoline when a `WM_APP_LOADTESTS` arrives; taken by the pump.
+static LOADTESTS_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Taken by the pump between dispatches, like [`take_filein_requested`].
+pub fn take_loadtests_requested() -> bool {
+    LOADTESTS_REQUESTED.swap(false, Ordering::AcqRel)
+}
+
+/// WINARM (WG11-W13): **Launch a demo** — the guest asking the host to wipe
+/// the game pane's layers and only THEN start the next demo.
+///
+/// It exists for an ordering reason, not a threading one. `GamePane reset` is
+/// guest state alone (it emits no command, so the host cannot see it), and the
+/// host's layers — text overlay, cell plane, sprites, shader, palette — are
+/// process-lifetime statics rather than a pane object that can be dropped. So
+/// the host must be told, and it must be told *before* the primary is told to
+/// launch, or the wipe lands on the new demo's setup instead of the old
+/// demo's leftovers. Posting this and sending the launch doit side by side
+/// would be exactly that race: two threads, two queues, no order between them.
+///
+/// So the guest posts ONLY this; the pump wipes and then asks the guest to
+/// send the launch. One thread, two steps, in order.
+pub const WM_APP_DEMO: u32 = 0x8000 + 10;
+const _WM_APP_DEMO_IS_PRIVATE: () = assert!(WM_APP_DEMO >= 0x8000);
+
+/// Set by the trampoline when a `WM_APP_DEMO` arrives; taken by the pump.
+static DEMO_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// The pump: has the guest asked to start a demo since we last looked?
+pub fn take_demo_requested() -> bool {
+    DEMO_REQUESTED.swap(false, Ordering::AcqRel)
+}
+
+/// Set by the trampoline when a `WM_APP_FILEIN` arrives; taken by the pump.
+static FILEIN_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// The pump: has the guest asked for a File In since we last looked?
+pub fn take_filein_requested() -> bool {
+    FILEIN_REQUESTED.swap(false, Ordering::AcqRel)
+}
+
 /// **The closed set.** A message not named here never reaches the VM entry
 /// point, whatever `WinShell` may or may not implement — `allowlist_is_a_closed_set`
 /// is the test, and the probe counter it reads is [`vm_entries`].
@@ -201,7 +293,60 @@ const _WM_APP_DRAIN_IS_PRIVATE: () = assert!(WM_APP_DRAIN >= 0x8000);
 /// `allowlist_matches_winkb` (world side, `62_winui_door_tests.mst`) checks
 /// every one of them against winkb when the database IS present — so a typo is
 /// caught by data rather than trusted to care.
-pub const ALLOWLIST: [u32; 11] = [
+/// `WM_DRAWITEM` (0x2B). WG4 D3: an owner-drawn control asks its PARENT to
+/// paint it. Allowlisted for the same reason `WM_NOTIFY` is — its meaning is
+/// Smalltalk's — but it is the one message whose handler may not simply flag
+/// and return: a paint cannot be deferred to the drain without leaving the
+/// strip blank until something else repaints it.
+///
+/// The permission is narrow and stated (sprint_wg4_detail.md D3): painting is
+/// a RESPONSE, not work — bounded, allocation-free, and re-entrancy-free by
+/// construction, because every GDI call goes into a DC Windows just handed us
+/// and none of them sends a message back. The handler draws from fields
+/// already copied out of the struct, calls no VM entry of its own, and touches
+/// no control other than the one being drawn.
+pub const WM_DRAWITEM: u32 = 0x002B;
+
+/// WG4 D5: the three messages a splitter drag is made of. Allowlisted as a
+/// set, because any one without the others is a drag that starts and never
+/// ends (or ends without having begun) — and a captured mouse that never sees
+/// its button-up leaves the pointer captured for the life of the window.
+pub const WM_LBUTTONDOWN: u32 = 0x0201;
+pub const WM_LBUTTONUP: u32 = 0x0202;
+pub const WM_MOUSEMOVE: u32 = 0x0200;
+/// WINARM (WG6c-1). See [`perform_paint`] for why this one crosses.
+pub const WM_PAINT: u32 = 0x000F;
+
+/// `WM_MOUSEWHEEL` (0x020A). WINARM (WG6f): the editor panes scroll.
+///
+/// The third exemption from §2.4a's flag-and-drain, and it gets the same
+/// three-part argument WG4 D5 used for `WM_MOUSEMOVE` and WG6c-1 for
+/// `WM_PAINT`:
+///
+/// 1. **Its meaning is Smalltalk's.** A wheel notch means "move this
+///    document", and only the guest knows which document, how many lines a
+///    notch is worth, and where the top already is. Rust deciding would be
+///    Rust owning the viewport.
+/// 2. **It is a RECORD, not work.** The handler adjusts one integer (the top
+///    line) and invalidates; the redraw happens through the pump exactly as
+///    every other repaint does. Nothing is drawn inside the door.
+/// 3. **It is bounded.** A wheel generates far fewer messages than the
+///    `WM_MOUSEMOVE` already admitted, and the guest declines any wheel that
+///    is not over a pane it owns — the same shape as the drag.
+///
+/// `wParam`'s HIGH word is a SIGNED delta in multiples of `WHEEL_DELTA`
+/// (120), which the guest reads with the same signed-half arithmetic
+/// `loWordSigned:`/`hiWordSigned:` already do for `lParam` — and for the same
+/// reason WG4 D5 records: the naive `bitAnd:` reads a scroll-down as 65416.
+pub const WM_MOUSEWHEEL: u32 = 0x020A;
+
+pub const ALLOWLIST: [u32; 17] = [
+    WM_DRAWITEM,
+    WM_PAINT,
+    WM_MOUSEWHEEL,
+    WM_LBUTTONDOWN,
+    WM_LBUTTONUP,
+    WM_MOUSEMOVE,
     WM_CLOSE,
     WM_DESTROY,
     WM_SIZE,
@@ -813,6 +958,23 @@ pub extern "system" fn macvm_wndproc(hwnd: isize, msg: u32, wparam: usize, lpara
         let _ = catch_unwind(AssertUnwindSafe(|| service_drain(hwnd)));
         return 0;
     }
+    // WG6c-3/WG7: File In. RECORDED here and acted on by the pump — the same
+    // flag-and-drain shape as everything else, and load-bearing rather than
+    // stylistic: the work is "join the primary's thread and spawn a new one",
+    // which cannot happen inside a wndproc without the door holding a VM entry
+    // while it waits on another VM.
+    if msg == WM_APP_FILEIN {
+        FILEIN_REQUESTED.store(true, Ordering::Release);
+        return 0;
+    }
+    if msg == WM_APP_LOADTESTS {
+        LOADTESTS_REQUESTED.store(true, Ordering::Release);
+        return 0;
+    }
+    if msg == WM_APP_DEMO {
+        DEMO_REQUESTED.store(true, Ordering::Release);
+        return 0;
+    }
     if msg == WM_TIMER {
         let _ = catch_unwind(AssertUnwindSafe(|| service_drain(hwnd)));
         // ...and then the system default anyway. WG3 owns exactly one timer and
@@ -942,6 +1104,24 @@ fn cross_into_smalltalk(hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> 
     let sample = msg == WM_SIZE;
     let t0 = if sample { qpc() } else { 0 };
     let raw = handle.dispatch_callback(NOT_HANDLED, |vm| {
+        if msg == WM_DRAWITEM {
+            // WG4 D3. The SAME payload-lifetime constraint as WM_NOTIFY —
+            // `lParam` is a `DRAWITEMSTRUCT*` alive only for this call — but
+            // with one difference stated in the sprint design: this handler
+            // DRAWS before it returns, because a paint cannot be deferred to
+            // the drain without leaving the control blank. It draws from
+            // copied-out values into a DC Windows just handed us; it stashes
+            // nothing and calls nothing that sends a message back.
+            return perform_drawitem(vm, lparam);
+        }
+        if msg == WM_PAINT {
+            // WINARM (WG6c-1). Synchronous for exactly WM_DRAWITEM's reason,
+            // one step further: a paint cannot be deferred to the drain
+            // because Windows re-sends WM_PAINT until the region is
+            // VALIDATED, so a flag-and-drain paint spins forever or leaves
+            // the pane blank. BeginPaint validates it; EndPaint closes it.
+            return perform_paint(vm, hwnd);
+        }
         if msg == WM_NOTIFY {
             // D3's payload-lifetime constraint. `lParam` is an `NMHDR*` that is
             // valid ONLY for the duration of this call, so the three fields are
@@ -999,6 +1179,183 @@ unsafe fn read_nmhdr(p: isize) -> (isize, usize, u32) {
     let id_from = std::ptr::read_unaligned(base.add(8) as *const usize);
     let code = std::ptr::read_unaligned(base.add(16) as *const u32);
     (hwnd_from, id_from, code)
+}
+
+/// The four `DRAWITEMSTRUCT` fields WG4 D3 needs, read out of a pointer that
+/// dies when this call returns: `CtlID` (offset 4), `itemState` (16), `hDC`
+/// (32) and `rcItem` (40, four `LONG`s).
+///
+/// Transcribed offsets, same exception and same compensating control as
+/// [`read_nmhdr`]: `testDrawItemOffsetsMatchWinkb` asks winkb for each by name
+/// and asserts these literals, so a wrong one fails in-language rather than
+/// painting into the wrong place.
+///
+/// # Safety
+/// `p` must be the `DRAWITEMSTRUCT*` Windows passed in `WM_DRAWITEM`'s
+/// `lParam`, read during the call. Called only from inside
+/// `dispatch_callback`, so a bad pointer is a recovered fault.
+unsafe fn read_drawitem(p: isize) -> (u32, u32, isize, [i32; 4]) {
+    let base = p as *const u8;
+    let ctl_id = std::ptr::read_unaligned(base.add(4) as *const u32);
+    let item_state = std::ptr::read_unaligned(base.add(16) as *const u32);
+    let hdc = std::ptr::read_unaligned(base.add(32) as *const isize);
+    let left = std::ptr::read_unaligned(base.add(40) as *const i32);
+    let top = std::ptr::read_unaligned(base.add(44) as *const i32);
+    let right = std::ptr::read_unaligned(base.add(48) as *const i32);
+    let bottom = std::ptr::read_unaligned(base.add(52) as *const i32);
+    (ctl_id, item_state, hdc, [left, top, right, bottom])
+}
+
+/// `WM_DRAWITEM` -> `WinShell class>>drawItem:state:dc:x:y:w:h:`, every argument
+/// a `SmallInteger` and no pointer among them — D3's constraint, unchanged by
+/// the fact that this one draws inline.
+fn perform_drawitem(vm: &mut VmState, lparam: isize) -> u64 {
+    let (ctl_id, item_state, hdc, r) = unsafe { read_drawitem(lparam) };
+    let (Some(a_id), Some(a_state), Some(a_dc)) = (
+        SmallInt::try_new(ctl_id as i64),
+        SmallInt::try_new(item_state as i64),
+        SmallInt::try_new(hdc as i64),
+    ) else {
+        return NOT_HANDLED;
+    };
+    let (Some(a_x), Some(a_y), Some(a_w), Some(a_h)) = (
+        SmallInt::try_new(r[0] as i64),
+        SmallInt::try_new(r[1] as i64),
+        SmallInt::try_new((r[2] - r[0]) as i64),
+        SmallInt::try_new((r[3] - r[1]) as i64),
+    ) else {
+        return NOT_HANDLED;
+    };
+    let Some(cls) = win_shell_class(vm) else {
+        return NOT_HANDLED;
+    };
+    let sel = vm.universe.intern(b"drawItem:state:dc:x:y:w:h:");
+    let k = crate::runtime::primitives::klass_of(vm, cls);
+    let Some(m) = crate::runtime::lookup::lookup(vm, k, sel) else {
+        return NOT_HANDLED;
+    };
+    let argv = [
+        a_id.oop(),
+        a_state.oop(),
+        a_dc.oop(),
+        a_x.oop(),
+        a_y.oop(),
+        a_w.oop(),
+        a_h.oop(),
+    ];
+    let result = crate::interpreter::run_method_reentrant(vm, m, cls, &argv);
+    match SmallInt::try_from(result) {
+        Some(n) => n.value() as u64,
+        None => NOT_HANDLED,
+    }
+}
+
+/// `WM_PAINT` -> `WinShell class>>paintWindow:dc:x:y:w:h:`, every argument a
+/// `SmallInteger` and no pointer among them -- D3's constraint, which this
+/// keeps by copying the `PAINTSTRUCT`'s rect out before the guest runs.
+///
+/// # Why this is on the allowlist at all
+///
+/// §2.4a is flag-and-drain, and this is the second message to be exempted
+/// (after `WM_DRAWITEM`, and for a sharper version of its reason). Three
+/// things justify it:
+///
+/// 1. **It cannot be deferred.** A flagged paint is a paint that did not
+///    happen, and Windows re-sends `WM_PAINT` until the invalid region is
+///    validated. Drain-later spins or blanks the pane.
+/// 2. **The shape is already here.** `perform_drawitem` runs Smalltalk
+///    synchronously inside the door for the same underlying reason: drawing
+///    needs a DC that exists only for the duration of the message.
+/// 3. **It is scoped to windows we own.** Only a child created with OUR
+///    window class routes here at all; every stock control paints itself
+///    through its own WndProc and never reaches this door.
+///
+/// `EndPaint` runs on EVERY path, including a guest that fails to answer a
+/// SmallInteger -- an unvalidated region would have Windows re-send
+/// `WM_PAINT` immediately, which presents as a hang rather than as a missed
+/// repaint.
+#[cfg(windows)]
+fn perform_paint(vm: &mut VmState, hwnd: isize) -> u64 {
+    // PAINTSTRUCT on 64-bit, 72 bytes: `hdc` at 0 (8 bytes), `fErase` at 8
+    // (4 bytes), `rcPaint` at 12 (4 x i32), then fRestore, fIncUpdate,
+    // rgbReserved[32].
+    //
+    // `rcPaint` IS AT 12, NOT 8, and this read it at 8 from WG6c-1 until
+    // WG6f — so every paint decoded `[fErase, left, top, right]` as
+    // `[left, top, right, bottom]` and handed the guest x=fErase, y=left,
+    // w=top-fErase, h=right-left. Measured on the splitter, which is 880x22
+    // and arrived as `#(0 0 0 880)`.
+    //
+    // IT IS ALSO THE ROOT OF THE REPORTED SMEARING. A full-client
+    // invalidation has left=top=0 and fErase=0, so the garbage decoded to
+    // (0,0) and everything looked right — which is every invalidation WE
+    // issue. A PARTIAL one, which is what Windows sends when another window
+    // is dragged across the pane, decoded to a nonsense origin and the whole
+    // document was drawn displaced over the copy already there. Two rounds of
+    // fixes went past this because both were looking at the guest.
+    //
+    // This crate cannot ask winkb (it is the VM, and the database is the
+    // guest layer's), so the numbers are transcribed — which is precisely the
+    // practice §2's own rule forbids for struct members and this defect is
+    // the argument for it. They are asserted against winkb from the guest by
+    // `paintstruct_offsets_match_winkb` in 62_winui_door_tests.mst, so a typo
+    // is caught by data rather than trusted to care.
+    const PS_RCPAINT: usize = 12;
+    let mut ps = [0u8; 128];
+    let hdc = unsafe { BeginPaint(hwnd, ps.as_mut_ptr() as *mut _) };
+    let rect = unsafe {
+        let base = ps.as_ptr();
+        [
+            std::ptr::read_unaligned(base.add(PS_RCPAINT) as *const i32),
+            std::ptr::read_unaligned(base.add(PS_RCPAINT + 4) as *const i32),
+            std::ptr::read_unaligned(base.add(PS_RCPAINT + 8) as *const i32),
+            std::ptr::read_unaligned(base.add(PS_RCPAINT + 12) as *const i32),
+        ]
+    };
+    let answer = paint_body(vm, hwnd, hdc, rect);
+    unsafe { EndPaint(hwnd, ps.as_ptr() as *const _) };
+    answer
+}
+
+/// The guest call, split out so [`perform_paint`]'s `EndPaint` is
+/// unconditional and impossible to skip by adding an early return here.
+#[cfg(windows)]
+fn paint_body(vm: &mut VmState, hwnd: isize, hdc: isize, r: [i32; 4]) -> u64 {
+    let (Some(a_hwnd), Some(a_dc)) = (
+        SmallInt::try_new(hwnd as i64),
+        SmallInt::try_new(hdc as i64),
+    ) else {
+        return NOT_HANDLED;
+    };
+    let (Some(a_x), Some(a_y), Some(a_w), Some(a_h)) = (
+        SmallInt::try_new(r[0] as i64),
+        SmallInt::try_new(r[1] as i64),
+        SmallInt::try_new((r[2] - r[0]) as i64),
+        SmallInt::try_new((r[3] - r[1]) as i64),
+    ) else {
+        return NOT_HANDLED;
+    };
+    let Some(cls) = win_shell_class(vm) else {
+        return NOT_HANDLED;
+    };
+    let sel = vm.universe.intern(b"paintWindow:dc:x:y:w:h:");
+    let k = crate::runtime::primitives::klass_of(vm, cls);
+    let Some(m) = crate::runtime::lookup::lookup(vm, k, sel) else {
+        return NOT_HANDLED;
+    };
+    let argv = [
+        a_hwnd.oop(),
+        a_dc.oop(),
+        a_x.oop(),
+        a_y.oop(),
+        a_w.oop(),
+        a_h.oop(),
+    ];
+    let result = crate::interpreter::run_method_reentrant(vm, m, cls, &argv);
+    match SmallInt::try_from(result) {
+        Some(n) => n.value() as u64,
+        None => NOT_HANDLED,
+    }
 }
 
 /// The three `NMHDR` fields as `SmallInteger`s, or `None` if any of them will
@@ -1198,20 +1555,30 @@ mod tests {
         for m in ALLOWLIST {
             assert!(is_allowlisted(m), "{m:#06x} is on the list");
         }
-        // The storm messages, by name and by number, plus WM_PAINT which is
-        // deliberately NOT routed in WG2.
+        // The storm messages that STILL do not cross, by name and by number,
+        // plus WM_PAINT which is deliberately not routed.
+        //
+        // `WM_MOUSEMOVE` (0x0200) is no longer among them: WG4 D5 admitted it
+        // for the splitter drag, with the three-part argument in this module's
+        // own header (allowlist scan first, door records only, `WinShell`
+        // declines when no drag is active). It is asserted as PRESENT above,
+        // via the ALLOWLIST loop -- so this test still pins the set exactly,
+        // it just pins the set WG4 actually ships.
+        // WM_PAINT (0x000F) left this list in WG6c-1: a custom-drawn editor
+        // pane is a child of OUR window class, so its paint reaches this door
+        // and must. `perform_paint`'s doc carries the three-part argument, the
+        // same shape WG4 D5 used to admit WM_MOUSEMOVE. It is asserted as
+        // PRESENT by the ALLOWLIST loop above.
         for m in [
-            0x0200u32, // WM_MOUSEMOVE
-            0x0084,    // WM_NCHITTEST
+            0x0084u32, // WM_NCHITTEST
             0x0020,    // WM_SETCURSOR
-            0x000F,    // WM_PAINT
             0x0014,    // WM_ERASEBKGND
             0x0001,    // WM_CREATE
         ] {
             assert!(!is_allowlisted(m), "{m:#06x} must not cross");
         }
         let before = vm_entries();
-        for m in [0x0200u32, 0x0084, 0x0020, 0x000F] {
+        for m in [0x0084u32, 0x0020] {
             let _ = macvm_wndproc(0, m, 0, 0);
         }
         assert_eq!(
@@ -1265,7 +1632,7 @@ mod tests {
         }
         assert!(!vm_busy(), "the RAII guard must release on scope exit");
         assert_eq!(vm_entries(), before, "the VM must not have been entered");
-        assert_eq!(busy_declined() > 0, true);
+        assert!(busy_declined() > 0);
     }
 
     // ── the test this sprint is actually nervous about ──────────────────────

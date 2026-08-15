@@ -1,0 +1,97 @@
+"world/bench/wg5b_accept.mst — WG5b-2's END-TO-END gate, driven by
+ `just gate-wg5b`.
+
+ WHAT THE RUST DIFFERENTIAL CANNOT PROVE, and this can. `winui_host`'s own
+ `cg8_*` tests call the exported symbols directly, so they prove the adapter
+ and `image_store::flows` agree — which is the CG8 gate proper. They do NOT
+ exercise the FFI. This goes the whole way: a Smalltalk String, through
+ `WinArena nativeUtf16:`, through `library:` resolution and LoadLibraryA,
+ through the A64 trampoline into the DLL, into the image, and back out as
+ UTF-16 read by count.
+
+ It drives `acceptSourceText:` — the SAME method the Accept cell reaches,
+ with only the one control read lifted out — rather than a private copy
+ written for the gate, which would prove only that the copy worked.
+
+ Runs against a SCRATCH image (MACVM_IMAGE_PATH), never the repo's own: the
+ whole point of the write path is that it really writes."
+
+Object subclass: Wg5bAccept [
+    <classVars: Failures>
+
+    Wg5bAccept class >> fail: why <String> [
+        Failures := (Failures isNil ifTrue: [ 0 ] ifFalse: [ Failures ]) + 1.
+        Transcript showCr: 'wg5b: FAIL ' , why
+    ]
+
+    Wg5bAccept class >> check: ok <Boolean> named: what <String> [
+        ok
+            ifTrue: [ Transcript showCr: 'wg5b: ok ' , what ]
+            ifFalse: [ self fail: what ]
+    ]
+
+    Wg5bAccept class >> run [
+        | src back |
+        Failures := 0.
+        Transcript showCr: 'wg5b: channel available = ' , WinHost available printString.
+        WinHost available ifFalse: [
+            self fail: 'no channel — build it with `cargo build -p winui_host`'.
+            ^self report ].
+
+        "The browser's own selection state, set the way a click sets it."
+        WinShell selectBrowserClass: 'Point'.
+        WinShell selectBrowserSide: #instance.
+
+        src := 'wg5bMarker ^42'.
+        self check: (WinShell acceptSourceText: src) named: 'accept wrote the image'.
+
+        "Read it back through a DIFFERENT export, in the other direction
+         through the same channel — so a marshalling bug that happened to be
+         symmetric still shows up as wrong text rather than cancelling out."
+        back := WinHost methodSourceFor: 'Point' side: #instance selector: 'wg5bMarker'.
+        self check: (back at: 1) named: 'read back'.
+        self check: (back at: 2) = src named: 'round trip is EXACT'.
+        (back at: 2) = src ifFalse: [
+            Transcript showCr: 'wg5b:   wrote [' , src , ']'.
+            Transcript showCr: 'wg5b:   read  [' , (back at: 2) , ']' ].
+
+        "An edit of the same selector must land, and must not duplicate it."
+        WinShell selectBrowserClass: 'Point'.
+        self check: (WinShell acceptSourceText: 'wg5bMarker ^43')
+             named: 'an edit of the same selector is accepted'.
+        back := WinHost methodSourceFor: 'Point' side: #instance selector: 'wg5bMarker'.
+        self check: (back at: 2) = 'wg5bMarker ^43' named: 'the edit is what the image now holds'.
+
+        "The class side, which crosses the ABI as a bare integer — an inverted
+         test is invisible from both ends, the method simply lands on the
+         other side of the class and cannot be found."
+        WinShell selectBrowserSide: #class.
+        self check: (WinShell acceptSourceText: 'wg5bClassMarker ^self new')
+             named: 'the class side accepts'.
+        back := WinHost methodSourceFor: 'Point' side: #class selector: 'wg5bClassMarker'.
+        self check: (back at: 2) = 'wg5bClassMarker ^self new' named: 'and landed on the CLASS side'.
+        back := WinHost methodSourceFor: 'Point' side: #instance selector: 'wg5bClassMarker'.
+        self check: (back at: 2) isEmpty named: 'and not also on the instance side'.
+        WinShell selectBrowserSide: #instance.
+
+        "A refusal must be flows' own words rather than an invented message."
+        WinShell selectBrowserClass: 'Point'.
+        self check: (WinShell acceptSourceText: '42') not named: 'a non-pattern is refused'.
+
+        "And Accept with nothing selected must write nothing at all — the
+         shape of an accident that silently edits whatever was last chosen."
+        WinShell selectBrowserClass: nil.
+        self check: (WinShell acceptSourceText: 'x ^1') not named: 'empty selection declined'.
+
+        ^self report
+    ]
+
+    Wg5bAccept class >> report [
+        Failures = 0
+            ifTrue: [ Transcript showCr: 'wg5b: ALL CHECKS PASSED' ]
+            ifFalse: [ Transcript showCr: 'wg5b: ' , Failures printString , ' CHECK(S) FAILED' ].
+        ^Failures
+    ]
+]
+
+Wg5bAccept run.

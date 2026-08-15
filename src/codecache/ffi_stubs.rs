@@ -300,7 +300,12 @@ mod tests {
         let mut cache = test_cache();
         let stubs = install(&mut cache);
         let want = unsafe { getpid() };
-        let got = stubs.invoke(FfiRetClass::G, getpid as *const () as u64, &[0; ARGV_G_WORDS], &[0; 8]);
+        let got = stubs.invoke(
+            FfiRetClass::G,
+            getpid as *const () as u64,
+            &[0; ARGV_G_WORDS],
+            &[0; 8],
+        );
         assert_eq!(got as i32, want);
     }
 
@@ -334,11 +339,30 @@ mod tests {
     #[test]
     fn ret_g_spills_stack_args_nine_and_beyond() {
         extern "C" fn sum12(
-            a: u64, b: u64, c: u64, d: u64, e: u64, f: u64, g: u64, h: u64,
-            i: u64, j: u64, k: u64, l: u64,
+            a: u64,
+            b: u64,
+            c: u64,
+            d: u64,
+            e: u64,
+            f: u64,
+            g: u64,
+            h: u64,
+            i: u64,
+            j: u64,
+            k: u64,
+            l: u64,
         ) -> u64 {
-            a + b * 2 + c * 4 + d * 8 + e * 16 + f * 32 + g * 64 + h * 128
-                + i * 256 + j * 512 + k * 1024 + l * 2048
+            a + b * 2
+                + c * 4
+                + d * 8
+                + e * 16
+                + f * 32
+                + g * 64
+                + h * 128
+                + i * 256
+                + j * 512
+                + k * 1024
+                + l * 2048
         }
         let mut cache = test_cache();
         let stubs = install(&mut cache);
@@ -351,8 +375,18 @@ mod tests {
         assert_eq!(got, want, "a register or stack slot landed wrong");
 
         extern "C" fn mixed(
-            a: u64, b: u64, c: u64, d: u64, e: u64, f: u64, g: u64, h: u64,
-            i: u64, j: u64, x: f64, y: f64,
+            a: u64,
+            b: u64,
+            c: u64,
+            d: u64,
+            e: u64,
+            f: u64,
+            g: u64,
+            h: u64,
+            i: u64,
+            j: u64,
+            x: f64,
+            y: f64,
         ) -> u64 {
             a + b + c + d + e + f + g + h + i * 100 + j * 1000 + ((x * y) as u64)
         }

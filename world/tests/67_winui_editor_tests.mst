@@ -1,0 +1,848 @@
+"67_winui_editor_tests.mst — WinUiEditorWg6cTests: the editor pane's
+ arithmetic, all of it pure.
+
+ WG6c's view is drawn by us, so every position on screen is a calculation we
+ own — and calculations can be checked exactly, with no window, which is the
+ same line this port has drawn since WG3. What needs a window (a paint
+ arriving, a real keystroke, a caret blinking) is `just gate-wg5b`.
+
+ THE BACKBONE IS ROUND-TRIPPING. Offset → (line, col) → offset must be the
+ identity, and pixel → offset must invert offset → pixel. A caret that lands
+ one character out is the single most noticeable defect an editor can have,
+ and it is exactly the kind of thing that survives eyeballing."
+
+TestCase subclass: WinUiEditorWg6cTests [
+    WinUiEditorWg6cTests class >> isEnabled ^ <Boolean> [
+        "WG9-2: the gate that used to live only in
+         `99_run_all.mst`'s guards, moved here so DISCOVERY can see
+         it too (`TestRunner allTestClasses`). platform-gated; see 99_run_all.mst's bookkeeping note."
+        ^Smalltalk platformName == #windows
+    ]
+
+
+    runAll [
+        self runTest: #testLineColRoundTrips do: [ self testLineColRoundTrips ].
+        self runTest: #testCaretPointIsColumnTimesWidth
+             do: [ self testCaretPointIsColumnTimesWidth ].
+        self runTest: #testHitTestInvertsTheCaretPoint
+             do: [ self testHitTestInvertsTheCaretPoint ].
+        self runTest: #testClickingPastEndOfLineLandsAtItsEnd
+             do: [ self testClickingPastEndOfLineLandsAtItsEnd ].
+        self runTest: #testTheCaretIsAlwaysInsideTheDocument
+             do: [ self testTheCaretIsAlwaysInsideTheDocument ].
+        self runTest: #testTypingThenUndoRestoresExactly
+             do: [ self testTypingThenUndoRestoresExactly ].
+        self runTest: #testANewDocumentResetsTheCaretAndSelection
+             do: [ self testANewDocumentResetsTheCaretAndSelection ].
+        self runTest: #testTheSelectionIsOrderedWhicheverWayItWasMade
+             do: [ self testTheSelectionIsOrderedWhicheverWayItWasMade ].
+        self runTest: #testSelectionRectsCoverExactlyTheSelectedLines
+             do: [ self testSelectionRectsCoverExactlyTheSelectedLines ].
+        self runTest: #testTypingOverASelectionReplacesIt
+             do: [ self testTypingOverASelectionReplacesIt ].
+        self runTest: #testReplacingASelectionIsOneUndo
+             do: [ self testReplacingASelectionIsOneUndo ].
+        self runTest: #testPasteInsertsTextNotKeyNames
+             do: [ self testPasteInsertsTextNotKeyNames ].
+        self runTest: #testCopyingNothingLeavesTheClipboardAlone
+             do: [ self testCopyingNothingLeavesTheClipboardAlone ].
+        self runTest: #testTheEditorViewTilesItsContentRect
+             do: [ self testTheEditorViewTilesItsContentRect ].
+        self runTest: #testUtf16UnitsAreNotByteCounts
+             do: [ self testUtf16UnitsAreNotByteCounts ].
+        self runTest: #testTwoPanesKeepTheirOwnDocumentAndCaret
+             do: [ self testTwoPanesKeepTheirOwnDocumentAndCaret ].
+        self runTest: #testScrollingIsALineOffsetAndItClamps
+             do: [ self testScrollingIsALineOffsetAndItClamps ].
+        self runTest: #testHitTestingFollowsTheScroll
+             do: [ self testHitTestingFollowsTheScroll ].
+        self runTest: #testANewDocumentScrollsToTheTop
+             do: [ self testANewDocumentScrollsToTheTop ].
+        self runTest: #testMonitorShedsColumnsNarrowestFirst
+             do: [ self testMonitorShedsColumnsNarrowestFirst ].
+        self runTest: #testMonitorRendersTheWholeTableItWasGiven
+             do: [ self testMonitorRendersTheWholeTableItWasGiven ].
+        self runTest: #testAddToWorldNamesItsFileAfterTheClass
+             do: [ self testAddToWorldNamesItsFileAfterTheClass ].
+        self runTest: #testPixelPackingIsBgraNotRgba
+             do: [ self testPixelPackingIsBgraNotRgba ].
+        self runTest: #testTransparentBackgroundIsNotAColour
+             do: [ self testTransparentBackgroundIsNotAColour ].
+        self runTest: #testAnEmptyDebuggerSaysHowToFillIt
+             do: [ self testAnEmptyDebuggerSaysHowToFillIt ].
+        self runTest: #testAnEmptyMonitorSaysItIsEarlyNotBroken
+             do: [ self testAnEmptyMonitorSaysItIsEarlyNotBroken ].
+        self runTest: #testTestReportParsesWhatTheRunnerAnswers
+             do: [ self testTestReportParsesWhatTheRunnerAnswers ].
+        self runTest: #testTestReportKeepsPipesInsideAMessage
+             do: [ self testTestReportKeepsPipesInsideAMessage ].
+        self runTest: #testAReplyIsUnquotedBeforeItIsParsed
+             do: [ self testAReplyIsUnquotedBeforeItIsParsed ].
+        self runTest: #testTheVerdictLineCountsAndAgrees
+             do: [ self testTheVerdictLineCountsAndAgrees ].
+        self runTest: #testLifeObeysConwayAndNotSomethingNearby
+             do: [ self testLifeObeysConwayAndNotSomethingNearby ].
+        self runTest: #testLifeStepsIntoAFreshGrid
+             do: [ self testLifeStepsIntoAFreshGrid ].
+        self runTest: #testJuliaSeparatesInsideFromOutside
+             do: [ self testJuliaSeparatesInsideFromOutside ]
+    ]
+
+    "── WG10: the gallery's rules, checked with no window ────────────────"
+
+    testLifeObeysConwayAndNotSomethingNearby [
+        "A BLINKER, which is the smallest pattern that can tell Conway from a
+         rule that is nearly Conway: three in a row must become three in a
+         column and then three in a row again. An off-by-one in the neighbour
+         count, or a survive-on-4, and it dies or explodes on the first step —
+         either of which reads as `Life is broken` rather than as one wrong
+         comparison.
+
+         5x5 with a dead border, so the edge rule is exercised too: the blinker
+         sits at the middle and its vertical form reaches within one cell of the
+         top and bottom."
+        | g w h |
+        w := 5. h := 5.
+        g := WinLife emptyGridWidth: w height: h.
+        "Row 2 (0-based), columns 1..3 — a horizontal blinker."
+        g at: (2 * w) + 1 + 1 put: 1.
+        g at: (2 * w) + 2 + 1 put: 1.
+        g at: (2 * w) + 3 + 1 put: 1.
+        self assert: (WinLife population: g) equals: 3.
+        g := WinLife stepGrid: g width: w height: h.
+        self assert: (WinLife population: g) equals: 3
+            description: 'a blinker keeps three cells; it became '
+                , (WinLife population: g) printString.
+        "Now VERTICAL: column 2, rows 1..3."
+        self assert: (WinLife at: g x: 2 y: 1 width: w) equals: 1.
+        self assert: (WinLife at: g x: 2 y: 2 width: w) equals: 1.
+        self assert: (WinLife at: g x: 2 y: 3 width: w) equals: 1.
+        self assert: (WinLife at: g x: 1 y: 2 width: w) equals: 0.
+        "And back again, which is what makes it a period-2 oscillator rather
+         than a pattern that happened to have three cells twice."
+        g := WinLife stepGrid: g width: w height: h.
+        self assert: (WinLife at: g x: 1 y: 2 width: w) equals: 1.
+        self assert: (WinLife at: g x: 3 y: 2 width: w) equals: 1.
+        self assert: (WinLife at: g x: 2 y: 1 width: w) equals: 0.
+        "OFF THE EDGE IS DEAD, not wrapped. A count that wrapped on one axis
+         and clamped on the other gives a Life that looks almost right."
+        self assert: (WinLife at: g x: 0 - 1 y: 2 width: w) equals: 0.
+        self assert: (WinLife at: g x: w y: 2 width: w) equals: 0.
+        self assert: (WinLife at: g x: 2 y: h width: w) equals: 0
+    ]
+
+    testLifeStepsIntoAFreshGrid [
+        "Stepping IN PLACE makes a cell's fate depend on whether its neighbour
+         was visited yet — a cellular automaton nobody has a name for, which
+         looks enough like Life to be believed. Asserted by checking the INPUT
+         is untouched, because that is the property the bug would break."
+        | g before after |
+        g := WinLife emptyGridWidth: 5 height: 5.
+        g at: (2 * 5) + 1 + 1 put: 1.
+        g at: (2 * 5) + 2 + 1 put: 1.
+        g at: (2 * 5) + 3 + 1 put: 1.
+        before := WinLife population: g.
+        after := WinLife stepGrid: g width: 5 height: 5.
+        self assert: (WinLife population: g) equals: before
+            description: 'stepGrid must not mutate the grid it was given'.
+        self assert: (WinLife at: g x: 1 y: 2 width: 5) equals: 1.
+        self assert: (WinLife at: after x: 1 y: 2 width: 5) equals: 0
+    ]
+
+    testJuliaSeparatesInsideFromOutside [
+        "The whole of Julia in one property: the origin does not escape for
+         this c, and a point far outside escapes almost at once. A fixed-point
+         mistake collapses the two — every point escaping on iteration 0, or
+         none ever escaping — and both render as a flat rectangle that looks
+         like a stride bug.
+
+         INTEGER ONLY, at the 12-bit scale the demo uses: 4096 is 1.0."
+        | inside outside edge |
+        inside := WinJulia escapeAtX: 0 y: 0 cx: 0 - 3236 cy: 614.
+        self assert: inside equals: WinJulia maxIter
+            description: 'the origin should not escape, but escaped at '
+                , inside printString.
+        outside := WinJulia escapeAtX: 4096 * 4 y: 4096 * 4 cx: 0 - 3236 cy: 614.
+        self assert: outside equals: 0
+            description: 'a point well outside |z|=2 escapes immediately'.
+        "And SOMETHING in between, or the function is a two-valued step and the
+         colouring has nothing to colour."
+        "z = 1.5, which is inside |z|=2 and so cannot escape on iteration 0,
+         but is outside this c's filled set and so must escape eventually.
+         z = 1.0 does NOT work here and the first version of this test used it:
+         the origin's basin for c = -0.79 + 0.15i reaches past 1.0, so it
+         answered maxIter and looked like a broken escape test."
+        edge := WinJulia escapeAtX: 4096 * 3 // 2 y: 0 cx: 0 - 3236 cy: 614.
+        self assert: (edge > 0 and: [ edge < WinJulia maxIter ]) equals: true
+            description: 'z=1.5 should take a few iterations, took '
+                , edge printString.
+        "Inside the set is BLACK — the one region where the iteration said
+         nothing, and colouring it would invent a value it never produced."
+        self assert: (WinJulia colourForEscape: WinJulia maxIter phase: 7)
+            equals: (WinPixels bgraR: 0 g: 0 b: 0)
+    ]
+
+    "── WG9: the Tests view, checked without a primary ───────────────────
+     Everything the pane draws is computed by pure methods over a parsed report,
+     which is what makes the whole view checkable here: no window, no worker
+     seam, and not a single real test class."
+
+    testTestReportParsesWhatTheRunnerAnswers [
+        "`Name|run|failed|firstFailure` per line, which is what
+         `TestRunner reportFor:` writes. Both halves of a seam that carries no
+         types, so the format is pinned on this side too."
+        | rows |
+        rows := WinShell parseTestReport: 'AlphaTests|12|0|
+BetaTests|3|1|testWrong: one is not two
+'.
+        self assert: rows size equals: 2.
+        self assert: ((rows at: 1) at: 1) equals: 'AlphaTests'.
+        self assert: ((rows at: 1) at: 2) equals: 12.
+        self assert: ((rows at: 1) at: 3) equals: 0.
+        self assert: ((rows at: 2) at: 4) equals: 'testWrong: one is not two'.
+        "LINES THAT ARE NOT REPORT LINES ARE DROPPED. `runTest:do:` prints each
+         test's name to the Transcript, and in some configurations that shares
+         this channel — a parser that took every line would fill the view with
+         `  testOne` and call each one a test class."
+        self assert: (WinShell parseTestReport: '  testOne
+AlphaTests|1|0|
+not a report line at all
+') size equals: 1
+    ]
+
+    testTestReportKeepsPipesInsideAMessage [
+        "THREE SPLITS, NOT FOUR. The message is the last field and keeps every
+         `|` in it. A failure message that split its own row would be a parse
+         bug reported as a test result, which is the most confusing thing a test
+         view can do — you would go looking at the test."
+        | rows |
+        rows := WinShell parseTestReport: 'PipeTests|1|1|expected a|b got c|d
+'.
+        self assert: rows size equals: 1.
+        self assert: ((rows at: 1) at: 4) equals: 'expected a|b got c|d'
+    ]
+
+    testAReplyIsUnquotedBeforeItIsParsed [
+        "The worker seam answers a RENDERED String, so a String result arrives
+         wearing quotes with its own doubled inside. Undoing that is the
+         difference between two parsed rows and none — the failure mode is a
+         Tests view that always says `no test classes in the image` while the
+         runner is working perfectly."
+        self assert: (WinShell unquotedReply: '''A|1|0|''') equals: 'A|1|0|'.
+        self assert: (WinShell unquotedReply: '''it''''s''') equals: 'it''s'.
+        "Not quoted? Then untouched — the seam is allowed to change its mind
+         about rendering without this becoming a truncation bug."
+        self assert: (WinShell unquotedReply: 'A|1|0|') equals: 'A|1|0|'.
+        self assert: (WinShell unquotedReply: '') equals: ''
+    ]
+
+    testTheVerdictLineCountsAndAgrees [
+        "The one line everybody reads. It must agree with the rows beneath it —
+         a verdict computed from anything other than the same rows the pane
+         draws could say PASS above a red row.
+
+         And it must count in English: `1 class`, not `1 classes`. Small, and
+         read on every single run."
+        self assert: (WinShell count: 1 of: 'class') equals: '1 class'.
+        self assert: (WinShell count: 2 of: 'class') equals: '2 classes'.
+        self assert: (WinShell count: 0 of: 'assertion') equals: '0 assertions'.
+        self assert: (WinShell count: 1 of: 'assertion') equals: '1 assertion'
+    ]
+
+    testAnEmptyDebuggerSaysHowToFillIt [
+        "A view's empty state is the screen it shows most, and the Debugger's
+         was the single word `RUNNING` — accurate, and teaching nothing to the
+         one person who most needs it: someone who opened the Debugger to find
+         out what it is for.
+
+         TWO THINGS AT ONCE, which is why this is a test rather than a look.
+         `isHalted` asks the report rather than keeping a second copy of the
+         truth, so `RUNNING` is a LOAD-BEARING sentinel — teaching text put in
+         front of it would silently make the shell believe it is halted forever.
+         So: it must still start with RUNNING, and it must still say something."
+        | r |
+        r := WinShell runningReport.
+        self assert: (r startsWith: 'RUNNING')
+            description: 'RUNNING is the sentinel isHalted reads; it must lead'.
+        self assert: WinShell isHalted not
+            description: 'and the teaching text must not read as a halt'.
+        self assert: r size > 200
+            description: 'an empty state that teaches is longer than one word'.
+        "It names the KEY, so the reader can act without leaving the view."
+        self assert: (WinShell indexOf: 'F5' in: r) > 0
+            description: 'the resume key belongs in the empty state'.
+        "And it names the two-VM split, which is the fact that makes this whole
+         view possible and is invisible from anywhere else in the shell."
+        self assert: (WinShell indexOf: 'primary' in: r) > 0
+            description: 'the empty state should say WHERE a halt happens'.
+        "ASCII ONLY. A guest String is UTF-8 BYTES and the cell grid takes
+         CODEPOINTS, so one em-dash becomes three cells reading `a00`. This is
+         the fourth time that mismatch has reached a screen in this port — the
+         Monitor's `0Â·0`, the Debugger's `[]` boxes, `ExtTextOut` given byte
+         counts — so the rule is asserted rather than remembered.
+
+         Checked on the WHOLE report, so a well-meant typographic dash added in
+         a later edit fails here rather than on someone's screen."
+        r do: [ :chr |
+            self assert: chr asInteger < 128
+                description: 'non-ASCII byte ' , chr asInteger printString
+                    , ' in the empty state renders as separate cells' ]
+    ]
+
+    testAnEmptyMonitorSaysItIsEarlyNotBroken [
+        "A header row over nothing reads as a broken Monitor. It is in fact an
+         early one — the host pushes rows on a timer — and the distinction is
+         four lines of text and one fewer afternoon spent debugging a view that
+         works.
+
+         Checked on the PURE formatter, so no window and no host are involved."
+        | empty full |
+        empty := WinShell monitorRowsArrived: ''.
+        empty := WinShell monitorTextFor: 100.
+        self assert: (WinShell indexOf: 'No VMs reporting yet' in: empty) > 0
+            description: 'an empty Monitor should say so in words'.
+        self assert: (WinShell indexOf: 'primary registers' in: empty) > 0
+            description: 'and should say what WOULD appear here'.
+        "And the moment there IS a row, the teaching gets out of the way — an
+         empty state that survived its own emptiness would be worse than none."
+        WinShell monitorRowsArrived: 'primary|running|1|2|3'.
+        full := WinShell monitorTextFor: 100.
+        self assert: (WinShell indexOf: 'No VMs reporting yet' in: full) = 0
+            description: 'the empty state must vanish when data arrives'.
+        WinShell monitorRowsArrived: ''
+    ]
+
+    testTransparentBackgroundIsNotAColour [
+        "The Canvas composes two planes by having the HUD's cells declare a
+         background the renderer SKIPS rather than fills. That sentinel has to
+         be a value no real background can collide with, and this is the test
+         that says so: `BG_TRANSPARENT` sets bit 24, which is above every bit a
+         24-bit RGB background can reach.
+
+         The constant is duplicated — `winui_render`'s `BG_TRANSPARENT` and
+         this — because it crosses an FFI boundary that carries no types. If
+         they ever drift, the HUD paints a solid bar over the pixels; asserting
+         the VALUE here is what makes that a test failure rather than a
+         screenshot someone has to notice."
+        | t |
+        t := WinPixels transparentBackground.
+        self assert: t = 16r01000000
+            description: 'the sentinel must match Rust BG_TRANSPARENT, was ' , t printString.
+        self assert: t > 16rFFFFFF
+            description: 'and must be unreachable by any 24-bit colour'.
+        self assert: ((WinPixels bgraR: 255 g: 255 b: 255) bitAnd: 16rFFFFFF) ~= t
+            description: 'white is a colour, not a hole'
+    ]
+
+    testPixelPackingIsBgraNotRgba [
+        "The swapchain is `DXGI_FORMAT_B8G8R8A8_UNORM`, so BLUE is the low byte
+         — one byte order along from COLORREF, and exactly the kind of thing
+         that looks plausible while every red thing renders blue.
+
+         Asserted on PURE colours, because a mixed one can be wrong in a way
+         that still looks like a colour: pure red must land in bits 16..23 and
+         nowhere else."
+        | red blue green |
+        red := WinPixels bgraR: 255 g: 0 b: 0.
+        green := WinPixels bgraR: 0 g: 255 b: 0.
+        blue := WinPixels bgraR: 0 g: 0 b: 255.
+        self assert: red = 16rFFFF0000
+            description: 'red is the THIRD byte, but packed as ' , red printString.
+        self assert: green = 16rFF00FF00
+            description: 'green is the second, but packed as ' , green printString.
+        self assert: blue = 16rFF0000FF
+            description: 'blue is the LOW byte, but packed as ' , blue printString.
+        self assert: (WinPixels bgraR: 0 g: 0 b: 0) = 16rFF000000
+            description: 'and alpha is always opaque, or the plane is invisible'
+    ]
+
+    testAddToWorldNamesItsFileAfterTheClass [
+        "Add to World writes `world/user_<name>.mst`, and the NAME comes from
+         the code rather than from a dialog — the first class the buffer
+         defines. Deliberately the same shape `flows::parse_mst_source` looks
+         for, because two parsers disagreeing about what a class definition IS
+         would be a very confusing pair of error messages.
+
+         A buffer with no class in it answers NIL rather than guessing, so the
+         verb can refuse instead of writing `user_nil.mst`."
+        self assert: (WinShell firstClassNameIn: 'Object subclass: Demo [ run [ ^1 ] ]') = 'Demo'
+            description: 'the first class name is found'.
+        self assert: (WinShell firstClassNameIn: 'Magnitude subclass: Money_2 [ ]') = 'Money_2'
+            description: 'digits and underscores are part of a name'.
+        self assert: (WinShell firstClassNameIn: '"just a comment" 3 + 4') isNil
+            description: 'a buffer with no class definition answers nil'.
+        self assert: (WinShell firstClassNameIn: '') isNil
+            description: 'and so does an empty one'
+    ]
+
+    "── WG7-2: the Monitor ───────────────────────────────────────────────"
+
+    twoVmRows [
+        "The wire format the host pushes: rows newline-separated, fields
+         US-separated. WG6b's own, and for the reason it records — a unit
+         separator cannot occur in a VM label, so nothing needs escaping."
+        | us |
+        us := String with: (Character value: 31).
+        ^'primary', us, 'primary', us, 'idle', us, 'live', us, '2.0M', us, '3', us, '99', us, '7',
+          (String with: Character nl),
+          'ui-worker', us, 'hosted', us, 'busy', us, 'live', us, '1.2M', us, '1', us, '42', us, '0'
+    ]
+
+    testMonitorShedsColumnsNarrowestFirst [
+        "COLUMN PRIORITY is the SPRINTS row's own phrase: the table sheds its
+         least important columns as the pane narrows rather than scrolling
+         sideways, because a monitor you have to scroll to read is a monitor
+         nobody reads.
+
+         And NEVER below one column — a Monitor with no VM name is not a
+         narrower Monitor, it is a broken one. That floor is the assertion
+         worth having, because it is the one a plain `while it fits` loop gets
+         wrong at small widths."
+        | wide narrow tiny |
+        wide := WinShell monitorColumnsFitting: 200.
+        narrow := WinShell monitorColumnsFitting: 40.
+        tiny := WinShell monitorColumnsFitting: 1.
+        self assert: wide size = WinShell monitorColumns size
+            description: 'a wide pane shows every column'.
+        self assert: narrow size < wide size
+            description: 'a narrow one sheds some, but kept ' , narrow size printString.
+        self assert: narrow size >= 1 description: 'and never all of them'.
+        self assert: tiny size = 1
+            description: 'a width of one character still shows the VM name, but showed '
+                , tiny size printString.
+        self assert: ((tiny at: 1) at: 2) = 'VM'
+            description: 'and the column it keeps is the NAME'
+    ]
+
+    testMonitorRendersTheWholeTableItWasGiven [
+        "BLAST, DON'T PATCH: one string in, the whole table out. Every VM the
+         host published must appear — a Monitor that quietly dropped a row
+         would be worse than no Monitor, because it looks authoritative."
+        | text |
+        WinShell monitorRowsArrived: self twoVmRows.
+        self assert: WinShell monitorVmCount = 2
+            description: 'two VMs were published, but the table holds '
+                , WinShell monitorVmCount printString.
+        text := WinShell monitorTextFor: 200.
+        self assert: (text indexOfSubCollection: 'primary') > 0
+            description: 'the primary is in the table'.
+        self assert: (text indexOfSubCollection: 'ui-worker') > 0
+            description: 'and so is the UI worker'.
+        self assert: (text indexOfSubCollection: 'busy') > 0
+            description: 'and a VM''s STATE is shown, not just its name'.
+        "An empty push is an empty table, not a crash and not the last one
+         left on screen pretending to be current."
+        WinShell monitorRowsArrived: ''.
+        self assert: WinShell monitorVmCount = 0
+            description: 'an empty roster empties the table'
+    ]
+
+    threeLines [ ^'one', (String with: Character nl), 'two', (String with: Character nl), 'three' ]
+
+    testLineColRoundTrips [
+        "Offset → (line, col) → offset is the identity for every position in
+         the document. Checked over ALL of them rather than a sample: it is a
+         short document and an exhaustive check costs nothing, where a sampled
+         one could miss exactly the newline boundary that breaks."
+        | text |
+        WinShell openEditorOn: self threeLines.
+        text := WinShell editorText.
+        1 to: text size + 1 do: [ :i |
+            | lc back |
+            lc := WinShell editorLineColOf: i.
+            back := WinShell editorOffsetOfLine: (lc at: 1) col: (lc at: 2).
+            self assert: back = i
+                description: 'offset ' , i printString , ' round-trips via '
+                    , lc printString , ' but came back as ' , back printString ]
+    ]
+
+    testCaretPointIsColumnTimesWidth [
+        "The forward arithmetic, stated once so the inverse below has
+         something to be the inverse OF."
+        | p |
+        WinShell openEditorOn: self threeLines.
+        p := WinShell caretPointFor: 1.
+        self assert: p = (Array with: 0 with: 0)
+            description: 'the first character is at the origin'.
+        p := WinShell caretPointFor: 6.
+        self assert: (p at: 1) = WinShell editorCharWidth
+            description: 'offset 6 is column 1 of line 1'.
+        self assert: (p at: 2) = WinShell editorLineHeight
+            description: 'and one line down'
+    ]
+
+    testHitTestInvertsTheCaretPoint [
+        "Pixel → offset must undo offset → pixel. A caret that lands one
+         character out on a click is the most noticeable defect an editor can
+         have and the easiest to not notice while testing by eye."
+        | text |
+        WinShell openEditorOn: self threeLines.
+        text := WinShell editorText.
+        1 to: text size + 1 do: [ :i |
+            | p back |
+            p := WinShell caretPointFor: i.
+            back := WinShell editorOffsetAtX: (p at: 1) y: (p at: 2).
+            self assert: back = i
+                description: 'offset ' , i printString , ' → ' , p printString
+                    , ' → ' , back printString ]
+    ]
+
+    testClickingPastEndOfLineLandsAtItsEnd [
+        "What every editor does, and what a user means by clicking in the
+         empty space to the right of a short line."
+        | atEnd |
+        WinShell openEditorOn: self threeLines.
+        atEnd := WinShell editorOffsetAtX: 10000 y: 0.
+        self assert: atEnd = 4
+            description: 'past the end of `one` is its end (offset 4), not the next line'
+    ]
+
+    testTheCaretIsAlwaysInsideTheDocument [
+        "Every navigation below can run off an end, and a caret outside the
+         buffer is an `at:` away from a raise INSIDE A PAINT — which shows as
+         a blank pane with nothing to say why. Clamped on the way in, so no
+         caller has to remember."
+        WinShell openEditorOn: self threeLines.
+        WinShell editorCaret: 0 - 99.
+        self assert: WinShell editorCaret = 1 description: 'clamped at the bottom'.
+        WinShell editorCaret: 99999.
+        self assert: WinShell editorCaret = (WinShell editorText size + 1)
+            description: 'and at the top, which is one PAST the last character'
+    ]
+
+    testTypingThenUndoRestoresExactly [
+        "The whole argument for the rope: `TextBuffer` keeps the ROOTS of a
+         persistent tree, so the previous root IS the previous document. No
+         journal, no replay, nothing to apply partially."
+        | before |
+        WinShell openEditorOn: self threeLines.
+        before := WinShell editorText.
+        WinShell editorCaret: 1.
+        WinShell editorApply: 'X'.
+        self assert: WinShell editorText ~= before
+            description: 'typing changed the document'.
+        WinShell editorCommand: 'undo'.
+        self assert: WinShell editorText = before
+            description: 'and undo restored it EXACTLY'
+    ]
+
+    "── WG6c-2b: the selection, and what it is for ───────────────────────"
+
+    testANewDocumentResetsTheCaretAndSelection [
+        "The view's caret is the VIEW's to reset, and nothing was doing it: the
+         session started each document at 1 while the view kept the previous
+         class's caret and anchor. On a SHORTER document that is a selection
+         running off the end, which is a raise inside a paint — the failure
+         with no symptom but a blank pane."
+        WinShell openEditorOn: self threeLines.
+        WinShell editorSelectAll.
+        WinShell openEditorOn: 'ab'.
+        self assert: WinShell editorCaret = 1
+            description: 'a new document starts at the beginning'.
+        self assert: WinShell editorHasSelection not
+            description: 'and with nothing selected, whatever the last one left'
+    ]
+
+    testTheSelectionIsOrderedWhicheverWayItWasMade [
+        "Anchor and caret fall either way round — dragging BACKWARDS through
+         the anchor is the ordinary case, not the exotic one — and every
+         caller wants the span rather than the history of how it was made."
+        | forward backward |
+        WinShell openEditorOn: self threeLines.
+        WinShell editorCaretAt: 1.
+        WinShell editorCaret: 4.
+        forward := WinShell editorSelection.
+        self assert: forward = (Array with: 1 with: 3)
+            description: 'anchor 1, caret 4 is #(1 3) but was ' , forward printString.
+        "Now the other way round — anchor at the END, caret dragged back past
+         it, which is what a backwards drag actually is. `editorSelectAll` will
+         not do: it anchors at 1, so moving the caret back to 1 COLLAPSES the
+         selection rather than inverting it."
+        WinShell editorCaretAt: WinShell editorText size + 1.
+        WinShell editorCaret: 1.
+        backward := WinShell editorSelection.
+        self assert: (backward at: 1) = 1
+            description: 'a backwards selection still starts at the lower end'.
+        self assert: (backward at: 2) = (WinShell editorText size)
+            description: 'and spans to the anchor, not from it'
+    ]
+
+    testSelectionRectsCoverExactlyTheSelectedLines [
+        "What the user SEES is these rectangles, so they are checked rather
+         than trusted — this project has shipped an invisible feature before
+         (WG5a D4's ghost line) precisely by testing the value a drawing would
+         use instead of the drawing.
+
+         `one\ntwo\nthree` selected whole is three rects: two short lines that
+         include their newline as a visible sliver, and a last line that has
+         none to include."
+        | rects w |
+        WinShell openEditorOn: self threeLines.
+        WinShell editorSelectAll.
+        rects := WinShell editorSelectionRectsAtX: 0 y: 0.
+        w := WinShell editorCharWidth.
+        self assert: rects size = 3
+            description: 'three lines selected is three rects, not '
+                , rects size printString.
+        self assert: ((rects at: 1) at: 3) = (4 * w)
+            description: '`one` plus its newline is four columns wide'.
+        self assert: ((rects at: 2) at: 2) = WinShell editorLineHeight
+            description: 'the second rect is one line down'.
+        self assert: ((rects at: 3) at: 3) = (5 * w)
+            description: '`three` has no newline to include, so five columns'.
+        "And no selection is no rectangles — the cost of the feature when it
+         is not in use."
+        WinShell resetEditorCaret.
+        self assert: (WinShell editorSelectionRectsAtX: 0 y: 0) isEmpty
+            description: 'an empty selection draws nothing'
+    ]
+
+    testTypingOverASelectionReplacesIt [
+        "The whole point of a selection. Backspace and Delete go the same way
+         and are asserted with it, because the three used to need three
+         different code paths and would have drifted."
+        WinShell openEditorOn: self threeLines.
+        WinShell resetEditorCaret.
+        WinShell editorCaret: 4.
+        WinShell editorApply: 'X'.
+        self assert: (WinShell editorText copyFrom: 1 to: 2)
+                = ('X' , (String with: Character nl))
+            description: 'typing over `one` leaves X then the newline, but the text is '
+                , WinShell editorText printString.
+        WinShell openEditorOn: self threeLines.
+        WinShell resetEditorCaret.
+        WinShell editorCaret: 4.
+        WinShell editorApply: 'Backspace'.
+        self assert: (WinShell editorText at: 1) = Character nl
+            description: 'Backspace over a selection deletes it and nothing else'
+    ]
+
+    testReplacingASelectionIsOneUndo [
+        "ONE Ctrl-Z, not two. Delete-then-insert as two commits leaves a first
+         undo step on a document the user never saw — the selection gone and
+         the replacement not yet back — and the only way home was to press it
+         again and know to."
+        | before |
+        WinShell openEditorOn: self threeLines.
+        before := WinShell editorText.
+        WinShell resetEditorCaret.
+        WinShell editorCaret: 4.
+        WinShell editorApply: 'X'.
+        self assert: WinShell editorText ~= before
+            description: 'the selection was replaced'.
+        WinShell editorCommand: 'undo'.
+        self assert: WinShell editorText = before
+            description: 'and ONE undo brought it all back, not half of it'
+    ]
+
+    testPasteInsertsTextNotKeyNames [
+        "`editorApply:` speaks a vocabulary with three words in it — Enter,
+         Backspace, Delete — so pasting a snippet that happens to BE one of
+         them must not perform the key. Silent, unlikely, and impossible to
+         diagnose from the symptom, which is why it is pinned."
+        WinShell openEditorOn: 'ab'.
+        WinShell editorCaretAt: 2.
+        WinShell editorInsertText: 'Delete'.
+        self assert: WinShell editorText = 'aDeleteb'
+            description: 'the WORD was inserted, but the text is '
+                , WinShell editorText printString
+    ]
+
+    testCopyingNothingLeavesTheClipboardAlone [
+        "Copying an empty selection must be a no-op rather than putting an
+         empty string on the clipboard: the alternative silently destroys
+         whatever the user had there, which is the worst possible answer to a
+         mistyped shortcut. Checked as `it did not reach Win32 at all` — the
+         verbs answer before touching the clipboard, so this runs headless."
+        WinShell openEditorOn: self threeLines.
+        WinShell resetEditorCaret.
+        self assert: WinShell editorHasSelection not
+            description: 'nothing is selected to begin with'.
+        self assert: WinShell editorCopy = 0
+            description: 'copy answers handled, and quietly does nothing'.
+        self assert: WinShell editorCut = 0
+            description: 'and so does cut'.
+        self assert: WinShell editorText = self threeLines
+            description: 'a cut with no selection changed nothing'
+    ]
+
+    "── WG6c-3: the view's own arithmetic ────────────────────────────────"
+
+    testTheEditorViewTilesItsContentRect [
+        "Three panes over one content rect, and the claim is that they stay
+         INSIDE it and do not overlap the picker. A layout that ran off the
+         right-hand edge would put the Save cell outside the window, where it
+         is not merely ugly — it is unclickable, and nothing says why."
+        | r classes save pane |
+        r := WinShell editorViewRects: (Array with: 10 with: 20 with: 900 with: 400).
+        classes := r at: #editorClasses.
+        save := r at: #editorSave.
+        pane := r at: WinShell editorPaneName.
+        self assert: (classes at: 1) = 10
+            description: 'the picker starts at the content rect''s own left edge'.
+        self assert: (classes at: 4) = 400
+            description: 'and is full height'.
+        self assert: (pane at: 1) > ((classes at: 1) + (classes at: 3))
+            description: 'the buffer starts to the RIGHT of the picker, but at '
+                , (pane at: 1) printString.
+        self assert: (pane at: 1) + (pane at: 3) <= (10 + 900)
+            description: 'and does not run off the right-hand edge'.
+        self assert: (save at: 1) + (save at: 2) > 0
+            description: 'the Save cell has a position'.
+        self assert: (save at: 1) + (save at: 3) <= (10 + 900)
+            description: 'and is INSIDE the window, not past its right edge'.
+        "A narrow window must not give the picker the whole rect and the
+         buffer a negative width — `min:` on the column is what stops that,
+         and a negative width is a control Win32 simply does not draw."
+        r := WinShell editorViewRects: (Array with: 0 with: 0 with: 200 with: 100).
+        pane := r at: WinShell editorPaneName.
+        self assert: (pane at: 3) >= 0
+            description: 'a narrow window still gives the buffer a non-negative width'
+    ]
+
+    testTwoPanesKeepTheirOwnDocumentAndCaret [
+        "THE WHOLE POINT OF WG6e, and the assertion the old design could not
+         even express. The shell has eight views and three of them want an
+         editable code surface at once — the Workspace, the Browser's source
+         pane and the Editor — and WG6c kept caret, anchor, selection and the
+         document itself in class variables, plus `EditorSession current`,
+         which is a singleton in the BASE world. Two panes could not both be
+         right; they could not even both hold a document.
+
+         Two panes, two documents, two carets, two selections, and an edit to
+         one leaves the other untouched. No window and no renderer: the pane's
+         navigation and selection arithmetic is pure over its OWN text."
+        | a b |
+        a := WinCodePane named: #paneA on: 0.
+        b := WinCodePane named: #paneB on: 0.
+        a openOn: 'alpha'.
+        b openOn: 'beta'.
+        self assert: a text = 'alpha' description: 'pane A holds its own document'.
+        self assert: b text = 'beta' description: 'and pane B holds a different one'.
+
+        a caretAt: 3.
+        b caretAt: 1.
+        self assert: a caret = 3 description: 'pane A keeps its own caret'.
+        self assert: b caret = 1 description: 'and B keeps its own, at ' , b caret printString.
+
+        a selectAll.
+        self assert: a hasSelection description: 'A has a selection'.
+        self assert: b hasSelection not
+            description: 'and B does NOT — the old design had one anchor for both'.
+
+        a applyKey: 'X'.
+        self assert: a text = 'X' description: 'typing over A''s selection replaced it'.
+        self assert: b text = 'beta'
+            description: 'and B is untouched, but reads ' , b text printString.
+
+        "And the caret each pane adopted after its own edit is its own."
+        self assert: a caret = 2 description: 'A''s caret followed A''s edit'.
+        self assert: b caret = 1 description: 'B''s did not move at all'
+    ]
+
+    "── WG6f: scrolling, which is one integer ────────────────────────────"
+
+    tenLines [
+        | ws |
+        ws := WriteStream on: String new.
+        1 to: 10 do: [ :i |
+            ws nextPutAll: 'line' , i printString.
+            i < 10 ifTrue: [ ws nextPut: Character nl ] ].
+        ^ws contents
+    ]
+
+    testScrollingIsALineOffsetAndItClamps [
+        "The grid is the viewport and the rope is the document, so scrolling is
+         choosing which document LINE lands on grid row 0 — no pixel offset, no
+         partial rows, nothing to accumulate and drift.
+
+         Clamped at both ends: past the top is 0, and the furthest down is the
+         LAST line at row 0. A document you cannot scroll past its penultimate
+         screen feels stuck, and one that scrolls into empty space looks
+         broken."
+        WinShell openEditorOn: self tenLines.
+        self assert: WinShell editorLineCount = 10
+            description: 'ten lines, but counted ' , WinShell editorLineCount printString.
+        WinShell editorTopLine: 0 - 5.
+        self assert: WinShell editorTopLine = 0 description: 'clamped at the top'.
+        WinShell editorTopLine: 3.
+        self assert: WinShell editorTopLine = 3 description: 'an ordinary value stands'.
+
+        "SCROLLING STOPS AT THE END OF THE TEXT — the last line at the BOTTOM
+         of the viewport, not at the top above a screenful of nothing. Checked
+         through `maxTopForLines:rows:` rather than the live method, because
+         `editorGridSize` needs a real control and headless answers a 1-row
+         viewport, where this rule and the wrong one it replaced agree."
+        self assert: (WinShell maxTopForLines: 100 rows: 24) = 76
+            description: '100 lines in a 24-row viewport stops at 76, so the last '
+                , 'line is the last row, but got '
+                , (WinShell maxTopForLines: 100 rows: 24) printString.
+        self assert: (WinShell maxTopForLines: 10 rows: 24) = 0
+            description: 'a document SHORTER than the viewport does not scroll at all'.
+        self assert: (WinShell maxTopForLines: 24 rows: 24) = 0
+            description: 'and one that exactly fills it does not either'.
+        self assert: (WinShell maxTopForLines: 25 rows: 24) = 1
+            description: 'one line too many scrolls by exactly one'
+    ]
+
+    testHitTestingFollowsTheScroll [
+        "A click's row is a VIEWPORT row; the document line is that plus the
+         scroll offset. Forgetting it is a click that lands further from the
+         pointer the more you have scrolled — and it would pass every test
+         written at the top of a document."
+        | unscrolled scrolled |
+        WinShell openEditorOn: self tenLines.
+        WinShell editorTopLine: 0.
+        unscrolled := WinShell editorOffsetAtX: 0 y: 0.
+        WinShell editorTopLine: 2.
+        scrolled := WinShell editorOffsetAtX: 0 y: 0.
+        self assert: unscrolled = 1
+            description: 'unscrolled, the top-left pixel is offset 1'.
+        self assert: scrolled > unscrolled
+            description: 'scrolled down two lines, the SAME pixel is a later offset, but got '
+                , scrolled printString.
+        self assert: (WinShell editorLineColOf: scrolled) first = 2
+            description: 'and it is line 2 exactly, not line '
+                , (WinShell editorLineColOf: scrolled) first printString
+    ]
+
+    testANewDocumentScrollsToTheTop [
+        "The same defect the caret already taught, one field along: a shorter
+         class inheriting the previous one's top line opens somewhere in the
+         middle, or past its end entirely, and looks empty."
+        WinShell openEditorOn: self tenLines.
+        WinShell editorTopLine: 8.
+        self assert: WinShell editorTopLine = 8 description: 'scrolled down'.
+        WinShell openEditorOn: 'ab'.
+        self assert: WinShell editorTopLine = 0
+            description: 'a new document starts at the top, but is at line '
+                , WinShell editorTopLine printString
+    ]
+
+    testUtf16UnitsAreNotByteCounts [
+        "`ExtTextOutW` takes an explicit COUNT, where `DrawText` took -1 and
+         found its own terminator. A guest String is UTF-8 here, so its `size`
+         is a BYTE count — and handing that to ExtTextOut makes it read PAST
+         the NUL, drawing one glyph of whatever followed the string in the
+         arena.
+
+         Pinned as an INEQUALITY on a non-ASCII string, because the two
+         numbers agree for every ASCII case and a test written over ASCII
+         alone would pass with the bug still in. `caf` + U+00E9 is the
+         smallest string that tells them apart: five bytes, four units."
+        | ascii accented |
+        ascii := 'abc'.
+        accented := 'caf' , (String with: (Character value: 195) with: (Character value: 169)).
+        self assert: (WinShell utf16UnitsOf: ascii) = 3
+            description: 'ASCII units equal its size, but got '
+                , (WinShell utf16UnitsOf: ascii) printString.
+        self assert: accented size = 5
+            description: 'the accented string is five UTF-8 BYTES'.
+        self assert: (WinShell utf16UnitsOf: accented) = 4
+            description: 'and four UTF-16 UNITS, but got '
+                , (WinShell utf16UnitsOf: accented) printString.
+        self assert: (WinShell utf16UnitsOf: accented) < accented size
+            description: 'the count handed to ExtTextOut must be the SMALLER of '
+                , 'the two, or it reads past the terminator'
+    ]
+]

@@ -1,0 +1,484 @@
+"── 110_winui_render.mst — WG6d-2: the pane pokes cells ──────────────────
+ docs/sprints/sprint_wg6d_detail.md WG6d-2. The Editor pane stops drawing and
+ starts DESCRIBING: it writes codepoint+colour into a buffer `winui_render`
+ owns, and the renderer turns that into glyph runs on a DirectWrite/Direct2D
+ swapchain.
+
+ WHAT THIS FILE IS FOR, stated once: it is the ONLY place in the guest that
+ knows a pixel exists, and even here it knows only two of them — the cell's
+ width and height, which it is TOLD rather than measures. Every defect WG6c-1
+ shipped came from Smalltalk computing pixel positions and GDI computing them
+ differently; there is now one authority, and it is not this side.
+
+ THE GRID IS NOT THE DOCUMENT. It is the VIEWPORT — `cols x rows` of what
+ fits — and the document is the rope, as it always was. A line longer than
+ `cols` is clipped at the edge and a document taller than `rows` stops at the
+ bottom, which is the same scope 60's own note draws (`a class fits on
+ screen, so the whole buffer is the viewport`) and is why there is no
+ scrolling here to get wrong.
+
+ CLEARING HAPPENS IN RUST. An 80x40 pane is 3,200 cells; blanking them from
+ here would be 9,600 marshalled writes per repaint for a document that is
+ mostly whitespace. `WinRender clearTo:on:` blanks in one call and this file
+ writes only the cells that carry ink, so the seam's cost is proportional to
+ the TEXT and not to the viewport."
+
+Object subclass: WinRender [
+    <classVars: Available>
+
+    "── the raw seam ────────────────────────────────────────────────────
+     Integers only, `winui_render.dll`, reached through the FFI's `library:`
+     part — the same shape `WinHost` uses and for the same reasons."
+
+    WinRender class >> rawAttach: hwnd <Integer> pt: ptTenths <Integer> dpi: dpi <Integer> ^ <Integer> [
+        <primitive: FFI function: #MacvmRenderAttach library: #'winui_render.dll' ret: #g args: #(g g g)>
+        ^self primitiveFailed: 'MacvmRenderAttach'
+    ]
+    WinRender class >> rawDetach: hwnd <Integer> ^ <Integer> [
+        <primitive: FFI function: #MacvmRenderDetach library: #'winui_render.dll' ret: #g args: #(g)>
+        ^self primitiveFailed: 'MacvmRenderDetach'
+    ]
+    WinRender class >> rawMetrics: hwnd <Integer> ^ <Integer> [
+        <primitive: FFI function: #MacvmRenderMetrics library: #'winui_render.dll' ret: #g args: #(g)>
+        ^self primitiveFailed: 'MacvmRenderMetrics'
+    ]
+    WinRender class >> rawGrid: hwnd <Integer> cols: cols <Integer> rows: rows <Integer> ^ <Integer> [
+        <primitive: FFI function: #MacvmRenderGrid library: #'winui_render.dll' ret: #g args: #(g g g)>
+        ^self primitiveFailed: 'MacvmRenderGrid'
+    ]
+    WinRender class >> rawGridSize: hwnd <Integer> ^ <Integer> [
+        <primitive: FFI function: #MacvmRenderGridSize library: #'winui_render.dll' ret: #g args: #(g)>
+        ^self primitiveFailed: 'MacvmRenderGridSize'
+    ]
+    WinRender class >> rawClear: hwnd <Integer> fg: fg <Integer> bg: bg <Integer> ^ <Integer> [
+        <primitive: FFI function: #MacvmRenderClear library: #'winui_render.dll' ret: #g args: #(g g g)>
+        ^self primitiveFailed: 'MacvmRenderClear'
+    ]
+    WinRender class >> rawSetCaret: hwnd <Integer> col: col <Integer> row: row <Integer> on: on <Integer> ^ <Integer> [
+        <primitive: FFI function: #MacvmRenderSetCaret library: #'winui_render.dll' ret: #g args: #(g g g g)>
+        ^self primitiveFailed: 'MacvmRenderSetCaret'
+    ]
+    WinRender class >> rawPresent: hwnd <Integer> ^ <Integer> [
+        <primitive: FFI function: #MacvmRenderPresent library: #'winui_render.dll' ret: #g args: #(g)>
+        ^self primitiveFailed: 'MacvmRenderPresent'
+    ]
+    WinRender class >> rawFrames: hwnd <Integer> ^ <Integer> [
+        <primitive: FFI function: #MacvmRenderFrames library: #'winui_render.dll' ret: #g args: #(g)>
+        ^self primitiveFailed: 'MacvmRenderFrames'
+    ]
+    WinRender class >> rawLastError ^ <Integer> [
+        <primitive: FFI function: #MacvmRenderLastError library: #'winui_render.dll' ret: #g args: #()>
+        ^self primitiveFailed: 'MacvmRenderLastError'
+    ]
+    WinRender class >> rawLastErrorLen ^ <Integer> [
+        <primitive: FFI function: #MacvmRenderLastErrorLen library: #'winui_render.dll' ret: #g args: #()>
+        ^self primitiveFailed: 'MacvmRenderLastErrorLen'
+    ]
+
+    "── availability, checked once and REMEMBERED ───────────────────────"
+
+    WinRender class >> available ^ <Boolean> [
+        "The same separation `WinHost available` exists for: a DLL that is not
+         beside the exe fails IDENTICALLY to a genuine renderer error - `the
+         primitive failed` either way - and those are entirely different
+         problems. Cached because a miss costs a LoadLibraryA per call and the
+         answer cannot change within a run.
+
+         `rawMetrics:` on window 0 is the probe: no window has that handle, so
+         it touches no device, allocates nothing and answers 0 - asking is free
+         and safe."
+        Available isNil ifTrue: [
+            Available := [ self rawMetrics: 0. true ] on: Error do: [ :e | false ] ].
+        ^Available
+    ]
+
+    WinRender class >> lastError ^ <String> [
+        self available ifFalse: [ ^'winui_render.dll is not available' ].
+        ^[ | n | n := self rawLastErrorLen.
+           n <= 0 ifTrue: [ '' ]
+                  ifFalse: [ WinArena stringFromUtf16At: self rawLastError units: n ] ]
+            on: Error do: [ :e | 'winui_render: ', e messageText ]
+    ]
+
+    "-- the friendly half, and EVERY VERB NAMES ITS PANE -----------------
+     One renderer per window: the Editor, the Workspace, and anything else
+     that wants a code surface. Nothing here is global, which is what makes
+     `use the same tech for the workspace` a matter of attaching a second
+     window rather than of generalising a singleton after the fact."
+
+    WinRender class >> attach: hwnd <Integer> points: pt <Integer> dpi: dpi <Integer> ^ <Boolean> [
+        (self available not or: [ hwnd = 0 ]) ifTrue: [ ^false ].
+        ^[ (self rawAttach: hwnd pt: pt * 10 dpi: dpi) = 0 ] on: Error do: [ :e | false ]
+    ]
+
+    WinRender class >> detach: hwnd <Integer> [
+        self available ifFalse: [ ^self ].
+        [ self rawDetach: hwnd ] on: Error do: [ :e | nil ].
+        ^self
+    ]
+
+    WinRender class >> metricsWordFor: hwnd <Integer> ^ <Integer> [
+        (self available not or: [ hwnd = 0 ]) ifTrue: [ ^0 ].
+        ^[ self rawMetrics: hwnd ] on: Error do: [ :e | 0 ]
+    ]
+
+    WinRender class >> cellWidthFor: hwnd <Integer> ^ <Integer> [
+        | m | m := self metricsWordFor: hwnd.
+        ^m = 0 ifTrue: [ 0 ] ifFalse: [ (m bitShift: 0 - 16) bitAnd: 16rFFFF ] ]
+
+    WinRender class >> cellHeightFor: hwnd <Integer> ^ <Integer> [
+        | m | m := self metricsWordFor: hwnd.
+        ^m = 0 ifTrue: [ 0 ] ifFalse: [ m bitAnd: 16rFFFF ] ]
+
+    WinRender class >> gridFor: hwnd <Integer> cols: cols <Integer> rows: rows <Integer> ^ <Integer> [
+        "The cell buffer's ADDRESS. It CHANGES when the dimensions do, because
+         the buffer is reallocated - so this is asked for on every fill rather
+         than cached, which costs one call and removes a whole class of
+         dangling-pointer bug that would present as garbage on screen."
+        (self available not or: [ hwnd = 0 ]) ifTrue: [ ^0 ].
+        ^[ self rawGrid: hwnd cols: cols rows: rows ] on: Error do: [ :e | 0 ]
+    ]
+
+    WinRender class >> gridSizeFor: hwnd <Integer> ^ <Array> [
+        | g |
+        g := (self available and: [ hwnd ~= 0 ])
+            ifTrue: [ [ self rawGridSize: hwnd ] on: Error do: [ :e | 0 ] ]
+            ifFalse: [ 0 ].
+        ^Array with: ((g bitShift: 0 - 16) bitAnd: 16rFFFF) with: (g bitAnd: 16rFFFF)
+    ]
+
+    WinRender class >> clear: hwnd <Integer> to: fg <Integer> on: bg <Integer> [
+        self available ifFalse: [ ^self ].
+        [ self rawClear: hwnd fg: fg bg: bg ] on: Error do: [ :e | nil ].
+        ^self
+    ]
+
+    WinRender class >> caretFor: hwnd <Integer> col: col <Integer> row: row <Integer> visible: aBool <Boolean> [
+        self available ifFalse: [ ^self ].
+        [ self rawSetCaret: hwnd col: col row: row on: (aBool ifTrue: [ 1 ] ifFalse: [ 0 ]) ]
+            on: Error do: [ :e | nil ].
+        ^self
+    ]
+
+    WinRender class >> present: hwnd <Integer> ^ <Boolean> [
+        (self available not or: [ hwnd = 0 ]) ifTrue: [ ^false ].
+        ^[ (self rawPresent: hwnd) = 0 ] on: Error do: [ :e | false ]
+    ]
+
+    WinRender class >> framesFor: hwnd <Integer> ^ <Integer> [
+        (self available not or: [ hwnd = 0 ]) ifTrue: [ ^0 ].
+        ^[ self rawFrames: hwnd ] on: Error do: [ :e | 0 ]
+    ]
+
+    WinRender class >> cellBytes ^ <Integer> [ ^12 ]
+
+    WinRender class >> at: base <Integer> col: col <Integer> row: row <Integer> cols: cols <Integer>
+                       put: cp <Integer> fg: fg <Integer> bg: bg <Integer> [
+        | a |
+        a := base + (((row * cols) + col) * self cellBytes).
+        WinArena u32At: a put: cp.
+        WinArena u32At: a + 4 put: fg.
+        WinArena u32At: a + 8 put: bg.
+        ^self
+    ]
+
+    WinRender class >> at: base <Integer> col: col <Integer> row: row <Integer> cols: cols <Integer>
+                       bg: bg <Integer> [
+        "Background ONLY, for the selection — which is why the renderer needs
+         no notion of a selection at all."
+        WinArena u32At: base + (((row * cols) + col) * self cellBytes) + 8 put: bg.
+        ^self
+    ]
+]
+
+Object subclass: WinShell [
+    <classVars: GridCols GridRows RenderAttached EditorTop>
+
+    "── attach / detach ─────────────────────────────────────────────────"
+
+    WinShell class >> attachEditorRenderer ^ <Boolean> [
+        "Called once the pane's window exists. Re-attaching is how a DPI change
+         is handled — every derived number is recomputed rather than carried
+         forward stale, which is the defect class the GDI metrics cache was."
+        | ok |
+        self editorPaneHwnd = 0 ifTrue: [ ^false ].
+        ok := WinRender attach: self editorPaneHwnd points: 9 dpi: self editorMetricsDpi.
+        RenderAttached := ok.
+        ok ifFalse: [
+            self appendTranscript: 'editor: renderer unavailable — ', WinRender lastError ].
+        ^ok
+    ]
+
+    WinShell class >> detachEditorRenderer [
+        WinRender detach: self editorPaneHwnd.
+        RenderAttached := false.
+        ^self
+    ]
+
+    WinShell class >> renderAttached ^ <Boolean> [
+        ^RenderAttached == true ]
+
+    "── the viewport, in cells ──────────────────────────────────────────"
+
+    WinShell class >> editorGridSize ^ <Array> [
+        "#(cols rows) for the pane's current client size. Recomputed rather
+         than remembered: the pane is laid out by the view and a stale grid
+         would clip text that fits or claim space that is gone."
+        | c cw ch r |
+        cw := self editorCharWidth.
+        ch := self editorLineHeight.
+        (cw = 0 or: [ ch = 0 ]) ifTrue: [ ^Array with: 1 with: 1 ].
+        c := self controlNamed: self editorPaneName.
+        c isNil ifTrue: [ ^Array with: 1 with: 1 ].
+        r := [ c screenRect ] on: Error do: [ :e | nil ].
+        r isNil ifTrue: [ ^Array with: 1 with: 1 ].
+        ^Array
+            with: ((((r at: 3) - (r at: 1)) // cw) max: 1)
+            with: ((((r at: 4) - (r at: 2)) // ch) max: 1)
+    ]
+
+    "── the fill: the ONLY thing this side does now ─────────────────────"
+
+    "── scrolling: ONE integer, and it is a LINE not a pixel ────────────
+     The grid is the viewport and the rope is the document, so scrolling is
+     choosing which document line lands on grid row 0. That is the whole of
+     it: no pixel offset, no partial rows, no smooth-scroll accumulator to
+     drift. A cell grid makes the cheap thing the correct thing.
+
+     `docs/editor_design.md` M0-M6 always meant to get here — 60's own note
+     says `viewport windowing and scrolling it as the caret leaves the screen
+     is the next step; a class fits on screen, so the whole buffer is the
+     viewport FOR NOW`. This is that step."
+
+    WinShell class >> editorTopLine ^ <Integer> [
+        ^EditorTop isNil ifTrue: [ 0 ] ifFalse: [ EditorTop ] ]
+
+    WinShell class >> resetEditorCaret [
+        "A NEW DOCUMENT SCROLLS TO THE TOP, and this override exists because
+         forgetting it is the exact defect the caret already taught us: a
+         shorter class inheriting the previous one's top line opens somewhere
+         in the middle, or past its end entirely, and looks empty. The caret
+         half is 107's and is delegated to unchanged."
+        EditorTop := 0.
+        ^self editorCaretAt: 1
+    ]
+
+    WinShell class >> editorLineCount ^ <Integer> [
+        | t n |
+        t := self editorText.
+        n := 1.
+        1 to: t size do: [ :i | (t at: i) = Character nl ifTrue: [ n := n + 1 ] ].
+        ^n
+    ]
+
+    WinShell class >> editorPageRows ^ <Integer> [
+        "How many lines a Page Up moves. The viewport minus one, so a page
+         keeps one line of context — what every editor does, and what stops a
+         reader losing their place at the seam."
+        ^((self editorGridSize at: 2) - 1) max: 1
+    ]
+
+    WinShell class >> maxTopForLines: lines <Integer> rows: rows <Integer> ^ <Integer> [
+        "SCROLLING STOPS AT THE END OF THE TEXT. The furthest down you can go
+         is the one that puts the LAST line at the BOTTOM of the viewport, not
+         at the top — which is what every editor does and what a reader means
+         by `the end`.
+
+         This first answered `lines - 1`, letting the document scroll until a
+         single line sat at row 0 above a screenful of nothing. The comment
+         defending it argued that stopping earlier `feels stuck`; that was
+         wrong, and the author said so on sight. Stopping at the end is not
+         being stuck, it IS the end.
+
+         A document SHORTER than the viewport answers 0 — it does not scroll
+         at all, because there is nothing off screen to reveal.
+
+         Taking `rows` as an argument rather than asking is what makes the rule
+         checkable with no window: `editorGridSize` needs a real control, so a
+         test of the live method would be measuring a 1-row viewport and could
+         not tell this rule from the one it replaced."
+        ^(lines - rows) max: 0
+    ]
+
+    WinShell class >> editorMaxTop ^ <Integer> [
+        ^self maxTopForLines: self editorLineCount rows: (self editorGridSize at: 2)
+    ]
+
+    WinShell class >> editorTopLine: n <Integer> [
+        EditorTop := (n max: 0) min: self editorMaxTop.
+        ^self
+    ]
+
+    WinShell class >> editorScrollBy: lines <Integer> ^ <Object> [
+        "Scrolling moves the VIEW, never the caret — the caret is a document
+         position and the wheel is not an edit. That is why a wheel scroll
+         does not drag the selection either."
+        | before |
+        before := self editorTopLine.
+        self editorTopLine: before + lines.
+        self editorTopLine = before ifTrue: [ ^0 ].
+        self refreshEditorPane.
+        ^0
+    ]
+
+    WinShell class >> editorScrollToCaret [
+        "The other direction: the CARET moved, so the view follows it. Called
+         after every navigation, which is what makes arrowing off the bottom
+         edge scroll instead of hiding the caret."
+        | line top rows |
+        line := (self editorLineColOf: self editorCaret) at: 1.
+        top := self editorTopLine.
+        rows := self editorGridSize at: 2.
+        line < top ifTrue: [ ^self editorTopLine: line ].
+        line >= (top + rows) ifTrue: [ ^self editorTopLine: line - rows + 1 ].
+        ^self
+    ]
+
+    WinShell class >> fillEditorGrid ^ <Boolean> [
+        "Walk the tokenizer's runs once and write a cell per character. The
+         SAME walk the GDI paint did — it is the run-splitting that was always
+         correct — except that instead of computing a pixel it writes (col,
+         row) and a colour, and the renderer decides where that lands.
+
+         Everything the old paint needed a special case for is a cell
+         property here: the selection is a background, the caret is a cell,
+         and a character off the right-hand edge is simply not written."
+        | base cols rows size text runs lineIndex col sel selLo selHi caret cc top |
+        self renderAttached ifFalse: [ ^false ].
+        size := self editorGridSize.
+        cols := size at: 1.
+        rows := size at: 2.
+        base := WinRender gridFor: self editorPaneHwnd cols: cols rows: rows.
+        base = 0 ifTrue: [ ^false ].
+        WinRender clear: self editorPaneHwnd to: 16r000000 on: 16rFFFFFF.
+        top := self editorTopLine.
+
+        text := self editorText.
+        sel := self editorSelection.
+        selLo := sel at: 1.
+        selHi := selLo + (sel at: 2).
+
+        lineIndex := 0.
+        col := 0.
+        runs := text isEmpty ifTrue: [ #() ] ifFalse: [ WinSyntax runsFor: text ].
+        runs do: [ :r |
+            | s e i colour |
+            s := r at: 1.
+            e := s + (r at: 2) - 1.
+            colour := WinSyntax colorFor: (r at: 3).
+            i := s.
+            [ i <= e ] whileTrue: [
+                (text at: i) = Character nl
+                    ifTrue: [ lineIndex := lineIndex + 1. col := 0 ]
+                    ifFalse: [
+                        (lineIndex >= top and: [ lineIndex - top < rows and: [ col < cols ] ]) ifTrue: [
+                            WinRender at: base col: col row: lineIndex - top cols: cols
+                                put: (text at: i) asInteger
+                                fg: colour
+                                bg: ((i >= selLo and: [ i < selHi ])
+                                    ifTrue: [ 16rF0D8A8 ] ifFalse: [ 16rFFFFFF ]) ].
+                        col := col + 1 ].
+                i := i + 1 ] ].
+
+        "A selection that runs past the end of a line covers the newline too,
+         and a newline has no cell — so the trailing sliver the GDI path drew
+         by hand simply does not arise. Nothing to do."
+
+        "The caret, swapped to (col, row) — `editorLineColOf:` answers
+         (line, col) and the seam takes them the other way round, which is
+         exactly the kind of thing this port finds by gate rather than by
+         reading, so the gate asserts the caret CELL."
+        cc := self editorLineColOf: self editorCaret.
+        caret := ((cc at: 1) >= top and: [ (cc at: 1) - top < rows and: [ (cc at: 2) < cols ] ]).
+        WinRender caretFor: self editorPaneHwnd
+            col: (cc at: 2) row: (cc at: 1) - top visible: caret.
+        ^true
+    ]
+
+    WinShell class >> refreshEditorGrid [
+        "Fill and present. Called from the paint, and directly after an edit
+         so the change is on screen without waiting for a pump turn."
+        self fillEditorGrid ifFalse: [ ^self ].
+        WinRender present: self editorPaneHwnd.
+        ^self
+    ]
+]
+
+Object subclass: WinShell [
+
+    "── the renderer becomes the authority ──────────────────────────────
+     These OVERRIDE 106's GDI versions, which is why this file loads after it.
+     One authority for the cell's size, and it is the side that draws — the
+     whole point of WG6d. 106's measurement survives only as the fallback for
+     a world with no renderer (a headless test, an off-Windows load), where
+     the numbers are consistent-with-themselves and nothing is on screen to
+     disagree with them."
+
+    WinShell class >> ensureEditorRenderer ^ <Boolean> [
+        "Attach lazily, so nothing in 106 or 109 has to remember to. Attaching
+         needs the pane's window to exist, and by the time anything asks for a
+         frame it does."
+        self renderAttached ifTrue: [ ^true ].
+        self editorPaneHwnd = 0 ifTrue: [ ^false ].
+        ^self attachEditorRenderer
+    ]
+
+    WinShell class >> editorCharWidth ^ <Integer> [
+        | rw |
+        rw := WinRender cellWidthFor: self editorPaneHwnd.
+        rw > 0 ifTrue: [ ^rw ].
+        ^8
+    ]
+
+    WinShell class >> editorLineHeight ^ <Integer> [
+        | rh |
+        rh := WinRender cellHeightFor: self editorPaneHwnd.
+        rh > 0 ifTrue: [ ^rh ].
+        ^16
+    ]
+
+    WinShell class >> paintWindow: hwnd <Integer> dc: hdc <Integer>
+                      x: x <Integer> y: y <Integer> w: w <Integer> h: h <Integer> ^ <Integer> [
+        "WM_PAINT, and the whole handler is now ONE CALL. The door still does
+         BeginPaint/EndPaint — the region has to be validated or Windows
+         re-sends the message forever — but the DC it hands over is ignored:
+         the pane is presented from a swapchain, not drawn into a DC.
+
+         rcPaint is ignored TOO, and deliberately. The renderer redraws the
+         entire grid every present, so there is no partial composition to get
+         wrong — which is the defect that drew the whole document displaced by
+         the invalid rectangle's origin and shipped because we only ever
+         invalidate the whole client ourselves.
+
+         Captured rather than propagated, as WG6c-1's own handler was: a raise
+         in a paint is invisible by nature."
+        PaintCalls := (PaintCalls isNil ifTrue: [ 0 ] ifFalse: [ PaintCalls ]) + 1.
+        "WG6f: the SPLITTER paints here now. It was an owner-drawn BUTTON and
+         arrived through WM_DRAWITEM; becoming a child of our own class — so
+         that a DRAG could reach us at all — moved it onto this path. Same
+         drawing code, same GDI: it is a filled strip with three glyphs on it,
+         which is what GDI is still perfectly good at, and nothing about it
+         wants a cell grid."
+        hwnd = self splitterHwnd ifTrue: [
+            ^[ self drawSplitter: hdc x: x y: y w: w h: h ]
+                on: Error do: [ :e | DrawError := e messageText. 0 ] ].
+        "WG7-2: the Monitor's grid presents here too. Same renderer, different
+         window — which is exactly what WG6d-3's per-pane keying was for."
+        (hwnd ~= 0 and: [ hwnd = self monitorPaneHwnd ]) ifTrue: [
+            ^[ self renderMonitor. 1 ]
+                on: Error do: [ :e | PaintError := e messageText. 0 ] ].
+        (hwnd ~= 0 and: [ hwnd = self testsPaneHwnd ]) ifTrue: [
+            ^[ self renderTests. 1 ]
+                on: Error do: [ :e | PaintError := e messageText. 0 ] ].
+        (hwnd ~= 0 and: [ hwnd = self canvasPaneHwnd ]) ifTrue: [
+            ^[ self renderCanvas. 1 ]
+                on: Error do: [ :e | PaintError := e messageText. 0 ] ].
+        (hwnd ~= 0 and: [ hwnd = self debuggerPaneHwnd ]) ifTrue: [
+            ^[ self renderDebugger. 1 ]
+                on: Error do: [ :e | PaintError := e messageText. 0 ] ].
+        hwnd = self editorPaneHwnd ifFalse: [ ^0 ].
+        self ensureEditorRenderer ifFalse: [ ^0 ].
+        ^[ self refreshEditorGrid. 1 ]
+            on: Error do: [ :e | PaintError := e messageText. 0 ]
+    ]
+]

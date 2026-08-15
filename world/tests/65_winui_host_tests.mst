@@ -1,0 +1,256 @@
+"65_winui_host_tests.mst — WinUiHostWg5bTests, the headless half of WG5b-2's
+ acceptance (docs/ROADMAP.md's WG5 row, its Accept clause).
+
+ THE SPLIT IS DIFFERENT HERE, and the difference is the interesting part.
+
+ Every earlier winui test file is window-free because Win32 is not available
+ in a CLI run. This one is window-free too — but it is NOT host-free. The FFI
+ `library:` channel WG5b-2 added resolves `winui_host.dll` through
+ LoadLibraryA, and the suite runs from the same directory the DLL is built
+ into, so these tests exercise the REAL channel: a real DLL, a real
+ `image_store` linked into it, real UTF-16 marshalling both ways.
+
+ That is deliberate. The channel is this slice's genuinely novel machinery
+ and the one most likely to be wrong, and a test that mocked it would prove
+ nothing about it. What stays out is only what needs a WINDOW — a click on
+ the Accept cell, the pane repainting — which is `just gate-wg5b`.
+
+ WHAT IS NOT TESTED HERE, and why: the WRITE path. `MacvmHostSaveMethod`
+ writes whatever `MACVM_IMAGE_PATH` names, defaulting to
+ `world/image.sqlite3` — the repo's own image. A test suite that wrote there
+ would mutate the tree it is testing, and one that silently did so would be a
+ genuinely nasty thing to leave behind. Writes belong to `just gate-wg5b`,
+ which points MACVM_IMAGE_PATH at a scratch copy first and is also where the
+ CG8 byte-identity comparison lives.
+
+ LOADING: as 64 — the layer files load from tests.list ahead of this one."
+
+TestCase subclass: WinUiHostWg5bTests [
+    WinUiHostWg5bTests class >> isEnabled ^ <Boolean> [
+        "WG9-2: the gate that used to live only in
+         `99_run_all.mst`'s guards, moved here so DISCOVERY can see
+         it too (`TestRunner allTestClasses`). platform-gated; see 99_run_all.mst's bookkeeping note."
+        ^Smalltalk platformName == #windows
+    ]
+
+
+    runAll [
+        "The channel first: if it is not there, every later assertion is
+         about a fallback rather than about the host service, and saying so
+         plainly beats fourteen confusing failures."
+        self runTest: #testTheChannelResolves do: [ self testTheChannelResolves ].
+        self runTest: #testAvailabilityIsRemembered do: [ self testAvailabilityIsRemembered ].
+
+        "Then marshalling, which is where a host service actually breaks."
+        self runTest: #testAReadRoundTripsItsMessage do: [ self testAReadRoundTripsItsMessage ].
+        self runTest: #testAMissingClassIsRefusedNotCrashed
+             do: [ self testAMissingClassIsRefusedNotCrashed ].
+
+        "WG7: writing a file, which File In and Add to World both need."
+        self runTest: #testWinFileWritesAndRefusesAudibly
+             do: [ self testWinFileWritesAndRefusesAudibly ].
+
+        "Then the pure decisions the source pane makes, which need no host."
+        self runTest: #testNoClassSelectedAsksForOne do: [ self testNoClassSelectedAsksForOne ].
+        self runTest: #testAClassWithNoSelectorShowsItsVariables
+             do: [ self testAClassWithNoSelectorShowsItsVariables ].
+        self runTest: #testTheSideDefaultsToInstance do: [ self testTheSideDefaultsToInstance ].
+        self runTest: #testAcceptWithNothingSelectedRefusesQuietly
+             do: [ self testAcceptWithNothingSelectedRefusesQuietly ].
+
+        "WG6b: Find's two pure parts. The wire format is a CONTRACT with the
+         Mac's own find view — neither parser can see the other — so it is
+         worth pinning where no window is involved."
+        self runTest: #testFindReplyParsesUsSeparatedLines
+             do: [ self testFindReplyParsesUsSeparatedLines ].
+        self runTest: #testNoHitsIsAnEmptyListNotABlankRow
+             do: [ self testNoHitsIsAnEmptyListNotABlankRow ].
+        self runTest: #testASenderRowNamesTheSendingMethod
+             do: [ self testASenderRowNamesTheSendingMethod ]
+    ]
+
+    "── The channel ──────────────────────────────────────────────────────"
+
+    testTheChannelResolves [
+        "WG5b-2's one core change, proved end to end: an FFI pragma naming
+         `library: #'winui_host.dll'` reaches a DLL that is in neither winkb
+         nor the five-DLL probe list. Before this, nothing in Smalltalk could
+         call Rust that lived downstream of the VM at all.
+
+         The sentinel exists for exactly this assertion: a resolution failure
+         and a `flows` refusal are otherwise indistinguishable from the guest
+         (`the primitive failed`, both), and they are entirely different
+         problems."
+        self assert: WinHost available
+            description: 'winui_host.dll must resolve — build it with `cargo build -p winui_host`, which drops it beside the executable where LoadLibraryA looks'.
+        self assert: WinHost ping = 16r5747
+            description: 'the ping sentinel identifies the DLL as OURS, not a same-named export that happened to resolve'
+    ]
+
+    testAvailabilityIsRemembered [
+        "Cached, because a miss costs a LoadLibraryA per call and the answer
+         cannot change within a run."
+        | first |
+        first := WinHost available.
+        self assert: WinHost available = first
+            description: 'availability must be stable across calls'
+    ]
+
+    "── Marshalling ──────────────────────────────────────────────────────"
+
+    testAReadRoundTripsItsMessage [
+        "UTF-16 out and UTF-16 back, by COUNT rather than by scanning for a
+         terminator — the host reports a length excluding the NUL for exactly
+         this reason, and one extra unit would put a stray NUL on the end of
+         every line the transcript shows.
+
+         THE IMAGE MAY NOT EXIST, and that is not a failure to assert against.
+         `world/image.sqlite3` is a GENERATED artifact — a fresh checkout has
+         none until `import_world` builds one — so this suite must pass in
+         both states or it is really a test of whether someone remembered to
+         run the importer.
+
+         What is asserted either way is what this test is actually about: the
+         call ANSWERS. A `#(ok message)` pair comes back with a real String in
+         it whether the image was there or not, which is the whole claim being
+         made about the channel — text crosses it faithfully and absence is
+         reported rather than faulted. `just gate-wg5b` is where a read is
+         checked against a real image with real content."
+        | r |
+        WinHost available ifFalse: [ ^self ].
+        r := WinHost methodSourceFor: 'Object' side: #instance selector: 'printString'.
+        self assert: (r at: 2) isString
+            description: 'the message must come back as a String, image or no image'.
+        (r at: 1)
+            ifTrue: [
+                self assert: (r at: 2) notNil
+                    description: 'a successful read answers the stored source, possibly empty' ]
+            ifFalse: [
+                self assert: (r at: 2) isEmpty not
+                    description: 'a failed read must carry a reason — an empty error is a dead end for whoever hits it' ]
+    ]
+
+    testAMissingClassIsRefusedNotCrashed [
+        "The failure mode that matters: a name with no class behind it must
+         come back as an ordinary answer, not a fault. `flows` and
+         `image_store` both treat absence as data, and the marshalling layer
+         must not turn that into an access violation on the way past."
+        | r |
+        WinHost available ifFalse: [ ^self ].
+        r := WinHost methodSourceFor: 'NoSuchClassExistsHere' side: #instance selector: 'nope'.
+        self assert: (r at: 2) isString
+            description: 'a miss must still answer a String, so the pane always has something to show'
+    ]
+
+    "── WG6b: Find's wire format and row labels, both pure ───────────────"
+
+    us ^ <String> [ ^String with: (Character value: 16r1F) ]
+
+    testFindReplyParsesUsSeparatedLines [
+        "One line per hit, fields separated by the unit separator. 0x1F cannot
+         occur in a selector or a class name, which is why nothing needs
+         escaping and this parser never has to guess."
+        | rows |
+        rows := WinShell splitFindReply:
+            'Alpha' , self us , 'instance' , (String with: Character nl) ,
+            'Beta' , self us , 'class'.
+        self assert: rows size = 2 description: 'two lines, two rows'.
+        self assert: (rows first at: 1) = 'Alpha' description: 'class name first'.
+        self assert: (rows first at: 2) = 'instance' description: 'side second'.
+        self assert: (rows last at: 1) = 'Beta' description: 'and the second row parses too'
+    ]
+
+    testNoHitsIsAnEmptyListNotABlankRow [
+        "`no hits` is an ordinary result of a search. A view showing one blank
+         line would be reporting a hit it did not find."
+        self assert: (WinShell splitFindReply: '') isEmpty
+            description: 'an empty reply is no rows'.
+        self assert: (WinShell splitFindReply: nil) isEmpty
+            description: 'and nil must not raise — a failed call answers no text'
+    ]
+
+    testASenderRowNamesTheSendingMethod [
+        "The interesting thing about a sender is which of ITS methods does the
+         sending — not the selector you searched for, which is identical on
+         every row and so tells you nothing."
+        | row |
+        row := Array with: 'Dictionary' with: 'add:' with: 'instance'.
+        self assert: (WinShell findRowLabel: row kind: #senders) = 'Dictionary >> add:'
+            description: 'a sender row names the SENDING method'.
+        row := Array with: 'Point' with: 'origin' with: 'class'.
+        self assert: (WinShell findRowLabel: row kind: #senders) = 'Point class >> origin'
+            description: 'and shows the class side when that is where it sends from'
+    ]
+
+    "── The source pane's decisions, which are pure ──────────────────────"
+
+    testWinFileWritesAndRefusesAudibly [
+        "The facility File In and Add to World waited on, and the one thing
+         `WinIo` never was: `WinIo` lives in the TEST file — it was written to
+         prove the P5 resolver's underscore alias, not to ship — so nothing in
+         the shell could write a file at all.
+
+         BOTH DIRECTIONS. A writer that only ever succeeds in a test is a
+         writer whose failure path is unexercised, and this one's failure path
+         is the interesting half: File In writes before it restarts the
+         primary, so a silent write failure would restart into a world without
+         the user's code and look like the file-in simply did nothing."
+        | path ok |
+        path := (WinShell tempDirectory), 'winfile_test.mst'.
+        ok := WinFile spit: path contents: 'Object subclass: WrittenByWinFile [ ping [ ^7 ] ]'.
+        self assert: ok
+            description: 'a write to the temp directory lands, but said: '
+                , WinFile lastError.
+        self assert: WinFile lastError isEmpty
+            description: 'and says nothing when it worked'.
+
+        "A path whose directory cannot exist. It must answer FALSE and say why
+         — not raise, because a raise here unwinds a File In half way through."
+        ok := WinFile spit: 'Q:\no\such\directory\nope.mst' contents: 'x'.
+        self assert: ok not description: 'an impossible path is refused'.
+        self assert: WinFile lastError isEmpty not
+            description: 'and the refusal SAYS SO, or a File In fails silently'
+    ]
+
+    testNoClassSelectedAsksForOne [
+        self assert: (WinShell sourceTextFor: nil selector: nil) = 'Select a class.'
+            description: 'an empty browser must ask for a class rather than show an empty box, which reads as a failed load'
+    ]
+
+    testAClassWithNoSelectorShowsItsVariables [
+        "A class with no selector chosen shows the class, not a blank — and it
+         says what to do next, which is the affordance an empty source pane
+         otherwise lacks entirely."
+        | t |
+        t := WinShell sourceTextFor: 'Point' selector: nil.
+        self assert: (t startsWith: 'Point')
+            description: 'the class name leads'.
+        self assert: (t includesSubstring: 'Accept')
+            description: 'and it names the verb that would write what the user types'
+    ]
+
+    testTheSideDefaultsToInstance [
+        "Instance is the overwhelmingly common case, and a wrong guess writes
+         to the wrong side of the class — which is a bug the user discovers
+         only when the method they wrote cannot be found."
+        WinShell selectBrowserSide: nil.
+        self assert: WinShell browserSelectedSide == #instance
+            description: 'the default side must be #instance'.
+        WinShell selectBrowserSide: #class.
+        self assert: WinShell browserSelectedSide == #class
+            description: 'and an explicit choice must win'.
+        WinShell selectBrowserSide: #instance
+    ]
+
+    testAcceptWithNothingSelectedRefusesQuietly [
+        "Accept with no class selected must decline and SAY so, rather than
+         writing to whatever was last selected — which is the shape of an
+         accident that silently edits the wrong class."
+        | before |
+        WinShell selectBrowserClass: nil.
+        before := WinShell acceptCount.
+        WinShell acceptSource.
+        self assert: WinShell acceptCount = before
+            description: 'nothing may be written when nothing is selected'
+    ]
+]

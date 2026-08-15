@@ -145,10 +145,12 @@ thread_local! {
 
 /// The pane size the next pane build uses, overriding the caller's default when
 /// a demo `SetPaneSize`s (galaxigans is 640x360). `(0, 0)` = use the default.
-static REQ_SIZE: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+static REQ_SIZE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 fn set_req_size(w: u32, h: u32) {
-    REQ_SIZE.store(((w as u64) << 32) | h as u64, std::sync::atomic::Ordering::Release);
+    REQ_SIZE.store(
+        ((w as u64) << 32) | h as u64,
+        std::sync::atomic::Ordering::Release,
+    );
 }
 fn req_size_or(default_w: u32, default_h: u32) -> (u32, u32) {
     let v = REQ_SIZE.load(std::sync::atomic::Ordering::Acquire);
@@ -175,7 +177,9 @@ fn set_req_fps(fps: u32) {
 }
 /// The requested frame interval in seconds, for `crate::start_game_loop_timer`.
 pub(crate) fn req_fps_interval_secs() -> f64 {
-    1.0 / REQ_FPS.load(std::sync::atomic::Ordering::Acquire).clamp(1, 120) as f64
+    1.0 / REQ_FPS
+        .load(std::sync::atomic::Ordering::Acquire)
+        .clamp(1, 120) as f64
 }
 
 /// Build the native pane once (main thread) and return its `NSView` to install
@@ -356,7 +360,15 @@ pub fn apply_command(cmd: &macvm::embed::GameCommand) {
                 }
             }
             // ── GamePane extensions ──
-            C::Text { x, y, text, r, g, b, scale } => {
+            C::Text {
+                x,
+                y,
+                text,
+                r,
+                g,
+                b,
+                scale,
+            } => {
                 n.text.draw_text(*x, *y, text, *r, *g, *b, *scale);
             }
             C::TextClear => n.text.clear(),
@@ -389,7 +401,13 @@ pub fn apply_command(cmd: &macvm::embed::GameCommand) {
                     sh.set_param(*index, *value);
                 }
             }
-            C::LinePalette { line, index, r, g, b } => {
+            C::LinePalette {
+                line,
+                index,
+                r,
+                g,
+                b,
+            } => {
                 n.pane.set_line_rgb(*line, *index, *r, *g, *b);
             }
             C::Present => {
@@ -497,8 +515,8 @@ fn synth_preset(preset: u8) -> macgamepane_audio::synth::Sound {
         7 => s::click(0.05, &mut rng),
         8 => s::bang(0.40, &mut rng),
         9 => s::blip(660.0, 0.12),
-        10 => s::saucer(0.9),    // UFO warble (galaxigans)
-        11 => s::boss_hum(1.8),  // tractor-beam hum (galaxigans)
+        10 => s::saucer(0.9),   // UFO warble (galaxigans)
+        11 => s::boss_hum(1.8), // tractor-beam hum (galaxigans)
         _ => s::blip(660.0, 0.12),
     }
 }
@@ -564,7 +582,7 @@ mod tests {
         f.write_all(&file_size.to_le_bytes()).unwrap();
         f.write_all(&0u32.to_le_bytes()).unwrap(); // reserved
         f.write_all(&54u32.to_le_bytes()).unwrap(); // pixel-data offset
-        // BITMAPINFOHEADER (40 bytes).
+                                                    // BITMAPINFOHEADER (40 bytes).
         f.write_all(&40u32.to_le_bytes()).unwrap();
         f.write_all(&(w as i32).to_le_bytes()).unwrap();
         f.write_all(&(h as i32).to_le_bytes()).unwrap(); // positive => bottom-up
@@ -576,10 +594,11 @@ mod tests {
         f.write_all(&2835i32.to_le_bytes()).unwrap(); // y ppm
         f.write_all(&0u32.to_le_bytes()).unwrap(); // palette colours
         f.write_all(&0u32.to_le_bytes()).unwrap(); // important colours
-        // Pixel rows, bottom-up.
+                                                   // Pixel rows, bottom-up.
         for y in (0..h as usize).rev() {
             let start = y * row_bytes;
-            f.write_all(&bgra_top_first[start..start + row_bytes]).unwrap();
+            f.write_all(&bgra_top_first[start..start + row_bytes])
+                .unwrap();
         }
     }
 

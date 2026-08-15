@@ -85,27 +85,59 @@ pub fn subtype_of(
     // Structural unwraps first (Union/InferenceDef on EITHER side) — these
     // never touch the trail; only a nominal head-vs-head comparison can.
     if let TypeExpr::InferenceDef(inner) = s_expr {
-        return subtype_of(model, self_class, &ResolvedType::Written((**inner).clone()), t, trail);
+        return subtype_of(
+            model,
+            self_class,
+            &ResolvedType::Written((**inner).clone()),
+            t,
+            trail,
+        );
     }
     if let TypeExpr::InferenceDef(inner) = t_expr {
-        return subtype_of(model, self_class, s, &ResolvedType::Written((**inner).clone()), trail);
+        return subtype_of(
+            model,
+            self_class,
+            s,
+            &ResolvedType::Written((**inner).clone()),
+            trail,
+        );
     }
     if let TypeExpr::Union(variants) = s_expr {
         // A union AS A SOURCE: every alternative must satisfy T (the value
         // could actually BE any of them).
-        return variants
-            .iter()
-            .all(|v| subtype_of(model, self_class, &ResolvedType::Written(v.clone()), t, trail));
+        return variants.iter().all(|v| {
+            subtype_of(
+                model,
+                self_class,
+                &ResolvedType::Written(v.clone()),
+                t,
+                trail,
+            )
+        });
     }
     if let TypeExpr::Union(variants) = t_expr {
         // A union AS A TARGET: S just needs to satisfy ONE alternative.
-        return variants
-            .iter()
-            .any(|v| subtype_of(model, self_class, s, &ResolvedType::Written(v.clone()), trail));
+        return variants.iter().any(|v| {
+            subtype_of(
+                model,
+                self_class,
+                s,
+                &ResolvedType::Written(v.clone()),
+                trail,
+            )
+        });
     }
 
-    if let (TypeExpr::Block { arg_types: sa, return_type: sr }, TypeExpr::Block { arg_types: ta, return_type: tr }) =
-        (s_expr, t_expr)
+    if let (
+        TypeExpr::Block {
+            arg_types: sa,
+            return_type: sr,
+        },
+        TypeExpr::Block {
+            arg_types: ta,
+            return_type: tr,
+        },
+    ) = (s_expr, t_expr)
     {
         if sa.len() != ta.len() {
             return false; // arity mismatch -- not comparable (no bespoke error kind for this yet)
@@ -185,7 +217,11 @@ fn superclass_chain_contains(
         return false; // already assuming this pair elsewhere on the stack -- cut the cycle
     }
     trail.assumed.insert(key.clone());
-    let result = match model.classes.get(s_name).and_then(|c| c.superclass.as_deref()) {
+    let result = match model
+        .classes
+        .get(s_name)
+        .and_then(|c| c.superclass.as_deref())
+    {
         Some(super_name) => superclass_chain_contains(model, super_name, target, trail),
         None => false, // hit the nil-superclass root without finding `target`
     };
@@ -235,25 +271,76 @@ mod tests {
     fn reflexivity_and_dynamic_and_object() {
         let model = model_with_chain("reflexivity", &[("Object", None), ("Foo", Some("Object"))]);
         let mut trail = Trail::new();
-        assert!(subtype_of(&model, "Foo", &named("Foo"), &named("Foo"), &mut trail));
-        assert!(subtype_of(&model, "Foo", &ResolvedType::Dynamic, &named("Foo"), &mut trail));
-        assert!(subtype_of(&model, "Foo", &named("Foo"), &ResolvedType::Dynamic, &mut trail));
-        assert!(subtype_of(&model, "Foo", &named("Frobnicator"), &named("Object"), &mut trail));
+        assert!(subtype_of(
+            &model,
+            "Foo",
+            &named("Foo"),
+            &named("Foo"),
+            &mut trail
+        ));
+        assert!(subtype_of(
+            &model,
+            "Foo",
+            &ResolvedType::Dynamic,
+            &named("Foo"),
+            &mut trail
+        ));
+        assert!(subtype_of(
+            &model,
+            "Foo",
+            &named("Foo"),
+            &ResolvedType::Dynamic,
+            &mut trail
+        ));
+        assert!(subtype_of(
+            &model,
+            "Foo",
+            &named("Frobnicator"),
+            &named("Object"),
+            &mut trail
+        ));
     }
 
     #[test]
     fn superclass_chain_walk() {
-        let model = model_with_chain("chain", &[
-            ("Object", None),
-            ("Magnitude", Some("Object")),
-            ("Number", Some("Magnitude")),
-            ("Integer", Some("Number")),
-        ]);
+        let model = model_with_chain(
+            "chain",
+            &[
+                ("Object", None),
+                ("Magnitude", Some("Object")),
+                ("Number", Some("Magnitude")),
+                ("Integer", Some("Number")),
+            ],
+        );
         let mut trail = Trail::new();
-        assert!(subtype_of(&model, "Integer", &named("Integer"), &named("Number"), &mut trail));
-        assert!(subtype_of(&model, "Integer", &named("Integer"), &named("Magnitude"), &mut trail));
-        assert!(!subtype_of(&model, "Integer", &named("Magnitude"), &named("Integer"), &mut trail));
-        assert!(!subtype_of(&model, "Integer", &named("Number"), &named("String"), &mut trail));
+        assert!(subtype_of(
+            &model,
+            "Integer",
+            &named("Integer"),
+            &named("Number"),
+            &mut trail
+        ));
+        assert!(subtype_of(
+            &model,
+            "Integer",
+            &named("Integer"),
+            &named("Magnitude"),
+            &mut trail
+        ));
+        assert!(!subtype_of(
+            &model,
+            "Integer",
+            &named("Magnitude"),
+            &named("Integer"),
+            &mut trail
+        ));
+        assert!(!subtype_of(
+            &model,
+            "Integer",
+            &named("Number"),
+            &named("String"),
+            &mut trail
+        ));
     }
 
     #[test]
@@ -261,20 +348,41 @@ mod tests {
         let model = model_with_chain("self_ctx", &[("Object", None), ("Foo", Some("Object"))]);
         let mut trail = Trail::new();
         // `self` used where `Object` (an ancestor) is declared -- fine.
-        assert!(subtype_of(&model, "Foo", &named("Self"), &named("Object"), &mut trail));
+        assert!(subtype_of(
+            &model,
+            "Foo",
+            &named("Self"),
+            &named("Object"),
+            &mut trail
+        ));
         // `^Self` declared, returning `self` from a method on Foo -- fine.
-        assert!(subtype_of(&model, "Foo", &named("Self"), &named("Self"), &mut trail));
+        assert!(subtype_of(
+            &model,
+            "Foo",
+            &named("Self"),
+            &named("Self"),
+            &mut trail
+        ));
         // A DIFFERENT class's name is not satisfied by Foo's `self`.
-        assert!(!subtype_of(&model, "Foo", &named("Self"), &named("Bar"), &mut trail));
+        assert!(!subtype_of(
+            &model,
+            "Foo",
+            &named("Self"),
+            &named("Bar"),
+            &mut trail
+        ));
     }
 
     #[test]
     fn block_type_variance() {
-        let model = model_with_chain("block_variance", &[
-            ("Object", None),
-            ("Magnitude", Some("Object")),
-            ("Integer", Some("Magnitude")),
-        ]);
+        let model = model_with_chain(
+            "block_variance",
+            &[
+                ("Object", None),
+                ("Magnitude", Some("Object")),
+                ("Integer", Some("Magnitude")),
+            ],
+        );
         let mut trail = Trail::new();
         let block = |arg: &str, ret: &str| {
             ResolvedType::Written(TypeExpr::Block {
@@ -311,11 +419,14 @@ mod tests {
 
     #[test]
     fn union_both_sides() {
-        let model = model_with_chain("union", &[
-            ("Object", None),
-            ("Integer", Some("Object")),
-            ("Str", Some("Object")),
-        ]);
+        let model = model_with_chain(
+            "union",
+            &[
+                ("Object", None),
+                ("Integer", Some("Object")),
+                ("Str", Some("Object")),
+            ],
+        );
         let mut trail = Trail::new();
         let union = |a: &str, b: &str| {
             ResolvedType::Written(TypeExpr::Union(vec![
@@ -324,20 +435,47 @@ mod tests {
             ]))
         };
         // Source union: every variant must satisfy T.
-        assert!(subtype_of(&model, "Object", &union("Integer", "Str"), &named("Object"), &mut trail));
-        assert!(!subtype_of(&model, "Object", &union("Integer", "Str"), &named("Integer"), &mut trail));
+        assert!(subtype_of(
+            &model,
+            "Object",
+            &union("Integer", "Str"),
+            &named("Object"),
+            &mut trail
+        ));
+        assert!(!subtype_of(
+            &model,
+            "Object",
+            &union("Integer", "Str"),
+            &named("Integer"),
+            &mut trail
+        ));
         // Target union: S just needs to satisfy one variant.
-        assert!(subtype_of(&model, "Object", &named("Integer"), &union("Integer", "Str"), &mut trail));
-        assert!(!subtype_of(&model, "Object", &named("Object"), &union("Integer", "Str"), &mut trail));
+        assert!(subtype_of(
+            &model,
+            "Object",
+            &named("Integer"),
+            &union("Integer", "Str"),
+            &mut trail
+        ));
+        assert!(!subtype_of(
+            &model,
+            "Object",
+            &named("Object"),
+            &union("Integer", "Str"),
+            &mut trail
+        ));
     }
 
     #[test]
     fn unrelated_generic_heads_are_not_subtypes() {
-        let model = model_with_chain("generic_heads", &[
-            ("Object", None),
-            ("Cltn", Some("Object")),
-            ("Str", Some("Object")),
-        ]);
+        let model = model_with_chain(
+            "generic_heads",
+            &[
+                ("Object", None),
+                ("Cltn", Some("Object")),
+                ("Str", Some("Object")),
+            ],
+        );
         let mut trail = Trail::new();
         let generic = |head: &str| {
             ResolvedType::Written(TypeExpr::Generic {
@@ -345,8 +483,20 @@ mod tests {
                 args: vec![TypeExpr::Named("Object".to_string())],
             })
         };
-        assert!(!subtype_of(&model, "Object", &generic("Str"), &generic("Cltn"), &mut trail));
-        assert!(subtype_of(&model, "Object", &generic("Cltn"), &named("Object"), &mut trail));
+        assert!(!subtype_of(
+            &model,
+            "Object",
+            &generic("Str"),
+            &generic("Cltn"),
+            &mut trail
+        ));
+        assert!(subtype_of(
+            &model,
+            "Object",
+            &generic("Cltn"),
+            &named("Object"),
+            &mut trail
+        ));
     }
 
     #[test]
@@ -377,6 +527,12 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
 
         let mut trail = Trail::new();
-        assert!(!subtype_of(&model, "A", &named("A"), &named("Zorp"), &mut trail));
+        assert!(!subtype_of(
+            &model,
+            "A",
+            &named("A"),
+            &named("Zorp"),
+            &mut trail
+        ));
     }
 }

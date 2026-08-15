@@ -1,0 +1,347 @@
+"── 98_winui_browser.mst — WG5b-1: the Browser, over live reflection ─────
+ docs/ROADMAP.md's WG5 row, second half, first slice. The four panes and the
+ source pane, fed by the PRIMARY's live class hierarchy across the seam WG4
+ D1 built.
+
+ NOTHING NEW WAS NEEDED FOR THIS, and that is the point worth recording.
+ `UiBrowserService browseSnapshot` already exists on the primary (34_tools);
+ `Worker uiRequest: #refresh args: #(#browser)` already reaches it; and the
+ reply already arrives as a nested tree of Strings, Arrays and smis. The
+ snapshot is NAMES ONLY by construction — the pickle REFUSES class objects,
+ and that refusal is what enforces `no class oop crosses a VM boundary`
+ rather than a convention anyone has to remember.
+
+ So this file is GUI wiring over a model it does not own, which is the same
+ sentence `66_cocoabrowser.mst` opens with, and the same rule §2.3 states for
+ every view: *consumed, not re-implemented*.
+
+ WHAT THIS SLICE IS NOT. It is READ-ONLY. Accept, New Class, New Method and
+ Remove all write to the image through `image_store::flows` — the web GUI's
+ own implementation — and that needs a host service Windows does not have
+ yet. It is WG5b-2, it is where the CG8 gate lives (*Accept persists
+ byte-identically to the web path*), and rushing it to make this look
+ complete would be exactly the wrong trade: a browser you can read is most of
+ what a browser is for, and a write path that ALMOST matches the web's is a
+ corruption bug with a UI in front of it.
+
+ THE FOUR PANES, and where each comes from:
+
+   packages   the top-level groupings — here, the hierarchy's own top level
+   classes    the classes within, flattened depth-first with indentation
+   protocols  instance / class side (the Smalltalk-80 pair, not a category
+              model — the snapshot carries no categories, and inventing them
+              would be the browser lying about the image)
+   selectors  the chosen side's selectors, alphabetical (the snapshot's order)
+   source     the method's source — IMAGE data, so WG5b-2; today it shows the
+              selector and says where its source will come from, rather than
+              showing a plausible-looking reconstruction."
+
+Object subclass: WinShell [
+
+    "── the model, fetched once per refresh ──────────────────────────────"
+
+    WinShell class >> refreshBrowser [
+        "ONE request for the WHOLE tree, not one per pane. The snapshot is a
+         full-hierarchy traversal on the primary, and four panes each asking
+         for their own slice would be four traversals of the entire image to
+         draw one screen."
+        Worker uiRequest: #refresh args: (Array with: #browser) onReply: [ :reply |
+            WinShell browserTreeArrived: reply ].
+        ^self
+    ]
+
+    WinShell class >> browserTreeArrived: reply [
+        "The reply is #(#browserTree <node>) on success, or #(#uiPending ...)
+         when the primary has no UiBrowserService — which is a real state, not
+         an error: a world booted without the tools layer has no hierarchy to
+         project."
+        ((reply isKindOf: Array) and: [ reply size >= 2 and: [ (reply at: 1) == #browserTree ] ])
+            ifFalse: [ ^self appendTranscript: 'browser: primary has no snapshot to give' ].
+        BrowserTree := reply at: 2.
+        BrowserRefreshes := (BrowserRefreshes isNil ifTrue: [ 0 ] ifFalse: [ BrowserRefreshes ]) + 1.
+        self rebuildBrowserPanes.
+        "WG6a: the Outliner renders the SAME tree, so it fills from the same
+         arrival. A no-op until 104 defines it, and a no-op whenever the
+         Outliner has never been opened — there is nothing to rebuild."
+        self rebuildOutlinerIfBuilt.
+        "WG6c-3: and the Editor's class picker, from the SAME snapshot. Three
+         views, one traversal of the image — which is the reason this arrival
+         is the fan-out point rather than each view asking for its own."
+        self rebuildEditorClassesIfBuilt.
+        ^self
+    ]
+
+    WinShell class >> browserTree ^ <Object> [ ^BrowserTree ]
+    WinShell class >> browserRefreshes ^ <Integer> [
+        ^BrowserRefreshes isNil ifTrue: [ 0 ] ifFalse: [ BrowserRefreshes ] ]
+
+    "── walking the snapshot ─────────────────────────────────────────────
+     Node shape, fixed by UiBrowserService and quoted here so a reader of this
+     file need not go and find it:
+       {name. instVars. classVars. instSelectors. classSelectors. children}"
+
+    WinShell class >> nodeName: n <Array> ^ <String> [ ^n at: 1 ]
+    WinShell class >> nodeInstVars: n <Array> ^ <Array> [ ^n at: 2 ]
+    WinShell class >> nodeClassVars: n <Array> ^ <Array> [ ^n at: 3 ]
+    WinShell class >> nodeInstSelectors: n <Array> ^ <Array> [ ^n at: 4 ]
+    WinShell class >> nodeClassSelectors: n <Array> ^ <Array> [ ^n at: 5 ]
+    WinShell class >> nodeChildren: n <Array> ^ <Array> [ ^n at: 6 ]
+
+    WinShell class >> flattenTree: node <Array> depth: d <Integer> into: out <OrderedCollection> [
+        "Depth-first with the depth kept, so the classes pane can INDENT rather
+         than pretend the hierarchy is a flat list. Indentation is the whole of
+         how a Smalltalk browser shows inheritance in one column."
+        out add: (Array with: (self nodeName: node) with: d with: node).
+        (self nodeChildren: node) do: [ :c | self flattenTree: c depth: d + 1 into: out ].
+        ^out
+    ]
+
+    WinShell class >> browserRows ^ <OrderedCollection> [
+        BrowserTree isNil ifTrue: [ ^OrderedCollection new ].
+        ^self flattenTree: BrowserTree depth: 0 into: OrderedCollection new
+    ]
+
+    WinShell class >> browserClassCount ^ <Integer> [ ^self browserRows size ]
+
+    WinShell class >> nodeNamed: aName <String> ^ <Object> [
+        self browserRows do: [ :r | (r at: 1) = aName ifTrue: [ ^r at: 3 ] ].
+        ^nil
+    ]
+
+    "── the selected path ────────────────────────────────────────────────"
+
+    WinShell class >> browserSelectedClass ^ <Object> [ ^BrowserClass ]
+    WinShell class >> browserSelectedSide ^ <Symbol> [
+        ^BrowserSide isNil ifTrue: [ #instance ] ifFalse: [ BrowserSide ] ]
+    WinShell class >> browserSelectedSelector ^ <Object> [ ^BrowserSelector ]
+
+    WinShell class >> selectBrowserClass: aName <String> [
+        BrowserClass := aName.
+        BrowserSelector := nil.
+        self rebuildSelectorPane.
+        self updateSourcePane.
+        ^self
+    ]
+
+    WinShell class >> selectBrowserSide: aSymbol <Symbol> [
+        BrowserSide := aSymbol.
+        BrowserSelector := nil.
+        self rebuildSelectorPane.
+        self updateSourcePane.
+        ^self
+    ]
+
+    WinShell class >> selectBrowserSelector: aName <String> [
+        BrowserSelector := aName.
+        self updateSourcePane.
+        ^self
+    ]
+
+    WinShell class >> browserSelectors ^ <Array> [
+        | node |
+        BrowserClass isNil ifTrue: [ ^Array new: 0 ].
+        node := self nodeNamed: BrowserClass.
+        node isNil ifTrue: [ ^Array new: 0 ].
+        ^self browserSelectedSide == #class
+            ifTrue: [ self nodeClassSelectors: node ]
+            ifFalse: [ self nodeInstSelectors: node ]
+    ]
+
+    "── the panes themselves ─────────────────────────────────────────────
+     Four SysListView32s in report mode (§2.1's Panes row) plus the source
+     EDIT. Built lazily with the view, like every other content child."
+
+    WinShell class >> browserPaneNames ^ <Array> [
+        ^Array with: #browserClasses with: #browserProtocols
+               with: #browserSelectors with: #browserSource
+    ]
+
+    WinShell class >> buildBrowserPanes [
+        "Called from `ensureViewBuilt:` for #browser. The four panes share the
+         content rect, split by `browserPaneRects` — a pure computation, so it
+         is testable with no window exactly as the shell's own layout is."
+        self browserPaneNames do: [ :n |
+            n == #browserSource
+                ifTrue: [
+                    "WG5c D3: the source pane is the other code surface, and
+                     it is the one Accept reads — so it becomes a RichEdit
+                     alongside the Workspace, by the same `codePaneClass`."
+                    self addControl: n class: self codePaneClass text: ''
+                        style: (((WinApi constant: 'WS_CHILD')
+                            bitOr: ((WinApi constant: 'WS_BORDER') bitOr: (WinApi constant: 'WS_VSCROLL')))
+                            bitOr: ((WinApi constant: 'ES_MULTILINE')
+                                bitOr: (WinApi constant: 'ES_AUTOVSCROLL')))
+                        exStyle: 0 ]
+                ifFalse: [
+                    self addControl: n class: 'LISTBOX' text: ''
+                        style: (((WinApi constant: 'WS_CHILD')
+                            bitOr: ((WinApi constant: 'WS_BORDER') bitOr: (WinApi constant: 'WS_VSCROLL')))
+                            bitOr: (WinApi constant: 'LBS_NOTIFY'))
+                        exStyle: 0 ] ].
+        "Every pane needs a font, and a LISTBOX needs the SHELL's font rather
+         than the bar's. Measured: with the custom 9pt bar font the list held
+         175 items (LB_GETCOUNT said so) and drew none of them — an empty white
+         box that looks exactly like a fill that failed and is not one. With
+         `guiFont` — the system UI font the shell already uses for its standard
+         controls — the same list draws immediately.
+
+         Which is also the RIGHT font by §2.1: the bar's is for the custom-drawn
+         strip, and standard controls under visual styles wear the system's."
+        self browserPaneNames do: [ :n |
+            (self controlNamed: n) ifNotNil: [ :c |
+                n == #browserSource
+                    ifTrue: [ self prepareCodePane: c ]
+                    ifFalse: [ c setFont: self guiFont ] ] ].
+        "Position them NOW, for the same reason a content child is positioned
+         at build time: a view switch does not relayout (WG4 D6 — every content
+         child shares one rect, so a switch changes no geometry), which means a
+         pane built after the last layout would never be given a position and
+         would show as an empty content area. Measured exactly that way, twice
+         now — once for content children, once here."
+        self isOpen ifTrue: [
+            | rects |
+            rects := self layout
+                rectsIn: self clientWidth
+                by: self clientHeight
+                dpi: (Dpi isNil ifTrue: [ WinApi constant: 'USER_DEFAULT_SCREEN_DPI' ] ifFalse: [ Dpi ]).
+            self layoutBrowserPanes: (rects at: #content) ].
+        self refreshBrowser.
+        ^self
+    ]
+
+    WinShell class >> browserPaneRects: content <Array> ^ <Dictionary> [
+        "PURE: the content rect in, four pane rects out. The classic
+         Smalltalk-80 arrangement — three list panes across the top third, the
+         source filling the rest — and the arithmetic is here rather than in a
+         layout object because these four are a UNIT that only exists together."
+        | x y w h top out third |
+        x := content at: 1. y := content at: 2. w := content at: 3. h := content at: 4.
+        top := h * 35 // 100.
+        third := w // 3.
+        out := Dictionary new.
+        out at: #browserClasses put: (Array with: x with: y with: third with: top).
+        out at: #browserProtocols put: (Array with: x + third with: y with: third with: top).
+        out at: #browserSelectors put: (Array with: x + (third * 2) with: y with: w - (third * 2) with: top).
+        out at: #browserSource put: (Array with: x with: y + top with: w with: h - top).
+        ^out
+    ]
+
+    WinShell class >> layoutBrowserPanes: content <Array> [
+        | rects |
+        rects := self browserPaneRects: content.
+        self browserPaneNames do: [ :n |
+            (self controlNamed: n) ifNotNil: [ :c | c moveTo: (rects at: n) ] ].
+        ^self
+    ]
+
+    WinShell class >> showBrowserPanes: aBoolean <Boolean> [
+        self browserPaneNames do: [ :n |
+            (self controlNamed: n) ifNotNil: [ :c | c show: aBoolean ] ].
+        ^self
+    ]
+
+    "── filling them ────────────────────────────────────────────────────"
+
+    WinShell class >> listSet: aName <Symbol> items: items [
+        | c |
+        c := self controlNamed: aName.
+        c isNil ifTrue: [ ^self ].
+        c send: (WinApi constant: 'LB_RESETCONTENT') wParam: 0 lParam: 0.
+        items do: [ :s |
+            c send: (WinApi constant: 'LB_ADDSTRING')
+                wParam: 0
+                lParam: (WinArena scratchUtf16: s) ].
+        ^self
+    ]
+
+    WinShell class >> rebuildBrowserPanes [
+        "Indentation carries the hierarchy — two spaces per level, which is what
+         a Smalltalk browser has always used to show inheritance in one column."
+        | names |
+        names := OrderedCollection new.
+        self browserRows do: [ :r |
+            | pad |
+            pad := String new.
+            1 to: (r at: 2) do: [ :i | pad := pad , '  ' ].
+            names add: pad , (r at: 1) ].
+        self listSet: #browserClasses items: names.
+        self listSet: #browserProtocols items: (Array with: 'instance' with: 'class').
+        self rebuildSelectorPane.
+        ^self
+    ]
+
+    WinShell class >> rebuildSelectorPane [
+        self listSet: #browserSelectors items: self browserSelectors.
+        ^self
+    ]
+
+    WinShell class >> updateSourcePane [
+        "WG5b-2 makes good on the promise this method used to print: source is
+         IMAGE data, and it now comes from the image.
+
+         The read/write split is the Mac's, deliberately (66_cocoabrowser's own
+         note): the hierarchy and selector ROWS come from the primary's live
+         reflection, but TEXT comes from `image_store` — so what the user edits
+         is what the next boot will read, rather than a rendering of what this
+         session happens to hold.
+
+         A selector with no stored source is not an error. It happens for
+         anything compiled live this session and never Accepted, and the pane
+         says so plainly instead of showing an empty box that looks like a
+         failed read."
+        | c text |
+        c := self controlNamed: #browserSource.
+        c isNil ifTrue: [ ^self ].
+        text := self sourceTextFor: BrowserClass selector: BrowserSelector.
+        c setText: text.
+        ^self
+    ]
+
+    "`sourceTextFor:selector:` is NOT here, and the reason is a compile-time
+     one worth stating: it names WinHost, which 99 defines — and 99 must load
+     AFTER this file, because its own Accept reaches the selection accessors
+     above. A class name is resolved when the method is compiled (unlike a
+     message send, which is not), so the two cannot both be satisfied and the
+     method moves to 99 rather than the load order bending around it."
+
+    WinShell class >> isBrowserPane: aName <Symbol> ^ <Boolean> [
+        ^(self browserPaneNames indexOf: aName) > 0
+    ]
+
+    WinShell class >> onBrowserPaneChanged: aName <Symbol> [
+        "Which row, asked of the control rather than remembered — the list is
+         the authority on its own selection, and a shell-side mirror of it
+         would be one more thing to get out of step."
+        | c i |
+        c := self controlNamed: aName.
+        c isNil ifTrue: [ ^self ].
+        i := c send: (WinApi constant: 'LB_GETCURSEL') wParam: 0 lParam: 0.
+        i < 0 ifTrue: [ ^self ].
+        aName == #browserClasses ifTrue: [
+            | rows |
+            rows := self browserRows.
+            (i + 1) > rows size ifTrue: [ ^self ].
+            ^self selectBrowserClass: ((rows at: i + 1) at: 1) ].
+        aName == #browserProtocols ifTrue: [
+            ^self selectBrowserSide: (i = 1 ifTrue: [ #class ] ifFalse: [ #instance ]) ].
+        aName == #browserSelectors ifTrue: [
+            | sels |
+            sels := self browserSelectors.
+            (i + 1) > sels size ifTrue: [ ^self ].
+            ^self selectBrowserSelector: (sels at: i + 1) ].
+        ^self
+    ]
+
+    WinShell class >> browserVariables ^ <Array> [
+        "The snapshot DOES carry variable names, so the variables the browser
+         shows are live rather than pending — unlike source, which is image
+         data and waits for WG5b-2."
+        | node |
+        BrowserClass isNil ifTrue: [ ^Array new: 0 ].
+        node := self nodeNamed: BrowserClass.
+        node isNil ifTrue: [ ^Array new: 0 ].
+        ^self browserSelectedSide == #class
+            ifTrue: [ self nodeClassVars: node ]
+            ifFalse: [ self nodeInstVars: node ]
+    ]
+]

@@ -1,0 +1,26 @@
+[package]
+name = "winui_host"
+version = "1.0.0"
+edition = "2021"
+
+# WINARM (WG5b-2): a `cdylib`, and that is the whole point of the crate.
+#
+# The Windows GUI's Accept has to reach `image_store::flows` — the web GUI's
+# OWN write path, shared rather than reimplemented, because the CG8 gate says
+# Accept must persist byte-identically to the web path and two GUIs writing
+# the image differently would be a corruption bug with a UI in front of it.
+#
+# It cannot be a primitive: `image_store` depends on `macvm`, so `macvm`
+# cannot depend on `image_store` without a cycle, and a downstream crate
+# cannot add a `PRIMITIVES` row (WG2 Δ 1). The Mac reaches its equivalent
+# through the ObjC runtime, which Windows has no counterpart for.
+#
+# So it is a DLL, called through the FFI's `library:` part (WG5b-2's one core
+# change) — the adapter downstream where it belongs, and the VM learning only
+# how to name a library, which a Smalltalk on Windows wanted anyway.
+[lib]
+name = "winui_host"
+crate-type = ["cdylib"]
+
+[dependencies]
+image_store = { path = "../image_store" }

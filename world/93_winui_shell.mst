@@ -1,0 +1,881 @@
+"── 93_winui_shell.mst — WG4: the shell ──────────────────────────────────
+ docs/ROADMAP.md's WG4 row: 'the one-window grammar stands'. The Mac's
+ 64_cocoaui.mst is the reference design and this is deliberately the SAME
+ grammar in Windows-11 materials (docs/win_gui_design.md §2.1):
+
+   a VIEW BAR across the top   — view-switcher buttons packed left, the live
+                                 metrics cluster anchored right, Do It /
+                                 Print It between them;
+   a CONTENT HOST filling the  — one child per registered view, built LAZILY
+   middle                        on first switch and shown/hidden thereafter
+                                 (AppKit swaps tab items; Win32 has no such
+                                 thing, so we own the show/hide ourselves);
+   a TRANSCRIPT docked at the  — collapsible, newest line first, a log to
+   bottom                        glance at rather than the output surface.
+
+ WHAT THIS FILE MAY NOT DO, and why it is short as a result. Every rule from
+ WG3 still binds and this file is the first one large enough to be tempted:
+
+   * The door FLAGS; the DRAIN works (§2.4a). No method here is called from
+     `window:message:wParam:lParam:`. `serviceCommand:code:from:` is a drain
+     callee — it may talk to Win32 all it likes.
+   * Controls are created at open time or in the drain, NEVER from a doit
+     (WG3 Δ2, and creation itself sends messages).
+   * `applyLayout` runs one `SetWindowPos` per control from the SETTLED
+     client rect, and provokes no further layout (the drain holds the guard,
+     so the WM_WINDOWPOSCHANGED it causes is declined at the door).
+
+ Load order: after 92, whose four hooks this file overrides in turn. 92's
+ own demo controls (a button, a status field, a two-column list) are what
+ WG3's gate measures, so this file does not delete them — it takes the shell
+ grammar over as a SUPERSET, and `MACVM_WINUI_WG4=off` puts WG3's window
+ back exactly (the same escape hatch `MACVM_WINUI_CONTROLS=off` gives WG3)."
+
+"── WinLayout, extended ──────────────────────────────────────────────────
+ WG3's WinLayout stacks full-width bands from the top and gives one of them
+ the remainder. WG4's grammar needs two things it does not have: a band
+ anchored to the BOTTOM (the transcript dock, whose height is a user
+ preference rather than a consequence of what is above it), and a way to
+ slice one band into a row of cells (the view bar). Both stay PURE — no
+ handle, no Win32, no window — which is what let WG3's layout tests run in a
+ world with no database at all, and what lets WG4's do the same."
+Object subclass: WinLayout [
+    "No new instance variables: a class's shape is fixed once it exists, and
+     that is a good rule — so a BOTTOM-anchored band is an ordinary entry in
+     the same `bands` collection carrying a third element, `#bottom`.
+     `add:height:`'s two-element entries stay exactly as WG3 wrote them and
+     mean `#top` by omission."
+
+    isBottomBand: b <Array> ^ <Boolean> [ ^b size > 2 and: [ (b at: 3) == #bottom ] ]
+
+    topBands ^ <OrderedCollection> [ ^bands reject: [ :b | self isBottomBand: b ] ]
+    bottomBands ^ <OrderedCollection> [ ^bands select: [ :b | self isBottomBand: b ] ]
+
+    addBottom: aName <Symbol> height: h <Integer> [
+        "A fixed band pinned to the BOTTOM edge. Bottom bands stack upward in
+         the order added, so the first one added sits lowest — the same
+         reading order as `add:height:`'s top-down stack."
+        bands add: (Array with: aName with: h with: #bottom).
+        ^self
+    ]
+
+    heightOfBottom: aName <Symbol> ^ <Integer> [
+        | b |
+        b := self bottomBands detect: [ :x | (x at: 1) == aName ] ifNone: [ nil ].
+        ^b isNil ifTrue: [ 0 ] ifFalse: [ b at: 2 ]
+    ]
+
+    setBottom: aName <Symbol> height: h <Integer> [
+        "The transcript dock's collapse is a HEIGHT CHANGE, not a band that
+         comes and goes: keeping the band in the list at height 0 means the
+         collapsed layout is the same arithmetic as the open one, and the
+         reopen restores a number rather than reconstructing a structure."
+        bands do: [ :b |
+            ((b at: 1) == aName and: [ self isBottomBand: b ])
+                ifTrue: [ b at: 2 put: h. ^self ] ].
+        ^self addBottom: aName height: h
+    ]
+
+    rectsIn: clientWidth <Integer> by: clientHeight <Integer> dpi: dpi <Integer> ^ <Dictionary> [
+        "name -> #(x y width height) in PIXELS. Top bands stack down from the
+         top, bottom bands stack up from the bottom, and the fill band takes
+         whatever lies between the two stacks.
+
+         Computed in DIP space and scaled ONCE — the property WG3's
+         `testLayoutScalesWithDpi` pins, and the reason this recomputes
+         rather than adjusting an inherited result."
+        | dipW dipH out y fillHeight bottomTotal bottomY tops bots |
+        dipW := clientWidth * 96 // dpi.
+        dipH := clientHeight * 96 // dpi.
+        out := Dictionary new.
+        tops := self topBands.
+        bots := self bottomBands.
+        bottomTotal := 0.
+        bots do: [ :b | bottomTotal := bottomTotal + (b at: 2) + margin ].
+        fillHeight := dipH - (margin * (tops size + 1)) - bottomTotal.
+        tops do: [ :b | (b at: 2) isNil ifFalse: [ fillHeight := fillHeight - (b at: 2) ] ].
+        fillHeight < 0 ifTrue: [ fillHeight := 0 ].
+        y := margin.
+        tops do: [ :b |
+            | h |
+            h := (b at: 2) isNil ifTrue: [ fillHeight ] ifFalse: [ b at: 2 ].
+            out at: (b at: 1) put: (Array
+                with: margin * dpi // 96
+                with: y * dpi // 96
+                with: (dipW - (margin * 2)) * dpi // 96
+                with: h * dpi // 96).
+            y := y + h + margin ].
+        bottomY := dipH - margin.
+        bots do: [ :b |
+            | h |
+            h := b at: 2.
+            bottomY := bottomY - h.
+            out at: (b at: 1) put: (Array
+                with: margin * dpi // 96
+                with: bottomY * dpi // 96
+                with: (dipW - (margin * 2)) * dpi // 96
+                with: h * dpi // 96).
+            bottomY := bottomY - margin ].
+        ^out
+    ]
+
+    packRow: aRect <Array> left: leftWidths <Object> right: rightWidths <Object>
+             gap: g <Integer> dpi: dpi <Integer> ^ <Array> [
+        "Slice one band's PIXEL rect into a row: `leftWidths` packed from the
+         left edge, `rightWidths` packed from the right edge (last element
+         hugging the edge), every width in DIPs. Answers #(leftRects
+         rightRects) — two OrderedCollections of pixel rects.
+
+         Right-anchored cells are how the Mac's metrics cluster tracks the
+         window on resize (its MinXMargin autoresizing mask); Win32 has no
+         autoresizing, so the arithmetic is ours and it happens here, once,
+         in the same pure object the band layout lives in."
+        | x0 y h lefts rights x gapPx |
+        x0 := aRect at: 1. y := aRect at: 2. h := aRect at: 4.
+        gapPx := g * dpi // 96.
+        lefts := OrderedCollection new.
+        x := x0.
+        leftWidths do: [ :w |
+            | wp |
+            wp := w * dpi // 96.
+            lefts add: (Array with: x with: y with: wp with: h).
+            x := x + wp + gapPx ].
+        rights := OrderedCollection new.
+        x := x0 + (aRect at: 3).
+        rightWidths reverseDo: [ :w |
+            | wp |
+            wp := w * dpi // 96.
+            x := x - wp.
+            rights addFirst: (Array with: x with: y with: wp with: h).
+            x := x - gapPx ].
+        ^Array with: lefts with: rights
+    ]
+]
+
+
+"── WinControl, extended ─────────────────────────────────────────────────
+ WG3's control speaks text, position and messages. WG4's shell needs two
+ more verbs, and both are one Win32 call each: a view's content child is
+ SHOWN or HIDDEN as views switch (Win32's answer to AppKit swapping a tab
+ item's view), and a command button is ENABLED or not by what the active
+ view can supply."
+Object subclass: WinControl [
+    show: aBoolean <Boolean> ^ <Boolean> [
+        ^WinApi asBool: (WinApi showWindow: handle
+            cmd: (aBoolean
+                ifTrue: [ WinApi constant: 'SW_SHOW' ]
+                ifFalse: [ WinApi constant: 'SW_HIDE' ]))
+    ]
+
+    enable: aBoolean <Boolean> ^ <Boolean> [
+        ^WinApi asBool: (WinApi enableWindow: handle enable: (aBoolean ifTrue: [ 1 ] ifFalse: [ 0 ]))
+    ]
+]
+
+"── WinApi, one more binding ─────────────────────────────────────────────"
+Object subclass: WinApi [
+    WinApi class >> enableWindow: hwnd <Integer> enable: bEnable <Integer> ^ <Integer> [
+        <primitive: FFI function: #EnableWindow ret: #g args: #(g g)>
+        ^self primitiveFailed: 'EnableWindow'
+    ]
+]
+
+"── the shell ────────────────────────────────────────────────────────────"
+Object subclass: WinShell [
+    <classVars: Wg4Enabled Views ActiveView ViewSwitchCount ViewBuildCount
+                TranscriptCollapsed TranscriptLines MetricsText MetricsUpdates
+                CommandsEnabled AccentColor LabelFont GlyphFont DrawRect DrawCalls DrawMisses DrawError DrawLast DrawIds DrawResult DrawResultClass DrawStep GlyphBuf LastFocusHwnd FocusChanges TranscriptHeight DragActive DragStartY DragStartHeight MonoFont SelScratch DoItCount PrintItCount CursorScratch BrowserTree BrowserRefreshes BrowserClass BrowserSide BrowserSelector>
+
+    WinShell class >> wg4Enabled ^ <Boolean> [
+        "`MACVM_WINUI_WG4=off` restores WG3's window exactly — the same shape
+         of escape hatch `controlsEnabled` gives WG3, and for the same
+         reason: a gate that can only run the newest layer cannot bisect.
+         Read on the Rust side and pushed in (win_gui/src/main.rs), exactly
+         as `controlsEnabled:` is: the guest never reads the environment."
+        ^Wg4Enabled ~~ false
+    ]
+
+    WinShell class >> wg4Enabled: aBoolean <Boolean> [ Wg4Enabled := aBoolean. ^self ]
+
+    WinShell class >> requestLayout [
+        "Ask the drain for a layout pass. Setting the flag is all a caller may
+         do — the pass itself belongs to `drainPass`."
+        PendingLayout := true.
+        ^self
+    ]
+
+    "── the view registry ────────────────────────────────────────────────
+     A view is #(symbol title builtFlag). The Mac registers a container BLOCK
+     and AppKit builds it on first tab selection; we register the same
+     intent and `ensureViewBuilt:` is where laziness actually happens."
+
+    WinShell class >> views ^ <OrderedCollection> [
+        Views isNil ifTrue: [ Views := OrderedCollection new ].
+        ^Views
+    ]
+
+    WinShell class >> registerViewNamed: aSymbol <Symbol> title: aTitle <String> [
+        (self views anySatisfy: [ :v | (v at: 1) == aSymbol ])
+            ifTrue: [ ^self ].
+        self views add: (Array with: aSymbol with: aTitle with: false).
+        ^self
+    ]
+
+    WinShell class >> registerShellViews [
+        "WG4 ships three views. WG5's Workspace and Browser register
+         themselves from their own files, exactly as CocoaBrowser2 and the
+         rest do on the Mac — which is why this is a REGISTRY and not a
+         hard-coded switch statement."
+        self registerViewNamed: #workspace title: 'Workspace'.
+        self registerViewNamed: #browser title: 'Browser'.
+        self registerViewNamed: #outliner title: 'Outliner'.
+        self registerViewNamed: #find title: 'Find'.
+        "WG6c-3. Registered next to the other code views rather than appended,
+         because the bar reads left to right and Editor belongs with Browser
+         and Find, not after Metrics."
+        self registerViewNamed: #editor title: 'Editor'.
+        "WG7-1: the Debugger, next to the other code views."
+        self registerViewNamed: #debugger title: 'Debugger'.
+        "WG8: the Canvas — pixels, where pixels belong."
+        self registerViewNamed: #canvas title: 'Canvas'.
+        "WG9: Tests, next to the Debugger — a failure and its stack are one
+         click apart and belong beside each other in the bar too."
+        self registerViewNamed: #tests title: 'Tests'.
+        self registerViewNamed: #welcome title: 'Welcome'.
+        self registerViewNamed: #transcript title: 'Transcript'.
+        self registerViewNamed: #metrics title: 'Metrics'.
+        ^self
+    ]
+
+    WinShell class >> activeView ^ <Object> [ ^ActiveView ]
+
+    WinShell class >> switchToView: aSymbol <Symbol> ^ <Boolean> [
+        "Show one view's content child and hide the rest. Called from the
+         DRAIN (a view-bar button's `serviceCommand:`) — never from the door.
+
+         Answers whether the view exists, so a caller driving this from the
+         control port can tell 'switched' from 'no such view' without
+         parsing a transcript line."
+        | entry |
+        entry := self views detect: [ :v | (v at: 1) == aSymbol ] ifNone: [ nil ].
+        entry isNil ifTrue: [ ^false ].
+        self ensureViewBuilt: aSymbol.
+        "SHOW the incoming child FIRST, then hide the others. The obvious loop
+         — one pass calling `show:` with a boolean — hides the outgoing view
+         before showing the incoming one whenever the outgoing sorts first, and
+         that leaves a frame in which NEITHER is on screen. A tab control never
+         has that frame; it is the whole difference between a swap and a blink."
+        "The Browser's content child is a HOST for four panes rather than a
+         surface of its own, and WG6c-3's Editor is the same shape — a picker
+         and a custom pane sit in its rect, so the child itself stays hidden."
+        (self controlNamed: (self contentNameFor: aSymbol))
+            ifNotNil: [ :c | c show: (aSymbol ~~ #browser
+                and: [ aSymbol ~~ #editor
+                and: [ aSymbol ~~ self monitorViewName
+                and: [ aSymbol ~~ self debuggerViewName
+                and: [ aSymbol ~~ self canvasViewName
+                and: [ aSymbol ~~ self testsViewName ] ] ] ] ]) ].
+        self showBrowserPanes: aSymbol == #browser.
+        (self controlNamed: self outlinerName)
+            ifNotNil: [ :c | c show: aSymbol == #outliner ].
+        self showFindPanes: aSymbol == #find.
+        self showEditorViewPanes: aSymbol == #editor.
+        self showMonitorPane: aSymbol == self monitorViewName.
+        self showDebuggerPane: aSymbol == self debuggerViewName.
+        self showCanvasPane: aSymbol == self canvasViewName.
+        self showTestsPane: aSymbol == self testsViewName.
+        self views do: [ :v |
+            | c |
+            (v at: 1) == aSymbol ifFalse: [
+                c := self controlNamed: (self contentNameFor: (v at: 1)).
+                c isNil ifFalse: [ c show: false ] ] ].
+        ActiveView := aSymbol.
+        ViewSwitchCount := (ViewSwitchCount isNil ifTrue: [ 0 ] ifFalse: [ ViewSwitchCount ]) + 1.
+        "ONLY the bar is stale — the underline moved. Deliberately NOT a
+         relayout: every content child occupies the SAME rect, so switching
+         views changes no geometry at all. The earlier `requestLayout` here
+         moved every control in the window on every switch, including the four
+         hidden ones, which is what made a swap look like a full redraw."
+        self invalidateBar.
+        self syncCommandEnablement.
+        ^true
+    ]
+
+    WinShell class >> viewSwitchCount ^ <Integer> [
+        ^ViewSwitchCount isNil ifTrue: [ 0 ] ifFalse: [ ViewSwitchCount ] ]
+
+    WinShell class >> contentNameFor: aSymbol <Symbol> ^ <Symbol> [
+        ^('content_' , aSymbol asString) asSymbol
+    ]
+
+    WinShell class >> viewIsBuilt: aSymbol <Symbol> ^ <Boolean> [
+        | entry |
+        entry := self views detect: [ :v | (v at: 1) == aSymbol ] ifNone: [ nil ].
+        ^entry notNil and: [ (entry at: 3) == true ]
+    ]
+
+    WinShell class >> ensureViewBuilt: aSymbol <Symbol> [
+        "LAZY BUILD — the WG4 row's own word. A view's content child is
+         created the first time it is shown and never again, which is what
+         makes a shell with eight views cost one view's worth of handles at
+         startup. Creation sends messages; this runs in the drain, so that is
+         allowed here and would not be in the door."
+        | entry c |
+        (self viewIsBuilt: aSymbol) ifTrue: [ ^self ].
+        entry := self views detect: [ :v | (v at: 1) == aSymbol ] ifNone: [ nil ].
+        entry isNil ifTrue: [ ^self ].
+        "WG5a: the Workspace is EDITABLE and every other view is not — which is
+         also what makes WG4 D4's focus predicate light up here and nowhere
+         else, with no change to that file. A read-only EDIT is not a source
+         surface; this one is."
+        c := self
+            addControl: (self contentNameFor: aSymbol)
+            "WG5c D3: only the WORKSPACE becomes a RichEdit. The other views'
+             content children are read-only placeholders with no code in them,
+             and a text engine they never colour would be cost for nothing.
+             `codePaneClass` (101) falls back to EDIT if Msftedit.dll will not
+             load, so this stays a working control either way."
+            class: (aSymbol == #workspace ifTrue: [ self codePaneClass ] ifFalse: [ 'EDIT' ])
+            text: (aSymbol == #workspace ifTrue: [ '' ] ifFalse: [ self placeholderTextFor: aSymbol ])
+            style: ((((WinApi constant: 'WS_CHILD')
+                bitOr: ((WinApi constant: 'WS_BORDER') bitOr: (WinApi constant: 'WS_VSCROLL')))
+                bitOr: (((WinApi constant: 'ES_MULTILINE')
+                    bitOr: (aSymbol == #workspace
+                        ifTrue: [ 0 ]
+                        ifFalse: [ WinApi constant: 'ES_READONLY' ]))
+                    bitOr: (WinApi constant: 'ES_AUTOVSCROLL')))
+                "WS_CLIPSIBLINGS, for WG5c D5: without it this pane paints
+                 over whatever sits ABOVE it in the sibling z-order, and the
+                 ghost overlay sits exactly there. Measured that way — the
+                 overlay was positioned correctly, flagged visible, holding
+                 its text, and simply painted over."
+                bitOr: (WinApi constant: 'WS_CLIPSIBLINGS'))
+            exStyle: 0.
+        aSymbol == #workspace ifTrue: [
+            self prepareCodePane: c.
+            self installGhost ].
+        "WG6a: the Outliner's content child is a HOST for its tree, the same
+         way the Browser's is for its four panes — the tree is a sibling
+         positioned over the content rect rather than a child of it."
+        aSymbol == #find ifTrue: [
+            self buildFindPanes.
+            self isOpen ifTrue: [
+                | rects |
+                rects := self layout
+                    rectsIn: self clientWidth
+                    by: self clientHeight
+                    dpi: (Dpi isNil ifTrue: [ WinApi constant: 'USER_DEFAULT_SCREEN_DPI' ] ifFalse: [ Dpi ]).
+                self layoutFindPanes: (rects at: #content) ] ].
+        aSymbol == #outliner ifTrue: [
+            self buildOutlinerTree.
+            self isOpen ifTrue: [
+                | rects |
+                rects := self layout
+                    rectsIn: self clientWidth
+                    by: self clientHeight
+                    dpi: (Dpi isNil ifTrue: [ WinApi constant: 'USER_DEFAULT_SCREEN_DPI' ] ifFalse: [ Dpi ]).
+                self layoutOutliner: (rects at: #content) ].
+            self refreshOutliner ].
+        "WG5b-1: the Browser's content child is a HOST for four panes rather
+         than a text surface of its own — it stays hidden and the panes sit in
+         its rect, so the view registry needs no notion of `composite view`."
+        aSymbol == #browser ifTrue: [ self buildBrowserPanes ].
+        "WG6c-3: the Editor's picker, Save cell and custom pane. Built AFTER
+         the content child above, which is what puts the pane on top of it in
+         the sibling z-order — it is WS_CLIPSIBLINGS, so being underneath
+         would clip its paint away and show nothing at all. The class list is
+         filled from whatever snapshot has already arrived; a later one
+         refills it through `rebuildEditorClassesIfBuilt`."
+        "WG7-2: the Monitor's own cell pane, built after the content child so
+         it sits ABOVE it in the sibling z-order — the same WS_CLIPSIBLINGS
+         rule the editor pane follows, and the same failure if it is ignored."
+        aSymbol == self testsViewName ifTrue: [
+            self buildTestsPane.
+            self isOpen ifTrue: [
+                | rects |
+                rects := self layout
+                    rectsIn: self clientWidth
+                    by: self clientHeight
+                    dpi: (Dpi isNil ifTrue: [ WinApi constant: 'USER_DEFAULT_SCREEN_DPI' ] ifFalse: [ Dpi ]).
+                self layoutTestsPane: (rects at: #content) ].
+            self renderTests.
+            "FIRST OPEN RUNS THE SUITE. A Tests tab that showed nothing until
+             you found the verb would be a tab that mostly shows nothing; a
+             re-run is explicit, but the first one is what you came for."
+            self testRuns = 0 ifTrue: [ self runTests ] ].
+        aSymbol == self canvasViewName ifTrue: [
+            self buildCanvasPane.
+            self isOpen ifTrue: [
+                | rects |
+                rects := self layout
+                    rectsIn: self clientWidth
+                    by: self clientHeight
+                    dpi: (Dpi isNil ifTrue: [ WinApi constant: 'USER_DEFAULT_SCREEN_DPI' ] ifFalse: [ Dpi ]).
+                self layoutCanvasPane: (rects at: #content) ].
+            self renderCanvas ].
+        aSymbol == self debuggerViewName ifTrue: [
+            self buildDebuggerPane.
+            self isOpen ifTrue: [
+                | rects |
+                rects := self layout
+                    rectsIn: self clientWidth
+                    by: self clientHeight
+                    dpi: (Dpi isNil ifTrue: [ WinApi constant: 'USER_DEFAULT_SCREEN_DPI' ] ifFalse: [ Dpi ]).
+                self layoutDebuggerPane: (rects at: #content) ].
+            self renderDebugger ].
+        aSymbol == self monitorViewName ifTrue: [
+            self buildMonitorPane.
+            self isOpen ifTrue: [
+                | rects |
+                rects := self layout
+                    rectsIn: self clientWidth
+                    by: self clientHeight
+                    dpi: (Dpi isNil ifTrue: [ WinApi constant: 'USER_DEFAULT_SCREEN_DPI' ] ifFalse: [ Dpi ]).
+                self layoutMonitorPane: (rects at: #content) ] ].
+        aSymbol == #editor ifTrue: [
+            self buildEditorViewPanes.
+            self rebuildEditorClassesIfBuilt.
+            self isOpen ifTrue: [
+                | rects |
+                rects := self layout
+                    rectsIn: self clientWidth
+                    by: self clientHeight
+                    dpi: (Dpi isNil ifTrue: [ WinApi constant: 'USER_DEFAULT_SCREEN_DPI' ] ifFalse: [ Dpi ]).
+                self layoutEditorViewPanes: (rects at: #content) ].
+            self refreshBrowser ].
+        c show: false.
+        "Position it NOW, at the content rect it will always occupy. A view
+         switch deliberately does not relayout (every content child shares one
+         rect, so a switch changes no geometry) — which means a child built
+         after the last layout would otherwise never be given a position at
+         all, and would show as an empty content area. Measured exactly that
+         way the first time the relayout came out."
+        self isOpen ifTrue: [
+            | rects |
+            rects := self layout
+                rectsIn: self clientWidth
+                by: self clientHeight
+                dpi: (Dpi isNil ifTrue: [ WinApi constant: 'USER_DEFAULT_SCREEN_DPI' ] ifFalse: [ Dpi ]).
+            c moveTo: (rects at: #content) ].
+        entry at: 3 put: true.
+        ViewBuildCount := (ViewBuildCount isNil ifTrue: [ 0 ] ifFalse: [ ViewBuildCount ]) + 1.
+        ^self
+    ]
+
+    WinShell class >> viewBuildCount ^ <Integer> [
+        ^ViewBuildCount isNil ifTrue: [ 0 ] ifFalse: [ ViewBuildCount ] ]
+
+    WinShell class >> placeholderTextFor: aSymbol <Symbol> ^ <String> [
+        "Every empty state carries its teaching text (WG8's row says it for
+         the whole shell; there is no reason for WG4's own views to wait)."
+        aSymbol == #welcome ifTrue: [
+            ^'MACVM on Windows on ARM64.', (String with: Character cr with: Character nl),
+             (String with: Character cr with: Character nl),
+             'This is the WG4 shell: a view bar above, a transcript docked below,',
+             (String with: Character cr with: Character nl),
+             'and live VM metrics on the right. Views build lazily — this one',
+             (String with: Character cr with: Character nl),
+             'was created the first time you looked at it.' ].
+        aSymbol == #transcript ifTrue: [
+            ^'The transcript view. Newest line first.' ].
+        aSymbol == #metrics ifTrue: [
+            ^'VM metrics, sampled off the primary.' ].
+        ^''
+    ]
+
+    "── the transcript dock ──────────────────────────────────────────────"
+
+    WinShell class >> transcriptOpenHeight ^ <Integer> [ ^120 ]
+    WinShell class >> transcriptCollapsedHeight ^ <Integer> [ ^0 ]
+
+    WinShell class >> transcriptCollapsed ^ <Boolean> [ ^TranscriptCollapsed == true ]
+
+    WinShell class >> toggleTranscript ^ <Boolean> [
+        "Collapse or reopen the dock. Answers the NEW collapsed state.
+         A height change plus a relayout — the band never leaves the layout
+         (see `setBottom:height:`), so this cannot get the arithmetic into a
+         state the open path does not also produce."
+        TranscriptCollapsed := self transcriptCollapsed not.
+        self layout
+            setBottom: #transcript
+            height: (self transcriptCollapsed
+                ifTrue: [ self transcriptCollapsedHeight ]
+                ifFalse: [ self transcriptOpenHeight ]).
+        (self controlNamed: #transcript) ifNotNil: [ :c |
+            c show: self transcriptCollapsed not ].
+        self requestLayout.
+        ^self transcriptCollapsed
+    ]
+
+    WinShell class >> appendTranscript: aString <String> [
+        "Newest line FIRST — the Mac's reverse-chronological dock, and for
+         its stated reason: a log to glance at, not a stream to follow."
+        | lines |
+        TranscriptLines isNil ifTrue: [ TranscriptLines := OrderedCollection new ].
+        TranscriptLines addFirst: aString.
+        [ TranscriptLines size > 200 ] whileTrue: [ TranscriptLines removeLast ].
+        (self controlNamed: #transcript) ifNotNil: [ :c |
+            "A Win32 multiline EDIT breaks lines on CRLF and on nothing else:
+             a bare CR renders as no break at all, which is what ran every
+             transcript line together in the first WG4 snap."
+            lines := String new.
+            TranscriptLines do: [ :l |
+                lines := lines , l , (String with: Character cr with: Character nl) ].
+            c setText: lines ].
+        ^self
+    ]
+
+    WinShell class >> resetTranscript [
+        "The tests need a known starting point, and a class-side collection
+         with no reset is a test-ordering bug waiting to be blamed on
+         something else."
+        TranscriptLines := OrderedCollection new.
+        ^self
+    ]
+
+    WinShell class >> transcriptFirstLine ^ <String> [
+        ^(TranscriptLines isNil or: [ TranscriptLines isEmpty ])
+            ifTrue: [ '' ] ifFalse: [ TranscriptLines first ]
+    ]
+
+    WinShell class >> transcriptLineCount ^ <Integer> [
+        ^TranscriptLines isNil ifTrue: [ 0 ] ifFalse: [ TranscriptLines size ] ]
+
+    "── the metrics cluster ──────────────────────────────────────────────"
+
+    WinShell class >> updateMetricsMem: mem <String> jit: jit <String> code: code <String>
+                       alloc: alloc <String> gc: gc <String> [
+        "The Mac's own selector, same fields, same semantics — sampled off
+         the PRIMARY and pushed in. Kept as ONE call because the five values
+         belong to one sample: five separate setters would let the cluster
+         show a mixture of two moments, which is exactly the kind of small
+         lie a metrics readout must not tell."
+        MetricsText := 'MEM ' , mem , '   JIT ' , jit , '   CODE ' , code ,
+                       '   ALLOC ' , alloc , '   GC ' , gc.
+        (self controlNamed: #metrics) ifNotNil: [ :c | c setText: MetricsText ].
+        MetricsUpdates := (MetricsUpdates isNil ifTrue: [ 0 ] ifFalse: [ MetricsUpdates ]) + 1.
+        ^self
+    ]
+
+    WinShell class >> metricsText ^ <String> [
+        ^MetricsText isNil ifTrue: [ '' ] ifFalse: [ MetricsText ] ]
+
+    WinShell class >> metricsUpdates ^ <Integer> [
+        ^MetricsUpdates isNil ifTrue: [ 0 ] ifFalse: [ MetricsUpdates ] ]
+
+    "── Do It / Print It enablement ──────────────────────────────────────"
+
+    WinShell class >> commandsEnabled ^ <Boolean> [
+        "The WG4 row: 'Do It/Print It enablement tracked by focus'. Until
+         WG5's Workspace exists there is no editable text to act on, so the
+         honest answer is 'enabled exactly when a view that can supply source
+         is active' — today none can, and this reads false rather than
+         offering a button that would do nothing."
+        ^CommandsEnabled == true
+    ]
+
+    "WG4 D4 moved `syncCommandEnablement` to 95_winui_focus.mst, where the
+     predicate is about the FOCUSED CONTROL rather than the active view. The
+     old body tracked `ActiveView == #workspace`, which agrees with focus only
+     while exactly one view can supply source — see that file's own note."
+
+    "── the hooks 92 defined, taken over ─────────────────────────────────"
+
+    WinShell class >> layout ^ <WinLayout> [
+        Layout isNil ifTrue: [
+            Layout := self wg4Enabled ifTrue: [ self shellLayout ] ifFalse: [ WinLayout shell ] ].
+        ^Layout
+    ]
+
+    WinShell class >> shellLayout ^ <WinLayout> [
+        "The one-window grammar, as arithmetic: a view bar, a content area
+         that fills, and a transcript docked at the bottom."
+        ^WinLayout new
+            add: #viewbar height: 34;
+            fill: #content;
+            addBottom: #transcript height: self transcriptOpenHeight;
+            addBottom: #splitter height: self splitterHeight;
+            yourself
+    ]
+
+    WinShell class >> buildControls ^ <OrderedCollection> [
+        "WG3's controls first (its gate measures them), then the shell on
+         top. Open time only — never a doit, never a handler."
+        | built |
+        built := self wg3BuildControls.
+        self wg4Enabled ifFalse: [ ^built ].
+        self controlsEnabled ifFalse: [ ^built ].
+        self registerShellViews.
+        ViewBuildCount := 0.
+        ViewSwitchCount := 0.
+
+        "The view bar's buttons: one per registered view, then the commands."
+        self views do: [ :v |
+            self
+                addControl: (self viewButtonNameFor: (v at: 1))
+                class: 'BUTTON'
+                text: (v at: 2)
+                style: (((WinApi constant: 'WS_CHILD')
+                    bitOr: (WinApi constant: 'WS_VISIBLE'))
+                    bitOr: ((WinApi constant: 'WS_TABSTOP')
+                        bitOr: (WinApi constant: 'BS_OWNERDRAW')))
+                exStyle: 0 ].
+        #(#doit 'Do It' #printit 'Print It' #accept 'Accept') pairsDo: [ :sym :label |
+            self
+                addControl: sym
+                class: 'BUTTON'
+                text: label
+                style: (((WinApi constant: 'WS_CHILD')
+                    bitOr: (WinApi constant: 'WS_VISIBLE'))
+                    bitOr: ((WinApi constant: 'WS_TABSTOP')
+                        bitOr: (WinApi constant: 'BS_OWNERDRAW')))
+                exStyle: 0 ].
+
+        "The metrics readout: right-anchored, static, monospaced digits by
+         virtue of the shell font — a STATIC and not an EDIT because it is a
+         readout and a caret in it would be a lie about what it accepts."
+        self
+            addControl: #metrics
+            class: 'STATIC'
+            text: 'MEM —   JIT —   CODE —   ALLOC —   GC —'
+            style: (((WinApi constant: 'WS_CHILD')
+                bitOr: (WinApi constant: 'WS_VISIBLE'))
+                bitOr: (WinApi constant: 'SS_RIGHT'))
+            exStyle: 0.
+
+        "The splitter: a strip the user can see AND DRAG — and the second half
+         is why this is a child of OUR window class rather than an owner-drawn
+         BUTTON.
+
+         A drag is three messages (WM_LBUTTONDOWN / WM_MOUSEMOVE /
+         WM_LBUTTONUP) and a BUTTON's WndProc is comctl32's: it swallows all
+         three and reports only a WM_COMMAND on RELEASE, which is far too late
+         to begin anything. 96's own header describes the intended protocol and
+         it could never have run; `onSplitterClick` already worked around it
+         for CLICKS by asking GetCursorPos, and a drag has no such workaround.
+         Reported twice from the screen — `the ... bar does not resize`, then
+         `the ... splitter indicators do nothing still`.
+
+         A child of `WinShell className` has the DOOR as its WndProc, exactly
+         as WG6c-1's editor pane does and for exactly this reason. It costs the
+         WM_DRAWITEM path — the strip now paints through WM_PAINT like any
+         other window we own — which nothing asserts against."
+        self
+            addControl: #splitter
+            class: self className
+            text: ''
+            style: (((WinApi constant: 'WS_CHILD')
+                bitOr: (WinApi constant: 'WS_VISIBLE'))
+                bitOr: (WinApi constant: 'WS_CLIPSIBLINGS'))
+            exStyle: 0.
+
+        "The transcript dock."
+        self
+            addControl: #transcript
+            class: 'EDIT'
+            text: ''
+            style: (((WinApi constant: 'WS_CHILD')
+                bitOr: ((WinApi constant: 'WS_VISIBLE') bitOr: (WinApi constant: 'WS_BORDER')))
+                bitOr: (((WinApi constant: 'ES_MULTILINE')
+                    bitOr: (WinApi constant: 'ES_READONLY'))
+                    bitOr: (WinApi constant: 'ES_AUTOVSCROLL')))
+            exStyle: 0.
+
+        "WG3's demo trio has no band in this grammar. They stay ALIVE — the
+         drain, the door and their ids are unchanged — but a control with no
+         rect in the active layout must not be left drawing wherever it was
+         created."
+        #(#button #status #list) do: [ :n |
+            (self controlNamed: n) ifNotNil: [ :c | c show: false ] ].
+        "§2.1: the transcript is a log OF CODE, so it wears Cascadia Mono."
+        (self controlNamed: #transcript) ifNotNil: [ :c | c setFont: self monoFont ].
+        self appendTranscript: 'WG4 shell up — ', self views size printString, ' views registered.'.
+        self switchToView: #workspace.
+        self syncCommandEnablement.
+        ^Controls
+    ]
+
+    WinShell class >> viewButtonNameFor: aSymbol <Symbol> ^ <Symbol> [
+        ^('view_' , aSymbol asString) asSymbol
+    ]
+
+    WinShell class >> applyLayout ^ <Integer> [
+        "One SetWindowPos per control, from the settled client rect. WG3's
+         controls keep their own bands; the shell's own children are placed
+         from the three bands above plus one row slice for the view bar."
+        | moved rects row lefts rights btnW avail verbW dipW |
+        self wg4Enabled ifFalse: [ ^self wg3ApplyLayout ].
+        self isOpen ifFalse: [ ^0 ].
+        moved := 0.
+        rects := self layout
+            rectsIn: self clientWidth
+            by: self clientHeight
+            dpi: (Dpi isNil ifTrue: [ WinApi constant: 'USER_DEFAULT_SCREEN_DPI' ] ifFalse: [ Dpi ]).
+
+        "The view bar: view buttons and the two commands packed left, the
+         metrics cluster anchored right."
+        "Cell widths are NOT constants: a fourth view pushed `Print It` off the
+         end of the strip at 900px, and the sixth would have taken `Do It`
+         with it. The views share whatever is left after the metrics cluster
+         and the two verbs, floored so a very narrow window clips rather than
+         inverting."
+        dipW := self clientWidth * 96 // (Dpi isNil ifTrue: [ 96 ] ifFalse: [ Dpi ]).
+        verbW := 72.
+        avail := dipW - 20 - 320 - (verbW * 3) - (6 * (self views size + 3)).
+        btnW := (avail // (self views size max: 1)) min: 96.
+        btnW := btnW max: 44.
+        row := self layout
+            packRow: (rects at: #viewbar)
+            left: ((self views collect: [ :v | btnW ]) asArray
+                , (Array with: verbW with: verbW with: verbW))
+            right: (Array with: 320)
+            gap: 6
+            dpi: (Dpi isNil ifTrue: [ 96 ] ifFalse: [ Dpi ]).
+        lefts := row at: 1.
+        rights := row at: 2.
+        self views doWithIndex: [ :v :i |
+            (self controlNamed: (self viewButtonNameFor: (v at: 1))) ifNotNil: [ :c |
+                (c moveTo: (lefts at: i)) ifTrue: [ moved := moved + 1 ] ] ].
+        (self controlNamed: #doit) ifNotNil: [ :c |
+            (c moveTo: (lefts at: self views size + 1)) ifTrue: [ moved := moved + 1 ] ].
+        (self controlNamed: #printit) ifNotNil: [ :c |
+            (c moveTo: (lefts at: self views size + 2)) ifTrue: [ moved := moved + 1 ] ].
+        (self controlNamed: #accept) ifNotNil: [ :c |
+            (c moveTo: (lefts at: self views size + 3)) ifTrue: [ moved := moved + 1 ] ].
+        (self controlNamed: #metrics) ifNotNil: [ :c |
+            (c moveTo: (rights at: 1)) ifTrue: [ moved := moved + 1 ] ].
+
+        "Every view's content child gets the SAME content rect — only the
+         active one is visible, so overlapping them is not a bug but the
+         mechanism (Win32's answer to AppKit swapping a tab item's view)."
+        self views do: [ :v |
+            (self controlNamed: (self contentNameFor: (v at: 1))) ifNotNil: [ :c |
+                (c moveTo: (rects at: #content)) ifTrue: [ moved := moved + 1 ] ] ].
+        "The Browser's four panes share the content rect between them."
+        (self viewIsBuilt: #browser) ifTrue: [
+            self layoutBrowserPanes: (rects at: #content) ].
+        "WG5c D5: the ghost overlay sits on the Workspace's own rect. Laid out
+         here rather than at build time because unlike a content child it must
+         also be RAISED above the pane, and z-order is worth re-asserting
+         whenever geometry is."
+        self layoutGhost: (rects at: #content).
+        "WG6a: the Outliner's tree fills the content rect."
+        (self viewIsBuilt: #outliner) ifTrue: [
+            self layoutOutliner: (rects at: #content) ].
+        (self viewIsBuilt: #find) ifTrue: [
+            self layoutFindPanes: (rects at: #content) ].
+        (self viewIsBuilt: #editor) ifTrue: [
+            self layoutEditorViewPanes: (rects at: #content) ].
+        (self viewIsBuilt: self monitorViewName) ifTrue: [
+            self layoutMonitorPane: (rects at: #content) ].
+        (self viewIsBuilt: self debuggerViewName) ifTrue: [
+            self layoutDebuggerPane: (rects at: #content) ].
+        (self viewIsBuilt: self canvasViewName) ifTrue: [
+            self layoutCanvasPane: (rects at: #content) ].
+        (self viewIsBuilt: self testsViewName) ifTrue: [
+            self layoutTestsPane: (rects at: #content) ].
+
+        (self controlNamed: #splitter) ifNotNil: [ :c |
+            (c moveTo: (rects at: #splitter)) ifTrue: [ moved := moved + 1 ] ].
+        (self controlNamed: #transcript) ifNotNil: [ :c |
+            self transcriptCollapsed
+                ifFalse: [ (c moveTo: (rects at: #transcript)) ifTrue: [ moved := moved + 1 ] ] ].
+
+        "WG4 D3: the strip's cells are owner-drawn, and every SetWindowPos above
+         happened inside this VM entry — so any paint they provoked was declined
+         at the door as busy. Queue a repaint instead; it arrives through the
+         pump once this pass has released the guard."
+        self invalidateBar.
+        ^moved
+    ]
+
+    WinShell class >> paintBarOnce [
+        "THE FIRST PAINT HAS TO BE ASKED FOR, and nothing was asking.
+
+         Every cell on the strip is BS_OWNERDRAW, which means Windows draws
+         NOTHING for it and waits to be told — via WM_DRAWITEM — what it looks
+         like. At open the shell built the cells, laid them out, and never
+         invalidated, so the strip came up as a row of empty boxes and stayed
+         that way until some unrelated event happened to dirty it. The author
+         saw exactly that: `where is the rest of the app?`, and then `they only
+         appear after user clicks on the blank pane`.
+
+         It is not a drawing bug — the drawing was always correct, and 26
+         WM_DRAWITEMs arrived the instant anything asked. It is a bug about
+         who asks first, which is invisible to every headless test (there is
+         no window to be blank) and to the windowed gate too (which clicks a
+         view button, dirtying the strip before it ever looks at it).
+
+         InvalidateRect rather than a direct draw, for WG4 D3's own reason:
+         this runs inside a VM entry holding the busy guard, so a paint
+         provoked synchronously would be declined at the door. Invalidation is
+         asynchronous and arrives through the pump once the guard is released."
+        self invalidateBar.
+        #(#doit #printit #accept #splitter) do: [ :n |
+            (self controlNamed: n) ifNotNil: [ :c |
+                WinApi invalidateRect: c handle rect: 0 erase: 0 ] ].
+        self views do: [ :v |
+            (self controlNamed: (self viewButtonNameFor: (v at: 1))) ifNotNil: [ :c |
+                WinApi invalidateRect: c handle rect: 0 erase: 0 ] ].
+        ^self
+    ]
+
+    WinShell class >> serviceCommand: anId <Integer> code: aCode <Integer> from: aHandle <Integer> [
+        "A view-bar button, one drain pass after the click. Everything here
+         is synchronous Win32 work — which is precisely why it is here and
+         not in the door."
+        | c name |
+        "WG12: THE MENU FIRST. Menu ids live above every control id, so this
+         cannot shadow a button, and a menu command arrives with lParam 0 and
+         no control to look up —  would answer nil and the
+         command would fall through to WG3's handler as an unknown."
+        (self serviceMenu: anId) ifTrue: [ ^self ].
+        c := self controlWithId: anId.
+        c isNil ifTrue: [ ^self wg3ServiceCommand: anId code: aCode from: aHandle ].
+        name := c name.
+        self views do: [ :v |
+            name == (self viewButtonNameFor: (v at: 1)) ifTrue: [
+                self switchToView: (v at: 1).
+                self appendTranscript: 'switched to ' , (v at: 2).
+                ^self ] ].
+        "WG5a landed the Workspace, so these do the thing rather than explain
+         that they cannot. Reported by the author as unresponsive to a click —
+         the buttons were live and drawing, and this handler was still WG4's
+         placeholder, which is the least visible kind of stale code: it
+         RESPONDS, so nothing looks broken until you read what it says."
+        name == #doit ifTrue: [ self doIt. ^self ].
+        name == #printit ifTrue: [ self printIt. ^self ].
+        "WG5b-2: Accept writes the IMAGE first and only then live-compiles."
+        name == #accept ifTrue: [ self acceptSource. ^self ].
+        name == #splitter ifTrue: [ self onSplitterClick. ^self ].
+        "WG5b-1: a LISTBOX reports selection changes as WM_COMMAND with
+         LBN_SELCHANGE (1) in the high word — the same door, the same drain,
+         one pass later."
+        (aCode = 1 and: [ self isBrowserPane: name ])
+            ifTrue: [ self onBrowserPaneChanged: name. ^self ].
+        "WG5c D4: a code pane changed. Recorded, not acted on — colouring
+         happens on idle, because doing it per keystroke costs a pass over
+         the whole document for every character."
+        (aCode = (WinApi constant: 'EN_CHANGE') and: [ self isCodePane: name ])
+            ifTrue: [ self noteEdit: name. ^self ].
+        "WG5c D5: a click on the ghost belongs to the pane underneath it."
+        name == self ghostName ifTrue: [ self onGhostClicked. ^self ].
+        "WG6b: the two Find buttons, and a chosen result jumping to the
+         Browser. LBN_SELCHANGE is 1, the same code the Browser's own panes
+         report with."
+        name == #findImpl ifTrue: [ self find: #implementors. ^self ].
+        name == #findSend ifTrue: [ self find: #senders. ^self ].
+        (aCode = 1 and: [ name == #findResults ])
+            ifTrue: [ self onFindResultChosen. ^self ].
+        "WG6c-3: the Editor's Save cell, and a class chosen from its picker.
+         LBN_SELCHANGE is 1 here for the same reason it is everywhere else in
+         this method — one door, one drain, one pass later."
+        name == #editorSave ifTrue: [ self saveEditorClass. ^self ].
+        "WG6c-3, finished in WG7: the two verbs that needed a restart."
+        name == #editorFileIn ifTrue: [ self fileIn. ^self ].
+        name == #editorAddWorld ifTrue: [ self addToWorld. ^self ].
+        (aCode = 1 and: [ name == #editorClasses ])
+            ifTrue: [ self onEditorClassChosen. ^self ].
+        ^self wg3ServiceCommand: anId code: aCode from: aHandle
+    ]
+]

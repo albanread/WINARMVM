@@ -630,7 +630,7 @@ impl<'a> SendScan<'a> {
 
     fn block(&mut self) {
         self.sc.advance(); // '['
-        // Optional block arguments: `:a :b |`
+                           // Optional block arguments: `:a :b |`
         self.sc.skip_ws_and_comments();
         if self.sc.peek() == Some(':') {
             loop {
@@ -1171,7 +1171,10 @@ Object subclass: Commented2 [
             want(&["+", "length", "size"])
         );
         // Every cascade message counts (deduped).
-        assert_eq!(sel("h [ s show: 'a'; nl; show: 'b' ]"), want(&["nl", "show:"]));
+        assert_eq!(
+            sel("h [ s show: 'a'; nl; show: 'b' ]"),
+            want(&["nl", "show:"])
+        );
         // Comments, strings, symbol literals, temps, and `:=` are NOT sends.
         assert_eq!(
             sel("j [ | a | a := #at:put:. \"do: it\" ^'x , y' ]"),
@@ -1181,7 +1184,10 @@ Object subclass: Commented2 [
         assert_eq!(sel("k [ ^self clampTo: -3 ]"), want(&["clampTo:"]));
         assert_eq!(sel("m [ ^x - 3 ]"), want(&["-"]));
         // A block body's sends count; its args don't.
-        assert_eq!(sel("n [ items do: [:e | e printNl ] ]"), want(&["do:", "printNl"]));
+        assert_eq!(
+            sel("n [ items do: [:e | e printNl ] ]"),
+            want(&["do:", "printNl"])
+        );
         // A primitive pragma is not a send.
         assert_eq!(
             sel("p [ <primitive: 60> ^self basicAt: i ]"),
@@ -1284,11 +1290,19 @@ Object subclass: Commented2 [
         );
         assert_eq!(classes[0].instance_vars, "Block");
         assert_eq!(
-            classes[0].methods.iter().map(|m| m.selector.as_str()).collect::<Vec<_>>(),
+            classes[0]
+                .methods
+                .iter()
+                .map(|m| m.selector.as_str())
+                .collect::<Vec<_>>(),
             vec!["setBlock:"]
         );
         assert_eq!(
-            classes[1].methods.iter().map(|m| m.selector.as_str()).collect::<Vec<_>>(),
+            classes[1]
+                .methods
+                .iter()
+                .map(|m| m.selector.as_str())
+                .collect::<Vec<_>>(),
             vec!["two"]
         );
     }
@@ -1313,7 +1327,11 @@ Object subclass: Commented2 [
         let toolbar_action = &classes[0];
         assert_eq!(toolbar_action.instance_vars, "Block");
         assert_eq!(
-            toolbar_action.methods.iter().map(|m| m.selector.as_str()).collect::<Vec<_>>(),
+            toolbar_action
+                .methods
+                .iter()
+                .map(|m| m.selector.as_str())
+                .collect::<Vec<_>>(),
             vec!["on:", "setBlock:", "macvmAction:"]
         );
         let cocoa_ui = &classes[1];
@@ -1322,7 +1340,13 @@ Object subclass: Commented2 [
             "CocoaUI has dozens of real methods (CG2/CG4/CG5/CG6), got {}",
             cocoa_ui.methods.len()
         );
-        assert!(cocoa_ui.methods.iter().any(|m| m.selector == "title" && m.is_class_side));
-        assert!(cocoa_ui.methods.iter().any(|m| m.selector == "startup" && m.is_class_side));
+        assert!(cocoa_ui
+            .methods
+            .iter()
+            .any(|m| m.selector == "title" && m.is_class_side));
+        assert!(cocoa_ui
+            .methods
+            .iter()
+            .any(|m| m.selector == "startup" && m.is_class_side));
     }
 }

@@ -12,7 +12,10 @@
 fn main() {
     let path = std::path::Path::new("world/image.sqlite3");
     if !path.exists() {
-        eprintln!("m1probe: {} not found (run from the repo root)", path.display());
+        eprintln!(
+            "m1probe: {} not found (run from the repo root)",
+            path.display()
+        );
         std::process::exit(2);
     }
     let img = image_store::Image::open(path).unwrap();
@@ -34,7 +37,11 @@ fn main() {
         let mut class_ok = true;
         for s in &stored {
             let want_cls = s.side == image_store::Side::Class;
-            match pc.methods.iter().find(|m| m.selector == s.selector && m.is_class_side == want_cls) {
+            match pc
+                .methods
+                .iter()
+                .find(|m| m.selector == s.selector && m.is_class_side == want_cls)
+            {
                 None => {
                     println!("BAD {name}>>{}: missing after re-parse", s.selector);
                     class_ok = false;
@@ -48,11 +55,22 @@ fn main() {
             methods += 1;
         }
         if pc.methods.len() != stored.len() {
-            println!("BAD {name}: {} parsed vs {} stored methods", pc.methods.len(), stored.len());
+            println!(
+                "BAD {name}: {} parsed vs {} stored methods",
+                pc.methods.len(),
+                stored.len()
+            );
             class_ok = false;
         }
-        if class_ok { ok += 1 } else { bad += 1 }
+        if class_ok {
+            ok += 1
+        } else {
+            bad += 1
+        }
     }
-    println!("M1: {ok}/{} classes round-trip clean ({methods} methods checked), {bad} bad", names.len());
+    println!(
+        "M1: {ok}/{} classes round-trip clean ({methods} methods checked), {bad} bad",
+        names.len()
+    );
     std::process::exit(if bad == 0 { 0 } else { 1 });
 }

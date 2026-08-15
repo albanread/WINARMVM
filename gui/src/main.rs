@@ -316,14 +316,14 @@ fn cmd_render(args: &[String]) {
         }
     };
 
-    let mut vm = match macvm::embed::VmHandle::boot(macvm::runtime::VmOptions::default(), &world_dir)
-    {
-        Ok(vm) => vm,
-        Err(e) => {
-            eprintln!("render: VM boot failed: {e:?}");
-            std::process::exit(1);
-        }
-    };
+    let mut vm =
+        match macvm::embed::VmHandle::boot(macvm::runtime::VmOptions::default(), &world_dir) {
+            Ok(vm) => vm,
+            Err(e) => {
+                eprintln!("render: VM boot failed: {e:?}");
+                std::process::exit(1);
+            }
+        };
     // One-shot CLI on the main thread: a genuinely-fatal render should exit
     // the process cleanly rather than pthread_exit the main thread.
     macvm::embed::set_fatal_mode(macvm::embed::FatalMode::ExitProcess);
@@ -1863,7 +1863,9 @@ fn run_spawned_mandel_demo() {
     let demo = vm_host::spawn(shell::demo_waker());
     DEMO_VM.with(|d| *d.borrow_mut() = Some(demo));
     DEMO_VM_ACTIVE.store(true, std::sync::atomic::Ordering::Relaxed);
-    append_transcript("--- spawned a fresh VM instance to run MandelVM (one dive, then it exits) ---");
+    append_transcript(
+        "--- spawned a fresh VM instance to run MandelVM (one dive, then it exits) ---",
+    );
     open_game_pane();
     DEMO_VM.with(|d| {
         if let Some(vm) = d.borrow().as_ref() {
@@ -2284,13 +2286,11 @@ fn main() {
         MANDELVM.store(true, std::sync::atomic::Ordering::Relaxed);
         run_game_demo("MandelVM launch.");
     } else if let Some(demo) = std::env::var_os("MACVM_GAMEPANE_DEMO") {
-        run_game_demo(
-            if demo.to_string_lossy().eq_ignore_ascii_case("mandel") {
-                "MandelZoom launch."
-            } else {
-                "Breakout launch."
-            },
-        );
+        run_game_demo(if demo.to_string_lossy().eq_ignore_ascii_case("mandel") {
+            "MandelZoom launch."
+        } else {
+            "Breakout launch."
+        });
     }
 
     // Start the always-on metrics sampler that feeds the toolbar dashboard.

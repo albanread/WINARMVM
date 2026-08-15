@@ -979,16 +979,14 @@ fn probe(
     let mask = symbols.buckets.len() - 1;
     let mut idx = (hash as usize) & mask;
     loop {
-        match symbols.buckets[idx] {
-            Some(existing) => {
-                // SAFETY: every occupied slot holds a valid Symbol oop.
-                let sym = unsafe { SymbolOop::from_oop_unchecked(existing) };
-                debug_assert_eq!(sym.as_mem().klass().oop(), symbol_klass.oop());
-                if symbol_bytes_eq(sym, bytes) {
-                    return Some(sym);
-                }
+        {
+            let existing = symbols.buckets[idx]?;
+            // SAFETY: every occupied slot holds a valid Symbol oop.
+            let sym = unsafe { SymbolOop::from_oop_unchecked(existing) };
+            debug_assert_eq!(sym.as_mem().klass().oop(), symbol_klass.oop());
+            if symbol_bytes_eq(sym, bytes) {
+                return Some(sym);
             }
-            None => return None,
         }
         idx = (idx + 1) & mask;
     }

@@ -1,0 +1,120 @@
+"── 113_winui_file.mst — WG7: writing a file, from the shell ─────────────
+ The Windows twin of `49a_cocoafile.mst`'s `spit:contents:`, and the piece
+ File In and Add to World have been waiting on.
+
+ WHY THIS DID NOT EXIST ALREADY, which is worth stating because it looks like
+ an oversight and is not: `WinIo` — the CRT `_open`/`_write` bindings — lives
+ inside `world/tests/59_win_io_tests.mst`. It was written to PROVE the P5
+ resolver's underscore alias worked, not to be a facility, and it ships with
+ the tests rather than with the world. Nothing in the shipping shell could
+ write a file until now.
+
+ Win32 rather than the CRT, deliberately. This layer already speaks
+ `CreateFileW`'s dialect — wide strings through `WinArena`, handles as
+ integers, `INVALID_HANDLE_VALUE` from winkb — and reaching for `_open` here
+ would mean a second file model in one process, with the UTF-8/UTF-16 boundary
+ crossed differently in each. WG5a's boundary rule is the same rule.
+
+ UTF-8 ON DISK. A `.mst` file is read back by the world's own loader, which
+ reads UTF-8 — so the bytes written are the guest String's own bytes,
+ unconverted. That is the one place in this layer where NOT converting is the
+ correct answer, and it is why `spit:contents:` writes bytes rather than
+ handing the string to a wide API."
+
+Object subclass: WinApi [
+
+    WinApi class >> createFile: path <Integer> access: acc <Integer> share: sh <Integer>
+                    security: sec <Integer> disposition: disp <Integer>
+                    flags: fl <Integer> template: tmpl <Integer> ^ <Integer> [
+        <primitive: FFI function: #CreateFileW ret: #g args: #(g g g g g g g)>
+        ^self primitiveFailed: 'CreateFileW'
+    ]
+
+    WinApi class >> writeFile: h <Integer> buffer: buf <Integer> count: n <Integer>
+                    written: writtenPtr <Integer> overlapped: ov <Integer> ^ <Integer> [
+        <primitive: FFI function: #WriteFile ret: #g args: #(g g g g g)>
+        ^self primitiveFailed: 'WriteFile'
+    ]
+
+    WinApi class >> closeHandle: h <Integer> ^ <Integer> [
+        <primitive: FFI function: #CloseHandle ret: #g args: #(g)>
+        ^self primitiveFailed: 'CloseHandle'
+    ]
+]
+
+Object subclass: WinFile [
+    <classVars: LastError>
+
+    WinFile class >> lastError ^ <String> [
+        ^LastError isNil ifTrue: [ '' ] ifFalse: [ LastError ] ]
+
+    WinFile class >> spit: aPath <String> contents: aString <String> ^ <Boolean> [
+        "Write aString to aPath, replacing whatever was there. Answers whether
+         it landed; `lastError` says why not.
+
+         CLOSED ON EVERY PATH INCLUDING A RAISE, through `ensure:` — the same
+         discipline `BeginPaint`/`EndPaint` and `OpenClipboard`/
+         `CloseClipboard` follow in this layer, and for a sharper reason here:
+         a leaked file handle keeps the file LOCKED, so the next File In fails
+         with a message about sharing that says nothing about the leak that
+         caused it.
+
+         The bytes are the guest String's OWN — UTF-8, unconverted — because
+         the world's loader reads UTF-8 and a `.mst` written as UTF-16 would
+         load as mojibake. This is the one boundary in this layer that is
+         crossed by NOT converting."
+        | h buf n written ok |
+        LastError := nil.
+        h := [ WinApi createFile: (WinArena nativeUtf16: aPath)
+                    access: (WinApi constant: 'GENERIC_WRITE')
+                    share: 0
+                    security: 0
+                    disposition: (WinApi constant: 'CREATE_ALWAYS')
+                    flags: (WinApi constant: 'FILE_ATTRIBUTE_NORMAL')
+                    template: 0 ]
+            on: Error do: [ :e | LastError := 'CreateFileW: ', e messageText. ^false ].
+        (h = (WinApi constant: 'INVALID_HANDLE_VALUE') or: [ h = 0 ]) ifTrue: [
+            LastError := 'CreateFileW refused ', aPath.
+            ^false ].
+        ^[ n := aString size.
+           buf := WinArena alloc: (n max: 1).
+           1 to: n do: [ :i | WinArena u8At: buf + i - 1 put: (aString at: i) asInteger ].
+           written := WinArena alloc: 8.
+           ok := WinApi asBool: (WinApi writeFile: h buffer: buf count: n
+                    written: written overlapped: 0).
+           ok ifFalse: [ LastError := 'WriteFile failed for ', aPath ].
+           ok and: [ (WinArena u32At: written) = n ]
+        ] ensure: [ WinApi closeHandle: h ]
+    ]
+]
+
+Object subclass: WinShell [
+    WinShell class >> tempDirectory ^ <String> [
+        "Where a scratch file goes. `GetTempPathW` rather than a hardcoded
+         path, because the Mac's `/tmp` has no Windows equivalent worth
+         guessing at and the answer already ends in a backslash."
+        | n |
+        n := WinApi i32: (WinApi getTempPath: WinShell textBufferUnits
+                                buffer: WinShell textScratch).
+        n <= 0 ifTrue: [ ^'.\' ].
+        ^WinArena stringFromUtf16At: WinShell textScratch units: n
+    ]
+]
+
+Object subclass: WinApi [
+    WinApi class >> getTempPath: n <Integer> buffer: buf <Integer> ^ <Integer> [
+        <primitive: FFI function: #GetTempPathW ret: #g args: #(g g)>
+        ^self primitiveFailed: 'GetTempPathW'
+    ]
+]
+
+Object subclass: WinArena [
+    WinArena class >> u8At: addr <Integer> put: v <Integer> ^ <Integer> [
+        "The write twin of `u8At:`. Present because `spit:contents:` copies a
+         guest String's bytes out unconverted, and there was no byte-sized
+         writer in this layer at all — only `u32At:put:` and `i64At:put:`,
+         neither of which can end on an odd byte."
+        (Alien forAddress: addr size: 1) byteAt: 1 put: (v bitAnd: 255).
+        ^v
+    ]
+]

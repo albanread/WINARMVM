@@ -88,9 +88,18 @@ impl Theme {
     /// Parse a CLI theme name (case-insensitive, dashes optional) — used by
     /// the headless `macvm-gui render` "eyes" command.
     pub fn from_cli_name(name: &str) -> Option<Theme> {
-        let key: String = name.chars().filter(|c| *c != '-' && *c != '_').flat_map(|c| c.to_lowercase()).collect();
+        let key: String = name
+            .chars()
+            .filter(|c| *c != '-' && *c != '_')
+            .flat_map(|c| c.to_lowercase())
+            .collect();
         Theme::ALL.into_iter().find(|t| {
-            let label: String = t.menu_label().chars().filter(|c| *c != '-' && *c != ' ').flat_map(|c| c.to_lowercase()).collect();
+            let label: String = t
+                .menu_label()
+                .chars()
+                .filter(|c| *c != '-' && *c != ' ')
+                .flat_map(|c| c.to_lowercase())
+                .collect();
             label == key
         })
     }
@@ -271,7 +280,9 @@ pub fn resolve_smappl_spans(
         let opening_tag = &rest[pos..after_open];
 
         out.push_str(&rest[..pos]);
-        let code = attr_value(opening_tag, "data-code").as_deref().map(unescape_attr);
+        let code = attr_value(opening_tag, "data-code")
+            .as_deref()
+            .map(unescape_attr);
         let widget_id = attr_value(opening_tag, "data-widget-id");
         let replaced = match code.as_deref().and_then(&mut render) {
             Some(frag) => {
@@ -875,7 +886,7 @@ mod tests {
             mid \
             <span class=\"smappl\" data-widget-id=\"s1\" data-code=\"CodeView forString\">CodeView forString</span> \
             after";
-        let out = resolve_smappl_spans(&html, Theme::Classic, |code| {
+        let out = resolve_smappl_spans(html, Theme::Classic, |code| {
             if code.starts_with("Glue") {
                 Some("<span class=\"glue\"></span>".to_string())
             } else {
@@ -891,7 +902,10 @@ mod tests {
             out.contains("data-code=\"CodeView forString\""),
             "the None (unbuildable) span keeps its placeholder: {out}"
         );
-        assert!(out.starts_with("before ") && out.ends_with(" after"), "surrounding text intact: {out}");
+        assert!(
+            out.starts_with("before ") && out.ends_with(" after"),
+            "surrounding text intact: {out}"
+        );
     }
 
     #[test]
@@ -910,9 +924,15 @@ mod tests {
                 other => panic!("unexpected selector {other}"),
             }
         });
-        assert!(out.contains("x [ ^x ]"), "source spliced into the editor: {out}");
+        assert!(
+            out.contains("x [ ^x ]"),
+            "source spliced into the editor: {out}"
+        );
         // The None editor stays empty.
-        assert!(out.contains(r#"data-src-sel="&lt;="></textarea>"#), "blank editor preserved: {out}");
+        assert!(
+            out.contains(r#"data-src-sel="&lt;="></textarea>"#),
+            "blank editor preserved: {out}"
+        );
     }
 
     #[test]
@@ -947,7 +967,10 @@ mod tests {
         let p3 = log.find("third").expect("third present");
         let p2 = log.find("second").expect("second present");
         let p1 = log.find("first").expect("first present");
-        assert!(p3 < p2 && p2 < p1, "newest-first (third→second→first): {out}");
+        assert!(
+            p3 < p2 && p2 < p1,
+            "newest-first (third→second→first): {out}"
+        );
         assert!(
             out.contains(r#"data-action="clearTranscript""#),
             "clear button present: {out}"
@@ -956,14 +979,18 @@ mod tests {
 
     #[test]
     fn smappl_icon_resolves_to_a_themed_src() {
-        let frag = r#"<img class="smappl-icon" width="20" height="20" data-icon="resources/edit.bmp">"#;
+        let frag =
+            r#"<img class="smappl-icon" width="20" height="20" data-icon="resources/edit.bmp">"#;
         let classic = rewrite_smappl_icons(frag, Theme::Classic);
         assert!(
             classic.contains("src=\"") && classic.contains("reference/icons-png/edit.png"),
             "classic theme resolves the logical name to a png, got {classic}"
         );
         // The original data-icon attribute is preserved (byte-identical corpus).
-        assert!(classic.contains(r#"data-icon="resources/edit.bmp""#), "{classic}");
+        assert!(
+            classic.contains(r#"data-icon="resources/edit.bmp""#),
+            "{classic}"
+        );
         // A different theme picks a different asset for the same name.
         let dark = rewrite_smappl_icons(frag, Theme::Dark);
         assert!(
@@ -1003,8 +1030,7 @@ mod tests {
         );
         let hidef_toolbar = toolbar_html(Theme::HiDef);
         assert!(
-            hidef_toolbar.contains("data:image/svg+xml")
-                && hidef_toolbar.contains("mask-image"),
+            hidef_toolbar.contains("data:image/svg+xml") && hidef_toolbar.contains("mask-image"),
             "{hidef_toolbar}"
         );
     }
@@ -1029,8 +1055,7 @@ mod tests {
                 );
             } else {
                 assert!(
-                    toolbar.contains("data:image/svg+xml")
-                        && toolbar.contains("st-ico"),
+                    toolbar.contains("data:image/svg+xml") && toolbar.contains("st-ico"),
                     "{theme:?}: {toolbar}"
                 );
             }
@@ -1041,8 +1066,14 @@ mod tests {
     fn percent_encode_path_encodes_spaces_keeps_separators() {
         // A space (the packaged bundle root has one) → %20; separators and the
         // unreserved set pass through so `assets/dark.css` stays readable.
-        assert_eq!(percent_encode_path("/tmp/My Bundle/gui"), "/tmp/My%20Bundle/gui");
-        assert_eq!(percent_encode_path("/plain/ascii-_.~/x.css"), "/plain/ascii-_.~/x.css");
+        assert_eq!(
+            percent_encode_path("/tmp/My Bundle/gui"),
+            "/tmp/My%20Bundle/gui"
+        );
+        assert_eq!(
+            percent_encode_path("/plain/ascii-_.~/x.css"),
+            "/plain/ascii-_.~/x.css"
+        );
     }
 
     /// Regression for "no theme CSS / dead themes in the packaged `.app`": the

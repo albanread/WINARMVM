@@ -1,0 +1,119 @@
+"73_winui_soundtool_tests.mst — WinUiSoundToolTests: the declarative Sound
+ Editor's pure half.
+
+ Three things carry the whole tool and none needs a window: the ADSR curve
+ (`envLevelAt:` — it is the entire meaning of the envelope pane), the ONE
+ slider conversion every field shares (`posFor:`/`valueFor:` — WG13 avoided
+ sliders precisely because twelve hand-written mappings were twelve chances
+ to round a recipe; here there is one, so it gets the scrutiny of twelve),
+ and the spec itself, which must validate and must grow four named nodes per
+ oscillator so the differ can APPEND them rather than rebuild the card."
+
+TestCase subclass: WinUiSoundToolTests [
+    WinUiSoundToolTests class >> isEnabled ^ <Boolean> [
+        ^Smalltalk platformName == #windows
+    ]
+
+    runAll [
+        self runTest: #testTheSliderConversionRoundTripsEveryField
+             do: [ self testTheSliderConversionRoundTripsEveryField ].
+        self runTest: #testTheEnvelopeIsTheEnginesOwnShape
+             do: [ self testTheEnvelopeIsTheEnginesOwnShape ].
+        self runTest: #testTheSpecValidatesAndGrowsWithTheOscillators
+             do: [ self testTheSpecValidatesAndGrowsWithTheOscillators ].
+        self runTest: #testARecipeSliderWritesThroughTheDocumentsClamp
+             do: [ self testARecipeSliderWritesThroughTheDocumentsClamp ].
+        self runTest: #testOnlyCurveFieldsInvalidateTheEnvelope
+             do: [ self testOnlyCurveFieldsInvalidateTheEnvelope ].
+        ^self
+    ]
+
+    testTheSliderConversionRoundTripsEveryField [
+        "For every field in the table: the range's endpoints and midpoint
+         survive value -> position -> value to within a thousandth of the
+         range, which is the precision a 0..1000 track HAS."
+        | lo hi step |
+        WinSoundEd recipeFields do: [ :field |
+            (field at: 5) == #scaled ifTrue: [
+                lo := field at: 3.
+                hi := field at: 4.
+                step := (hi - lo) / 1000.0.
+                #(0.0 0.5 1.0) do: [ :frac | | v back |
+                    v := lo + ((hi - lo) * frac).
+                    back := WinSoundEd
+                        valueFor: (WinSoundEd posFor: v lo: lo hi: hi)
+                        lo: lo hi: hi.
+                    self assert: (back - v) abs <= step
+                         description: (field at: 2) , ' round-trips at ' , frac printString ] ] ].
+    ]
+
+    testTheEnvelopeIsTheEnginesOwnShape [
+        "A known recipe, checked at the joints: rising through the attack, 1.0
+         at its top, sustain level after the decay, still sustain just before
+         the gate falls, and zero once the release has run out."
+        | d |
+        WinSoundEd handle: #new value: nil.
+        d := WinSoundEd doc.
+        d duration: 1.0; attack: 0.2; decay: 0.2; sustain: 0.5; release: 0.5.
+        self assert: ((WinSoundEd envLevelAt: 0.1) - 0.5) abs < 0.001
+             description: 'half way up the attack is half way up'.
+        self assert: ((WinSoundEd envLevelAt: 0.2) - 1.0) abs < 0.001
+             description: 'the attack tops out at one'.
+        self assert: ((WinSoundEd envLevelAt: 0.4) - 0.5) abs < 0.001
+             description: 'the decay lands on the sustain level'.
+        self assert: ((WinSoundEd envLevelAt: 0.9) - 0.5) abs < 0.001
+             description: 'and sustain HOLDS while the gate is down'.
+        self assert: (WinSoundEd envLevelAt: 1.5) <= 0.001
+             description: 'the release ends at silence'.
+        WinSoundEd handle: #new value: nil.
+    ]
+
+    testTheSpecValidatesAndGrowsWithTheOscillators [
+        | before after |
+        WinSoundEd handle: #new value: nil.
+        self assert: (WinSpec validate: (WinSpec normalize: WinSoundEd spec)) isNil
+             description: 'the spec is well-formed'.
+        before := (WinSpec normalize: WinSoundEd spec) body children size.
+        WinSoundEd handle: #oscPlus value: nil.
+        after := (WinSpec normalize: WinSoundEd spec) body children size.
+        self assert: before equals: after
+             description: 'the STACK does not change - the card contents do'.
+        self assert: WinSoundEd doc oscCount equals: 2
+             description: 'and the document grew the oscillator'.
+        WinSoundEd handle: #oscMinus value: nil.
+        self assert: WinSoundEd doc oscCount equals: 1
+             description: 'and shrank it again'.
+        WinSoundEd handle: #new value: nil.
+    ]
+
+    testARecipeSliderWritesThroughTheDocumentsClamp [
+        "Position 1000 on the duration slider is 4.0 seconds — the top of the
+         MODEL's range, not a face's idea of it — and the write goes through
+         the document's own setter, so its clamp is the only clamp."
+        WinSoundEd handle: #new value: nil.
+        WinSoundEd handle: #duration value: 1000.
+        self assert: (WinSoundEd doc duration - 4.0) abs < 0.01
+             description: 'full right is the model top'.
+        WinSoundEd handle: #duration value: 0.
+        self assert: (WinSoundEd doc duration - 0.05) abs < 0.01
+             description: 'full left is the model floor, 0.05 not 0'.
+        WinSoundEd handle: #echoCount value: 5.
+        self assert: WinSoundEd doc echoCount equals: 5
+             description: 'a direct field takes the track position as-is'.
+        WinSoundEd handle: #new value: nil.
+    ]
+
+    testOnlyCurveFieldsInvalidateTheEnvelope [
+        "The damage rule, applied with judgement: noise, distortion and the
+         echo trio are audible, not visible, so dragging them must repaint
+         nothing at all."
+        self assert: (WinSoundEd curveFields includes: #attack)
+             description: 'the ADSR five are the picture'.
+        self assert: (WinSoundEd curveFields includes: #sweepStart)
+             description: 'and so are the sweeps'.
+        self assert: (WinSoundEd curveFields includes: #noiseMix) not
+             description: 'noise is audible, not visible'.
+        self assert: (WinSoundEd curveFields includes: #echoDelay) not
+             description: 'and echo likewise'.
+    ]
+]

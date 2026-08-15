@@ -1,0 +1,554 @@
+"── 106_winui_editorpane.mst — WG6c-1: the pane paints ───────────────────
+ docs/sprints/sprint_wg6c_detail.md WG6c-1. A code pane we draw ourselves,
+ over the rope that already exists.
+
+ WHY OURS RATHER THAN RICHEDIT: the model half was already built and tested
+ (`world/60_editor.mst` — a persistent rope with a newline index and free
+ undo, pinned against a String oracle) and so was the highlighter (WG5c
+ D1/D2, deliberately control-agnostic). What was missing was the view. The
+ sprint records the full reasoning; the short version is that building the
+ Editor on RichEdit and then replacing it would be writing it twice.
+
+ WHY A CHILD OF OUR OWN WINDOW CLASS: an SS_OWNERDRAW STATIC would paint
+ through the WM_DRAWITEM path WG4 D3 already built, and it can even hold
+ focus (measured: SetFocus on a STATIC works and GetFocus answers it) — but
+ a STATIC's WndProc is the SYSTEM's, and only WM_COMMAND/WM_NOTIFY/
+ WM_DRAWITEM are forwarded to a parent. WM_KEYDOWN and WM_CHAR are not, so
+ the pane would be focusable and mute. A child of `WinShell className` has
+ the DOOR as its WndProc, and both key messages are already allowlisted.
+
+ THE VIEW OWNS NO TEXT. `EditorSession` holds the document and answers the
+ whole buffer plus a caret offset on every change; this file paints what it
+ is given. 60's own note records that the earlier incremental line-damage
+ protocol DID drift, and that blasting the whole buffer replaced it — so
+ there is no line bookkeeping here to fall out of sync, by construction.
+
+ MONOSPACED, WHICH IS WHY THE ARITHMETIC IS EASY: with a fixed advance,
+ column N is at `N * charWidth` and line M at `M * lineHeight`. No per-run
+ measurement, no cumulative rounding, and hit-testing (WG6c-2) is a
+ division."
+
+Object subclass: WinApi [
+
+    WinApi class >> createCaret: hwnd <Integer> bitmap: hbm <Integer> width: w <Integer> height: h <Integer> ^ <Integer> [
+        <primitive: FFI function: #CreateCaret ret: #g args: #(g g g g)>
+        ^self primitiveFailed: 'CreateCaret'
+    ]
+    WinApi class >> setCaretPos: x <Integer> y: y <Integer> ^ <Integer> [
+        <primitive: FFI function: #SetCaretPos ret: #g args: #(g g)>
+        ^self primitiveFailed: 'SetCaretPos'
+    ]
+    WinApi class >> showCaret: hwnd <Integer> ^ <Integer> [
+        <primitive: FFI function: #ShowCaret ret: #g args: #(g)>
+        ^self primitiveFailed: 'ShowCaret'
+    ]
+    WinApi class >> hideCaret: hwnd <Integer> ^ <Integer> [
+        <primitive: FFI function: #HideCaret ret: #g args: #(g)>
+        ^self primitiveFailed: 'HideCaret'
+    ]
+    WinApi class >> destroyCaret ^ <Integer> [
+        <primitive: FFI function: #DestroyCaret ret: #g args: #()>
+        ^self primitiveFailed: 'DestroyCaret'
+    ]
+
+    "WG6c-2c: THE CELL GRID. `ExtTextOutW`'s last argument is an array of
+     per-character advances, which is what makes this a grid of cells rather
+     than a string GDI is free to lay out however the font asks.
+
+     That distinction was the bug. `DrawText` lays a run out using the FONT's
+     own advances; this file then positioned each run on its own
+     `column * charWidth` grid. The two agree only if the measured advance is
+     exactly the rendered one, and it is not — GDI rounds per glyph — so the
+     glyphs inside a run drifted, the next run snapped back to the grid, and
+     the overlap read on screen as doubled letters every few characters. It
+     was reported, correctly, as `its bollocks`.
+
+     With an explicit dx array every glyph lands on its own cell by
+     construction and no amount of rounding can accumulate."
+    WinApi class >> extTextOut: hdc <Integer> x: x <Integer> y: y <Integer>
+                    options: opts <Integer> rect: r <Integer>
+                    text: s <Integer> count: n <Integer> dx: dx <Integer> ^ <Integer> [
+        <primitive: FFI function: #ExtTextOutW ret: #g args: #(g g g g g g g g)>
+        ^self primitiveFailed: 'ExtTextOutW'
+    ]
+
+    "WG6c-2c: a DC to measure in, with no window and no paint. `GetDC(NULL)`
+     answers one for the whole screen — the conventional way to ask GDI about
+     a font's metrics when you are not drawing — and it must be released."
+    WinApi class >> getTextExtentPoint32: hdc <Integer> text: str <Integer>
+                    count: n <Integer> into: sizePtr <Integer> ^ <Integer> [
+        "The font's OWN width for a string — what GDI would lay it out as if
+         nobody handed it a grid. Present so the drift between that and
+         `units * charWidth` is a MEASURED NUMBER rather than an assumption;
+         see `editorGlyphDrift`."
+        <primitive: FFI function: #GetTextExtentPoint32W ret: #g args: #(g g g g)>
+        ^self primitiveFailed: 'GetTextExtentPoint32W'
+    ]
+
+    WinApi class >> getDC: hwnd <Integer> ^ <Integer> [
+        <primitive: FFI function: #GetDC ret: #g args: #(g)>
+        ^self primitiveFailed: 'GetDC'
+    ]
+    WinApi class >> releaseDC: hwnd <Integer> dc: hdc <Integer> ^ <Integer> [
+        <primitive: FFI function: #ReleaseDC ret: #g args: #(g g)>
+        ^self primitiveFailed: 'ReleaseDC'
+    ]
+]
+
+Object subclass: WinShell [
+    <classVars: EditorPaneHwnd EditorCharW EditorLineH PaintCalls PaintError CaretOwned MetricsError PaintOriginX PaintOriginY LastPaintRect SegDraws EditorDx EditorDxWidth SizeScratch MetricsDpi>
+
+    WinShell class >> editorPaneName ^ <Symbol> [ ^#editorPane ]
+
+    "── The pane ─────────────────────────────────────────────────────────"
+
+    WinShell class >> buildEditorPane [
+        "Created with OUR class name, which is what puts the door in front of
+         its keystrokes. Every other control in this shell is a stock class
+         and paints itself; this one is ours and does not."
+        | c |
+        (self controlNamed: self editorPaneName) ifNotNil: [ :x | ^self ].
+        c := self
+            addControl: self editorPaneName
+            class: self className
+            text: ''
+            style: (((WinApi constant: 'WS_CHILD')
+                bitOr: (WinApi constant: 'WS_BORDER'))
+                bitOr: (WinApi constant: 'WS_CLIPSIBLINGS'))
+            exStyle: 0.
+        c ifNotNil: [ :x | EditorPaneHwnd := x handle ].
+        ^self
+    ]
+
+    WinShell class >> editorPaneHwnd ^ <Integer> [
+        ^EditorPaneHwnd isNil ifTrue: [ 0 ] ifFalse: [ EditorPaneHwnd ] ]
+
+    "── Metrics, measured once ───────────────────────────────────────────"
+
+    WinShell class >> ensureEditorMetrics [
+        "One character of a MONOSPACED face, measured ONCE, OFF SCREEN, and
+         NOT during a paint.
+
+         `DT_CALCRECT` computes and draws nothing — it never did draw — but
+         this used to run off the PAINT's own DC, which made the metrics
+         depend on a paint having happened. They answer defaults until then and
+         change exactly once, so anything doing pixel arithmetic before the
+         first paint used 8 and anything after used the real 7. WG6c-2's gate
+         caught it the hard way: a click encoded by one control-port call and
+         decoded by a later one straddled the transition and landed at the end
+         of the document instead of on line 1 column 4. Measuring here closes
+         that at the source rather than making every caller order itself
+         around a paint.
+
+         `GetDC(NULL)` is a DC for the whole screen — the conventional thing to
+         measure against when you are not drawing — and it is RELEASED on every
+         path including a raise, for the reason `BeginPaint`/`EndPaint` and
+         `OpenClipboard`/`CloseClipboard` are: a leaked DC is a process-wide
+         resource that nothing here would notice losing.
+
+         A failure leaves the defaults in place rather than propagating. Off
+         Windows there is no GDI at all, and the arithmetic above is checked
+         against `editorCharWidth` rather than against 8 — so a world with no
+         metrics still computes consistently, it just computes in units of a
+         font it could not ask about."
+        | dc target |
+        (EditorCharW isNil not and: [ MetricsDpi = self editorMetricsDpi ])
+            ifTrue: [ ^self ].
+        "THE PANE'S OWN DC when there is a pane, so the measurement happens in
+         the same device context the drawing will. `GetDC(NULL)` is the
+         fallback for the window-less case (a test, a headless load) and is
+         the PRIMARY monitor's context — which is the right answer only while
+         there is one monitor at one scale.
+
+         That distinction is the whole of this defect's remaining risk. The
+         glyphs are placed `charWidth` apart by the dx grid, so a charWidth
+         measured against a DIFFERENT font size than the one selected when
+         drawing does not merely misalign — it makes the glyphs OVERLAP, which
+         reads as smeared, doubled letters. Measuring the same font object in
+         the same DC makes that impossible rather than unlikely, and keying the
+         cache on DPI means moving the window to a differently-scaled monitor
+         re-measures instead of keeping a stale number."
+        target := self editorPaneHwnd.
+        [ dc := WinApi getDC: target.
+          dc = 0 ifFalse: [
+              [ | old rect |
+                old := WinApi selectObject: dc object: self monoFont.
+                rect := self drawRectScratch.
+                self setRect: rect x: 0 y: 0 w: 4096 h: 256.
+                WinApi drawText: dc
+                    text: (WinArena scratchUtf16: 'M') count: 0 - 1
+                    rect: rect
+                    format: ((WinApi constant: 'DT_CALCRECT')
+                        bitOr: ((WinApi constant: 'DT_LEFT') bitOr: (WinApi constant: 'DT_SINGLELINE'))).
+                EditorCharW := ((WinArena rectAt: rect) at: 3) max: 1.
+                EditorLineH := ((WinArena rectAt: rect) at: 4) max: 1.
+                WinApi selectObject: dc object: old.
+                MetricsDpi := self editorMetricsDpi
+              ] ensure: [ WinApi releaseDC: target dc: dc ] ]
+        ] on: Error do: [ :e | MetricsError := e messageText ].
+        ^self
+    ]
+
+    WinShell class >> editorMetricsDpi ^ <Integer> [
+        "The DPI the metrics were taken at. `Dpi` is nil until the window
+         opens, and `monoFont` bakes it in at creation — so a metric taken
+         before the window exists describes a different font from the one that
+         will be drawn with. Keying on it turns that from a silent mismatch
+         into a re-measurement."
+        ^self dpi isNil ifTrue: [ 96 ] ifFalse: [ self dpi ]
+    ]
+
+    WinShell class >> editorMetrics ^ <Array> [
+        "Everything a reader needs to tell a good metric from a stale one:
+         #(dpi charWidth lineHeight naturalWidthOfTenChars drift). Reported by
+         the gate, and the first thing to ask for when the pane looks smeared."
+        ^Array
+            with: self editorMetricsDpi
+            with: self editorCharWidth
+            with: self editorLineHeight
+            with: (self naturalWidthOf: 'MMMMMMMMMM')
+            with: (self editorGlyphDrift: 'MMMMMMMMMM')
+    ]
+
+    WinShell class >> editorMaxCells ^ <Integer> [ ^2048 ]
+
+    WinShell class >> utf16UnitsOf: aString <String> ^ <Integer> [
+        "UTF-16 CODE UNITS, which is what `ExtTextOutW` counts — and NOT the
+         same number as `aString size`. A guest String is UTF-8 in this
+         dialect, so its size is a BYTE count; the two agree for ASCII and
+         part company at the first accented character. `caf` + U+00E9 is five
+         bytes and four units.
+
+         This matters because `ExtTextOutW` takes an explicit count where
+         `DrawText` took -1 and found its own terminator. Handing it the byte
+         count made it read PAST the NUL — one glyph of whatever followed the
+         string in the arena. Found by measuring the two numbers rather than
+         by reasoning about them, which is the only way this kind of thing
+         gets found.
+
+         The COLUMN arithmetic elsewhere in this file still counts in the
+         guest String's own units, which is the boundary rule WG5a and WG5c D4
+         both record and which this release scopes out with CJK. A non-ASCII
+         character therefore still advances the column by more cells than it
+         occupies; that is a known, named gap, not a new one."
+        ^(aString asUtf16Alien size // 2) - 1
+    ]
+
+    WinShell class >> editorDxBuffer ^ <Integer> [
+        "ONE ADVANCE PER CELL, all of them identical — the grid, as a block of
+         memory GDI reads. Built once and rebuilt only if the measured advance
+         changes, which it does exactly once (never, after
+         `ensureEditorMetrics`).
+
+         This is the whole of what makes the pane a character grid rather than
+         a string GDI lays out for us, and it is the smallest form of the
+         obvious next step: the guest poking cells into a buffer and the
+         renderer displaying them. Today the cells are advances and the
+         characters still travel as a string; the natural follow-on is a
+         char+colour buffer per cell, which would also take the tokenizer pass
+         out of the paint handler entirely."
+        | w |
+        w := self editorCharWidth.
+        (EditorDx isNil or: [ EditorDxWidth ~= w ]) ifTrue: [
+            EditorDx isNil ifTrue: [ EditorDx := WinArena alloc: 4 * self editorMaxCells ].
+            0 to: self editorMaxCells - 1 do: [ :i |
+                WinArena u32At: EditorDx + (i * 4) put: w ].
+            EditorDxWidth := w ].
+        ^EditorDx
+    ]
+
+    WinShell class >> naturalWidthOf: aString <String> ^ <Integer> [
+        "What GDI would make this string, laying it out its own way. Measured
+         in a screen DC with the code font selected — the same DC
+         `ensureEditorMetrics` uses and for the same reason: no window, no
+         paint, no dependency on when the first repaint happened.
+
+         Answers 0 when it cannot measure (off Windows, no GDI), which callers
+         read as `no drift information` rather than as `no drift`."
+        | dc out |
+        out := 0.
+        [ dc := WinApi getDC: 0.
+          dc = 0 ifFalse: [
+              [ | old sz |
+                old := WinApi selectObject: dc object: self monoFont.
+                sz := self sizeScratch.
+                WinApi getTextExtentPoint32: dc
+                    text: (WinArena scratchUtf16: aString)
+                    count: (self utf16UnitsOf: aString)
+                    into: sz.
+                out := WinArena i32At: sz.
+                WinApi selectObject: dc object: old
+              ] ensure: [ WinApi releaseDC: 0 dc: dc ] ]
+        ] on: Error do: [ :e | out := 0 ].
+        ^out
+    ]
+
+    WinShell class >> sizeScratch ^ <Integer> [
+        "Eight bytes: a SIZE is two LONGs. Allocated once and reused, like
+         every other scratch block in this layer."
+        SizeScratch isNil ifTrue: [ SizeScratch := WinArena alloc: 8 ].
+        ^SizeScratch
+    ]
+
+    WinShell class >> editorGlyphDrift: aString <String> ^ <Integer> [
+        "HOW FAR THE FONT AND THE GRID DISAGREE over one string, in pixels.
+
+         This is the bug that shipped, as a number. The pane positions each
+         syntax run at `column * charWidth` but used to hand the run's TEXT to
+         `DrawText`, which lays it out using the font's own per-glyph advances.
+         Non-zero drift means the glyphs inside a run walk away from the grid
+         and the next run snaps back — which on screen is doubled letters every
+         few characters, and was reported as exactly that.
+
+         `ExtTextOutW` with an explicit advance array makes the drift
+         IRRELEVANT rather than zero, which is why this is reported rather than
+         asserted to be zero: the number is expected to be non-zero, and its
+         being non-zero is precisely why the dx array is load-bearing. A future
+         change back to `DrawText` would be reintroducing this defect, and this
+         is here so that is visible instead of subtle."
+        | natural |
+        natural := self naturalWidthOf: aString.
+        natural = 0 ifTrue: [ ^0 ].
+        ^natural - ((self utf16UnitsOf: aString) * self editorCharWidth)
+    ]
+
+    WinShell class >> metricsError ^ <String> [
+        ^MetricsError isNil ifTrue: [ '' ] ifFalse: [ MetricsError ] ]
+
+    WinShell class >> editorCharWidth ^ <Integer> [
+        self ensureEditorMetrics.
+        ^EditorCharW isNil ifTrue: [ 8 ] ifFalse: [ EditorCharW ] ]
+    WinShell class >> editorLineHeight ^ <Integer> [
+        self ensureEditorMetrics.
+        ^EditorLineH isNil ifTrue: [ 16 ] ifFalse: [ EditorLineH ] ]
+
+    "── The paint, called SYNCHRONOUSLY from the door ────────────────────"
+
+    WinShell class >> paintWindow: hwnd <Integer> dc: hdc <Integer>
+                      x: x <Integer> y: y <Integer> w: w <Integer> h: h <Integer> ^ <Integer> [
+        "WM_PAINT, between the door's BeginPaint and EndPaint. Answers 1 when
+         it painted and 0 to let DefWindowProcW have it.
+
+         A RAISE IN HERE IS INVISIBLE BY NATURE — the pane simply stays blank
+         and nothing says why — so it is captured into `PaintError` rather
+         than propagated, exactly as WG4 D3's own drawing handler does. The
+         door's EndPaint runs either way; that is deliberately not this
+         method's responsibility."
+        PaintCalls := (PaintCalls isNil ifTrue: [ 0 ] ifFalse: [ PaintCalls ]) + 1.
+        hwnd = self editorPaneHwnd ifFalse: [ ^0 ].
+        ^[ self paintEditorIn: hdc x: x y: y w: w h: h ]
+            on: Error do: [ :e | PaintError := e messageText. 0 ]
+    ]
+
+    WinShell class >> paintCalls ^ <Integer> [
+        ^PaintCalls isNil ifTrue: [ 0 ] ifFalse: [ PaintCalls ] ]
+    WinShell class >> paintError ^ <String> [
+        ^PaintError isNil ifTrue: [ '' ] ifFalse: [ PaintError ] ]
+
+    WinShell class >> editorText ^ <String> [
+        "Whatever the session holds, or an empty document. The view asks; it
+         never keeps a copy — which is the property that makes it impossible
+         for the two to disagree."
+        ^EditorSession current
+            ifNil: [ '' ]
+            ifNotNil: [ :s | s documentString ]
+    ]
+
+    WinShell class >> paintEditorIn: hdc <Integer> x: x <Integer> y: y <Integer>
+                      w: w <Integer> h: h <Integer> ^ <Integer> [
+        | rect brush old text runs lineH charW lineIndex lineStart |
+        "THE DOCUMENT IS DRAWN IN CLIENT COORDINATES. `x`/`y` are rcPaint —
+         the INVALID rectangle — and they belong to the ERASE below and to
+         nothing else.
+
+         This drew the text at `x + column * charW`, which is correct only
+         when the invalid rectangle happens to start at the client origin. It
+         always does when we invalidate ourselves (`refreshEditorPane` passes
+         NULL, meaning the whole client), which is why every gate and every
+         screenshot looked right. It does NOT when Windows invalidates a PART
+         of the pane — another window dragged across it, a partial uncover, a
+         resize — and then the whole document was redrawn displaced by that
+         rectangle's origin, on top of the copy already there. Reported from
+         the screen, where it is obvious, by someone using the thing.
+
+         The caret never had the bug (`SetCaretPos` is client-relative), which
+         is precisely what makes the artifact read as `the text is drawn
+         twice, offset` rather than as `the pane is in the wrong place`."
+        PaintOriginX := 0.
+        PaintOriginY := 0.
+        "Recorded so a gate can prove it exercised a PARTIAL paint — the shape
+         `refreshEditorPane` cannot produce, because it invalidates with NULL."
+        LastPaintRect := Array with: x with: y with: w with: h.
+        SegDraws := 0.
+        rect := self drawRectScratch.
+        self setRect: rect x: x y: y w: w h: h.
+        brush := WinApi createSolidBrush: 16rFFFFFF.
+        WinApi fillRect: hdc rect: rect brush: brush.
+        WinApi deleteObject: brush.
+        old := WinApi selectObject: hdc object: self monoFont.
+        WinApi setBkMode: hdc mode: (WinApi constant: 'TRANSPARENT').
+        text := self editorText.
+        text isEmpty ifTrue: [
+            WinApi selectObject: hdc object: old.
+            ^1 ].
+        "WG6c-2b: THE SELECTION, UNDER THE TEXT. Filled before a single glyph
+         is drawn, and the text then drawn over it in TRANSPARENT mode — which
+         is why the syntax colours survive the highlight instead of being
+         replaced by a system highlight colour. A code editor that loses its
+         colouring the moment you select something has traded one useful thing
+         for another.
+
+         The rectangles are computed in 107, purely, so the arithmetic that
+         decides what looks selected is checkable without a window — the same
+         reason `caretPointFor:` lives outside the paint. Its cost is nothing
+         when there is no selection: the collection is empty and this loop
+         does not run."
+        (self editorSelectionRectsAtX: PaintOriginX y: PaintOriginY) do: [ :sr |
+            | sb |
+            sb := WinApi createSolidBrush: 16rF0D8A8.   "a light blue, BGR"
+            self setRect: rect x: (sr at: 1) y: (sr at: 2) w: (sr at: 3) h: (sr at: 4).
+            WinApi fillRect: hdc rect: rect brush: sb.
+            WinApi deleteObject: sb ].
+        runs := WinSyntax runsFor: text.
+        lineH := self editorLineHeight.
+        charW := self editorCharWidth.
+        lineIndex := 0.
+        lineStart := 1.
+        "One pass over the tiling runs, splitting each at newlines. The runs
+         TILE the source (66's backbone property), so walking them walks every
+         character exactly once and the column counter cannot drift."
+        runs do: [ :r |
+            | s e i seg |
+            s := r at: 1.
+            e := s + (r at: 2) - 1.
+            i := s.
+            [ i <= e ] whileTrue: [
+                | j |
+                j := i.
+                [ j <= e and: [ (text at: j) ~= Character nl ] ] whileTrue: [ j := j + 1 ].
+                j > i ifTrue: [
+                    seg := text copyFrom: i to: j - 1.
+                    WinApi setTextColor: hdc color: (WinSyntax colorFor: (r at: 3)).
+                    SegDraws := SegDraws + 1.
+                    "ExtTextOutW with the dx grid, NOT DrawText — every glyph
+                     pinned to its own cell. The count is in UTF-16 UNITS; see
+                     `utf16UnitsOf:` for why that is not the String's size."
+                    WinApi extTextOut: hdc
+                        x: PaintOriginX + ((i - lineStart) * charW)
+                        y: PaintOriginY + (lineIndex * lineH)
+                        options: 0
+                        rect: 0
+                        text: (WinArena scratchUtf16: seg)
+                        count: ((self utf16UnitsOf: seg) min: self editorMaxCells)
+                        dx: self editorDxBuffer ].
+                (j <= e and: [ (text at: j) = Character nl ]) ifTrue: [
+                    lineIndex := lineIndex + 1.
+                    lineStart := j + 1 ].
+                i := j + 1 ] ].
+        WinApi selectObject: hdc object: old.
+        ^1
+    ]
+
+    "── The caret ────────────────────────────────────────────────────────"
+
+    WinShell class >> caretPointFor: offset <Integer> ^ <Array> [
+        "Offset (1-based, as the rope counts) to a pixel position. PURE over
+         the text, so the arithmetic that puts the cursor in the right place
+         is checkable without a window — and it is the same arithmetic
+         WG6c-2's hit-testing will invert."
+        | text line col i |
+        text := self editorText.
+        line := 0.
+        col := 0.
+        i := 1.
+        [ i < offset and: [ i <= text size ] ] whileTrue: [
+            (text at: i) = Character nl
+                ifTrue: [ line := line + 1. col := 0 ]
+                ifFalse: [ col := col + 1 ].
+            i := i + 1 ].
+        ^Array with: col * self editorCharWidth with: line * self editorLineHeight
+    ]
+
+    WinShell class >> syncEditorCaret [
+        "Created on focus, destroyed on losing it. The caret is a THREAD-wide
+         resource in Win32, not a per-window one: CreateCaret replaces
+         whatever caret exists anywhere, so a pane that made one and never
+         destroyed it leaves a cursor blinking in a window that does not have
+         focus — which reads as two cursors and is a classic."
+        | hwnd p |
+        hwnd := self editorPaneHwnd.
+        hwnd = 0 ifTrue: [ ^self ].
+        WinApi getFocus = hwnd
+            ifFalse: [
+                CaretOwned == true ifTrue: [ WinApi destroyCaret. CaretOwned := false ].
+                ^self ].
+        CaretOwned == true ifFalse: [
+            WinApi createCaret: hwnd bitmap: 0 width: 2 height: self editorLineHeight.
+            WinApi showCaret: hwnd.
+            CaretOwned := true ].
+        "THE VIEW'S caret, not the session's. 107's header states the rule —
+         the view owns the caret for NAVIGATION and the session owns it only
+         across an EDIT — and this line read the session's, so every arrow
+         key and every click moved a caret that was then drawn back at the
+         last edit position. The `two authorities would drift` hazard, in the
+         file that wrote it down. `editorCaret` is the view's, and after an
+         edit it has already adopted the session's answer."
+        p := self caretPointFor: self editorCaret.
+        WinApi setCaretPos: (p at: 1) + 2 y: (p at: 2) + 2.
+        ^self
+    ]
+
+    "── Layout and refresh ───────────────────────────────────────────────"
+
+    WinShell class >> layoutEditorPane: content <Array> [
+        (self controlNamed: self editorPaneName) ifNotNil: [ :c | c moveTo: content ].
+        ^self
+    ]
+
+    WinShell class >> segDraws ^ <Integer> [
+        "How many DrawText calls the LAST paint made. One per coloured run per
+         line — 31 for the demo class, which the headless simulation in
+         `/tmp` and this counter must agree on. They disagree if anything
+         iterates the document twice, which is what drawing the same glyphs at
+         two slightly different pitches looks like on screen."
+        ^SegDraws isNil ifTrue: [ 0 ] ifFalse: [ SegDraws ] ]
+
+    WinShell class >> lastPaintRect ^ <Array> [
+        ^LastPaintRect isNil ifTrue: [ #(0 0 0 0) ] ifFalse: [ LastPaintRect ] ]
+
+    WinShell class >> invalidateEditorRectX: rx <Integer> y: ry <Integer> w: rw <Integer> h: rh <Integer> [
+        "A PARTIAL invalidation, which is what Windows does when another window
+         is dragged across the pane and what `refreshEditorPane` never does —
+         it passes NULL, meaning the whole client. That difference is exactly
+         why the paint's coordinate bug survived every gate and every
+         screenshot and was found by looking at the running app. Present so a
+         gate can exercise the shape deliberately."
+        | r |
+        self editorPaneHwnd = 0 ifTrue: [ ^self ].
+        r := self drawRectScratch.
+        self setRect: r x: rx y: ry w: rw h: rh.
+        WinApi invalidateRect: self editorPaneHwnd rect: r erase: 0.
+        ^self
+    ]
+
+    WinShell class >> refreshEditorPane [
+        "InvalidateRect rather than a direct draw, for WG4 D3's own reason: a
+         caller is usually inside a VM entry holding the busy guard, and a
+         paint provoked synchronously from there would be declined at the
+         door. Invalidation is asynchronous and arrives through the pump."
+        self editorPaneHwnd = 0 ifTrue: [ ^self ].
+        WinApi invalidateRect: self editorPaneHwnd rect: 0 erase: 0.
+        ^self
+    ]
+
+    WinShell class >> openEditorOn: aString <String> [
+        EditorSession openOn: aString.
+        "The VIEW's caret is the view's to reset, and nothing else was doing
+         it: the session starts a new document at 1 while the view kept the
+         previous class's caret and selection, which on a shorter document ran
+         off the end. A no-op until 107 defines it."
+        self resetEditorCaret.
+        self refreshEditorPane.
+        ^self
+    ]
+]

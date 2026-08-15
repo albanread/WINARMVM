@@ -81,7 +81,10 @@ pub fn bootstrap_payload(mode: &str) -> bool {
     let installed = std::fs::read(sup.join(".version")).ok();
     if bundled.is_some() && bundled != installed {
         if let Err(e) = copy_tree(&payload, &sup) {
-            eprintln!("macvm: could not install payload into {}: {e}", sup.display());
+            eprintln!(
+                "macvm: could not install payload into {}: {e}",
+                sup.display()
+            );
             return true;
         }
         // Force a fresh reseed for the new world — the old image predates it.
@@ -96,10 +99,7 @@ pub fn bootstrap_payload(mode: &str) -> bool {
     unsafe {
         std::env::set_var("MACVM_GUI_ROOT", sup.join("gui"));
         std::env::set_var("MACVM_WORLD_PATH", sup.join("world"));
-        std::env::set_var(
-            "MACVM_IMAGE_PATH",
-            sup.join("world").join("image.sqlite3"),
-        );
+        std::env::set_var("MACVM_IMAGE_PATH", sup.join("world").join("image.sqlite3"));
     }
     true
 }

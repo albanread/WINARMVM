@@ -1,0 +1,315 @@
+"── 99_winui_host.mst — WG5b-2: Accept, over image_store::flows ──────────
+ docs/ROADMAP.md's WG5 row, its last clause: *Accept persisting to the image
+ byte-identically to the web path (the CG8 gate, re-run)*.
+
+ THE GATE IS THE SPECIFICATION. Two GUIs that wrote the image differently
+ would be a corruption bug with a user interface in front of it, so nothing
+ here reimplements a write. Every one of these calls lands in
+ `image_store::flows` — the web GUI's OWN path — through `winui_host.dll`,
+ and the error text the transcript shows is `flows`' own words, unedited.
+
+ HOW IT REACHES RUST AT ALL, which was the hard part of this slice and is
+ recorded in full in `docs/sprints/sprint_wg5_detail.md`: `image_store`
+ depends on the VM, so a primitive would be a dependency cycle; a downstream
+ crate cannot add one either (WG2 Δ 1); the Mac gets there through the ObjC
+ runtime and Windows has no counterpart. WG5b-2's one core change is the FFI
+ pragma's new `library:` part, and this file is its first user.
+
+ THE READ/WRITE SPLIT, inherited from the Mac deliberately (66_cocoabrowser's
+ own note): the hierarchy and selector rows in 98 come from the PRIMARY's
+ live reflection; the image is what Accept WRITES to. An instance variable
+ added here changes shape and so takes effect on the next boot — there is no
+ `become:` — which is `flows`' documented behaviour and not a shortcoming of
+ this port."
+
+Object subclass: WinHost [
+    <classVars: Available>
+
+    "── The bindings ────────────────────────────────────────────────────
+     `library:` sends these straight to `resolve_export(Some(..))`, which
+     GetModuleHandleA's then LoadLibraryA's the DLL. It deliberately does
+     NOT fall back to the system-DLL probe on a miss: a same-named export
+     from user32 answering a call meant for the host service is the one
+     outcome worse than not resolving at all."
+
+    WinHost class >> ping ^ <Integer> [
+        <primitive: FFI function: #MacvmHostPing library: #'winui_host.dll' ret: #g args: #()>
+        ^self primitiveFailed: 'MacvmHostPing'
+    ]
+
+    WinHost class >> rawSaveMethod: cls <Integer> side: side <Integer> source: src <Integer> ^ <Integer> [
+        <primitive: FFI function: #MacvmHostSaveMethod library: #'winui_host.dll' ret: #g args: #(g g g)>
+        ^self primitiveFailed: 'MacvmHostSaveMethod'
+    ]
+
+    WinHost class >> rawNewClass: src <Integer> ^ <Integer> [
+        <primitive: FFI function: #MacvmHostNewClass library: #'winui_host.dll' ret: #g args: #(g)>
+        ^self primitiveFailed: 'MacvmHostNewClass'
+    ]
+
+    WinHost class >> rawAddVariable: cls <Integer> isClassVar: k <Integer> name: nm <Integer> ^ <Integer> [
+        <primitive: FFI function: #MacvmHostAddVariable library: #'winui_host.dll' ret: #g args: #(g g g)>
+        ^self primitiveFailed: 'MacvmHostAddVariable'
+    ]
+
+    WinHost class >> rawMethodSource: cls <Integer> side: side <Integer> selector: sel <Integer> ^ <Integer> [
+        <primitive: FFI function: #MacvmHostMethodSource library: #'winui_host.dll' ret: #g args: #(g g g)>
+        ^self primitiveFailed: 'MacvmHostMethodSource'
+    ]
+
+    WinHost class >> rawClassSource: cls <Integer> ^ <Integer> [
+        <primitive: FFI function: #MacvmHostClassSource library: #'winui_host.dll' ret: #g args: #(g)>
+        ^self primitiveFailed: 'MacvmHostClassSource'
+    ]
+
+    WinHost class >> rawPersistClass: src <Integer> ^ <Integer> [
+        <primitive: FFI function: #MacvmHostPersistClass library: #'winui_host.dll' ret: #g args: #(g)>
+        ^self primitiveFailed: 'MacvmHostPersistClass'
+    ]
+
+    WinHost class >> rawLastMessage ^ <Integer> [
+        <primitive: FFI function: #MacvmHostLastMessage library: #'winui_host.dll' ret: #g args: #()>
+        ^self primitiveFailed: 'MacvmHostLastMessage'
+    ]
+
+    WinHost class >> rawLastMessageLen ^ <Integer> [
+        <primitive: FFI function: #MacvmHostLastMessageLen library: #'winui_host.dll' ret: #g args: #()>
+        ^self primitiveFailed: 'MacvmHostLastMessageLen'
+    ]
+
+    "── Availability, checked once and REMEMBERED ────────────────────────"
+
+    WinHost class >> available ^ <Boolean> [
+        "The failure this separates is otherwise silent and baffling. If the
+         DLL is not beside the exe, or the name is wrong, every call fails
+         identically to a genuine `flows` refusal — `the primitive failed`
+         either way — and those are entirely different problems with entirely
+         different fixes.
+
+         Cached because a miss costs a LoadLibraryA attempt per call, and
+         because the answer cannot change within a run: a DLL that is not
+         there when the window opens will not appear later."
+        Available isNil ifTrue: [
+            Available := [ self ping = 16r5747 ] on: Error do: [ :e | false ] ].
+        ^Available
+    ]
+
+    WinHost class >> lastMessage ^ <String> [
+        "Read by COUNT, not by scanning for a terminator — the host returns
+         the length excluding the NUL for exactly this reason."
+        | n |
+        n := self rawLastMessageLen.
+        n <= 0 ifTrue: [ ^'' ].
+        ^WinArena stringFromUtf16At: self rawLastMessage units: n
+    ]
+
+    "── The three writes ────────────────────────────────────────────────
+     Each answers #(ok message): `ok` a Boolean, `message` the host's own
+     text — the saved selector on success, `flows`' refusal on failure. The
+     caller decides what to do with it; this class never touches the UI."
+
+    WinHost class >> saveMethod: className <String> side: side <Symbol> source: src <String> ^ <Array> [
+        | rc |
+        self available ifFalse: [ ^self unavailable ].
+        rc := self rawSaveMethod: (WinArena nativeUtf16: className)
+                  side: (side = #class ifTrue: [ 1 ] ifFalse: [ 0 ])
+                  source: (WinArena nativeUtf16: src).
+        ^Array with: rc = 0 with: self lastMessage
+    ]
+
+    WinHost class >> newClassFrom: src <String> ^ <Array> [
+        | rc |
+        self available ifFalse: [ ^self unavailable ].
+        rc := self rawNewClass: (WinArena nativeUtf16: src).
+        ^Array with: rc = 0 with: self lastMessage
+    ]
+
+    WinHost class >> addVariableTo: className <String> classVar: isClassVar <Boolean> named: nm <String> ^ <Array> [
+        | rc |
+        self available ifFalse: [ ^self unavailable ].
+        rc := self rawAddVariable: (WinArena nativeUtf16: className)
+                  isClassVar: (isClassVar ifTrue: [ 1 ] ifFalse: [ 0 ])
+                  name: (WinArena nativeUtf16: nm).
+        ^Array with: rc = 0 with: self lastMessage
+    ]
+
+    WinHost class >> methodSourceFor: className <String> side: side <Symbol> selector: sel <String> ^ <Array> [
+        "The READ half, and the reason the browser is a browser rather than a
+         list of names. Source is IMAGE data by the same deliberate split the
+         Mac uses: names come from the primary's live reflection, text comes
+         from the image -- so what is shown is what the next boot will read."
+        | rc |
+        self available ifFalse: [ ^self unavailable ].
+        rc := self rawMethodSource: (WinArena nativeUtf16: className)
+                  side: (side = #class ifTrue: [ 1 ] ifFalse: [ 0 ])
+                  selector: (WinArena nativeUtf16: sel).
+        ^Array with: rc = 0 with: self lastMessage
+    ]
+
+    "── WG6c-3's two: a whole class out, a whole class back ─────────────"
+
+    WinHost class >> classSourceFor: className <String> ^ <Array> [
+        "The whole class as one editable buffer — what the Editor opens on,
+         and the same image-not-reflection split `methodSourceFor:` records
+         just above: the picker's rows are live, the TEXT is what the next
+         boot will read.
+
+         A class with no stored source answers #(true '') rather than a
+         refusal, exactly as a method with none does: known live and not in
+         the image is an ordinary state during a session."
+        | rc |
+        self available ifFalse: [ ^self unavailable ].
+        rc := self rawClassSource: (WinArena nativeUtf16: className).
+        ^Array with: rc = 0 with: self lastMessage
+    ]
+
+    WinHost class >> persistClass: src <String> ^ <Array> [
+        "The Editor's Save, through `image_store::flows::persist_editor_class`
+         — the SAME write path the web GUI and the Mac use, which is the whole
+         point of WG6c's groundwork commit promoting it out of two of them.
+
+         IT ANSWERS #(true ...) EVEN WHEN IT REFUSED, and that is faithful
+         rather than sloppy: `flows` reports a buffer it could not parse as the
+         summary `nothing to save (no class definition in the buffer)`, and
+         inventing an `ok: false` here would make this GUI report a status the
+         other two do not — the exact drift the shared write path exists to
+         prevent. The caller shows the message; what matters is that nothing
+         was written, which is `flows`' promise and is pinned by
+         `wg6c_an_unparseable_buffer_is_refused_without_changing_the_image`."
+        | rc |
+        self available ifFalse: [ ^self unavailable ].
+        rc := self rawPersistClass: (WinArena nativeUtf16: src).
+        ^Array with: rc = 0 with: self lastMessage
+    ]
+
+    WinHost class >> unavailable ^ <Array> [
+        "Named rather than inlined three times because the wording IS the
+         diagnosis: it tells whoever hits it where the DLL is meant to be."
+        ^Array with: false with: 'The host service is not available — winui_host.dll must sit beside the executable.'
+    ]
+]
+
+Object subclass: WinShell [
+    <classVars: AcceptCount>
+
+    "── Accept ──────────────────────────────────────────────────────────"
+
+    WinShell class >> acceptSource [
+        "The browser's Accept, and the shape of it is the Mac's: write the
+         IMAGE first, then live-compile on the PRIMARY.
+
+         That order is deliberate and worth stating. The image is the record
+         — it is what the next boot reads — so a write that fails must stop
+         here and say so, rather than leaving a class live in one VM and
+         absent from the file. Live-compiling first would make the browser
+         look right and the image wrong, which is the failure a user does not
+         discover until tomorrow."
+        ^self acceptSourceText: self sourcePaneText
+    ]
+
+    WinShell class >> acceptSourceText: source <String> ^ <Boolean> [
+        "Everything Accept DOES, with the one control read lifted out.
+
+         Split for the same reason the Mac's browser has scripting helpers
+         that double as its jump path: the gate can then drive the real write
+         — real FFI, real DLL, real `flows` — with no window in the way, and
+         what it exercises is the SAME method the button reaches rather than a
+         parallel one written for testing. A gate that drove its own private
+         copy of this would prove only that the copy worked."
+        | cls r |
+        cls := self browserSelectedClass.
+        (cls isNil or: [ source isEmpty ]) ifTrue: [
+            self appendTranscript: 'Accept: select a class and enter a method first.'.
+            ^false ].
+        r := WinHost saveMethod: cls side: self browserSelectedSide source: source.
+        (r at: 1) ifFalse: [
+            self appendTranscript: 'Accept refused: ' , (r at: 2).
+            ^false ].
+        AcceptCount := (AcceptCount isNil ifTrue: [ 0 ] ifFalse: [ AcceptCount ]) + 1.
+        self appendTranscript: 'Accepted ' , cls , ' >> ' , (r at: 2) , ' (image)'.
+        self liveCompile: source into: cls.
+        ^true
+    ]
+
+    WinShell class >> liveCompile: source <String> into: cls <String> [
+        "The second half: make it live in the PRIMARY, where the objects are.
+         Over the ordinary `uiDoit:` channel — the same seam WG4 D1 built and
+         WG5a's Do It already uses — because a compile is just evaluation and
+         inventing a second channel for it would be two things to keep
+         correct instead of one.
+
+         Reopening the class is how a method is added to an EXISTING class
+         from source: `flows::reopen_one_method` builds exactly this text for
+         the web path, and using the same shape keeps the two GUIs compiling
+         identically."
+        | text |
+        text := cls , ' extend [ ' , source , ' ]'.
+        "BEST-EFFORT, and deliberately so. The image write above already
+         succeeded and is the RECORD — it is what the next boot reads. If the
+         primary is gone (it can die, and in a CLI run there is none at all)
+         the right outcome is a saved method and an honest note, not an
+         exception that unwinds a completed write and leaves the user
+         believing nothing happened.
+
+         Found by the gate: driving `acceptSourceText:` headlessly took the
+         whole run down with `unknown or dead worker` AFTER the image had been
+         written correctly — which is exactly the failure this guard is for,
+         arriving from the direction that makes it obvious."
+        [ Worker uiDoit: text onReplyTimed: [ :result :ms |
+            WinShell appendTranscript: 'Compiled into the primary (' , ms printString , ' ms)' ] ]
+            on: Error
+            do: [ :e |
+                self appendTranscript: 'Saved to the image; not compiled live (' , e messageText , ')' ].
+        ^self
+    ]
+
+    WinShell class >> acceptCount ^ <Integer> [ ^AcceptCount isNil ifTrue: [ 0 ] ifFalse: [ AcceptCount ] ]
+
+    WinShell class >> sourceTextFor: cls <Object> selector: sel <Object> ^ <String> [
+        "Split out from `updateSourcePane` so the decision is testable without
+         a window — the pane's job is then only to display what this answers."
+        | nl r |
+        cls isNil ifTrue: [ ^'Select a class.' ].
+        nl := String with: Character cr with: Character nl.
+        sel isNil ifTrue: [
+            ^cls , nl , nl ,
+             'variables: ' , (self browserVariables inject: '' into: [ :a :b | a , b , ' ' ]) , nl , nl ,
+             'Select a selector to see its source, or type a method here and press Accept.' ].
+        r := WinHost methodSourceFor: cls side: self browserSelectedSide selector: sel.
+        (r at: 1) ifFalse: [ ^cls , ' >> ' , sel , nl , nl , (r at: 2) ].
+        (r at: 2) isEmpty ifTrue: [
+            ^cls , ' >> ' , sel , nl , nl ,
+             'No source in the image for this selector yet — it exists live but has not been Accepted.' ].
+        ^self crlf: (r at: 2)
+    ]
+
+    WinShell class >> crlf: aString <String> ^ <String> [
+        "A Win32 EDIT wants CRLF and the image stores LF, so a method's real
+         source arrived as one long line with a box at every break — the whole
+         body on line 1, which reads as a browser that cannot show source
+         rather than one showing it in the wrong line endings.
+
+         Converted HERE, at the boundary, rather than in the image: LF is what
+         the image should hold (it is what every .mst file holds and what the
+         web GUI reads), and a control's display convention is the control's
+         business. The same rule the sprint already states for EM_GETSEL's
+         UTF-16 offsets — convert at the boundary, exactly once."
+        | out |
+        out := WriteStream on: String new.
+        aString do: [ :c |
+            c = Character nl
+                ifTrue: [ out nextPut: Character cr. out nextPut: Character nl ]
+                ifFalse: [ c = Character cr ifFalse: [ out nextPut: c ] ] ].
+        ^out contents
+    ]
+
+    WinShell class >> sourcePaneText ^ <String> [
+        "`browserSelectedSide` is NOT defined here on purpose. 98 already has
+         it, reading the `BrowserSide` the protocols pane sets -- and because
+         this file loads last, a second definition would silently WIN and
+         ignore whichever side the user actually clicked. Reopening a class
+         across files makes that shadowing invisible, so it is worth a note
+         rather than a rediscovery."
+        ^(self controlNamed: #browserSource) ifNil: [ '' ] ifNotNil: [ :c | c text ]
+    ]
+]

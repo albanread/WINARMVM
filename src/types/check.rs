@@ -236,7 +236,14 @@ pub fn check_world(model: &WorldModel) -> Vec<TypeError> {
                 // method's OWN body -- independent of whether its own
                 // signature is annotated (an unannotated method can still
                 // misuse an ANNOTATED ivar or an annotated sibling param).
-                super::expr_type::check_method(model, class_name, class_side, selector, m, &mut errors);
+                super::expr_type::check_method(
+                    model,
+                    class_name,
+                    class_side,
+                    selector,
+                    m,
+                    &mut errors,
+                );
             }
         }
     }
@@ -344,8 +351,10 @@ mod tests {
     use std::fs;
 
     fn temp_world_dir(tag: &str) -> std::path::PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("macvm_types_check_test_{tag}_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "macvm_types_check_test_{tag}_{}",
+            std::process::id()
+        ));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
@@ -391,11 +400,7 @@ mod tests {
     #[test]
     fn declared_type_name_resolves_cleanly() {
         let dir = temp_world_dir("declared");
-        fs::write(
-            dir.join("01_object.mst"),
-            "nil subclass: Object [\n]\n",
-        )
-        .unwrap();
+        fs::write(dir.join("01_object.mst"), "nil subclass: Object [\n]\n").unwrap();
         fs::write(
             dir.join("02_integer.mst"),
             "Object subclass: Integer [\n]\n",
@@ -455,16 +460,8 @@ mod tests {
     #[test]
     fn generic_arity_mismatch_across_two_sites() {
         let dir = temp_world_dir("arity");
-        fs::write(
-            dir.join("01_object.mst"),
-            "nil subclass: Object [\n]\n",
-        )
-        .unwrap();
-        fs::write(
-            dir.join("02_cltn.mst"),
-            "Object subclass: Cltn [\n]\n",
-        )
-        .unwrap();
+        fs::write(dir.join("01_object.mst"), "nil subclass: Object [\n]\n").unwrap();
+        fs::write(dir.join("02_cltn.mst"), "Object subclass: Cltn [\n]\n").unwrap();
         fs::write(
             dir.join("03_foo.mst"),
             "Object subclass: Foo [\n\

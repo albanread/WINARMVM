@@ -115,7 +115,8 @@ fn read_poly(vm: &VmState, ic: InterpreterIc) -> SiteFeedback {
         // resolve defensively anyway; a stale-epoch pair (a redefinition since
         // the stamp) re-resolves through (klass, selector), and a pair that no
         // longer resolves at all is dropped rather than speculated on.
-        let Some(method) = resolve_target(vm, pairs.at(2 * i + 1), klass, ic.selector(), epoch_fresh)
+        let Some(method) =
+            resolve_target(vm, pairs.at(2 * i + 1), klass, ic.selector(), epoch_fresh)
         else {
             continue;
         };

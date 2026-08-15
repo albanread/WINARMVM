@@ -335,7 +335,10 @@ mod tests {
         let (base, cap) = jit.region_raw();
         assert!(!base.is_null());
         assert_eq!(cap, page_size(), "one byte must round to exactly one page");
-        assert_ne!(cap, 0x4000, "0x4000 is the Apple page size — see page_size()");
+        assert_ne!(
+            cap, 0x4000,
+            "0x4000 is the Apple page size — see page_size()"
+        );
     }
 
     /// The smallest possible end-to-end proof of this whole module: write one

@@ -30,7 +30,7 @@
 
 use std::cell::Cell;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use crate::codecache::deopt_trap;
@@ -418,7 +418,18 @@ pub enum GameCommand {
     // engine call the GUI game host already links (`macgamepane-graphics`),
     // exactly like the commands above; a GUI that has not yet grown the arm
     // ignores it harmlessly. ──
-
+    /// **WG11-W9.** Grow the world buffer beyond the viewport by `margin`
+    /// pixels on every side, so a game can scroll a picture larger than the
+    /// screen (`GamePane>>overscan:`).
+    SetOverscan { margin: u32 },
+    /// **WG11-W9.** Pan the viewport within that world (`GamePane>>scrollTo:y:`).
+    /// The COPPER does not move with it: the per-scanline palette keys off the
+    /// screen row, so raster bars stay locked to the display.
+    Scroll { x: i64, y: i64 },
+    /// **WG11-W7 (SM0).** Build the direct framebuffer — the rotating set of
+    /// index buffers a demo writes pixels straight into, published for
+    /// `screenMemory`. `GamePane>>openDirect:height:`.
+    OpenDirect { w: u32, h: u32 },
     /// Resize the pane to `w`x`h`, recreating the indexed framebuffer, text
     /// overlay and shader layer at the new resolution. A demo sends this FIRST
     /// (before any draw) if it wants a non-default size; a demo that never
@@ -472,6 +483,225 @@ pub enum GameCommand {
 /// Where game-primitive commands go — the game analogue of [`TranscriptSink`].
 /// `Send` because the GUI's sink hands commands across the worker-to-main
 /// thread channel, exactly like the transcript sink hands text.
+
+// ── WG11-W7: shared screen memory (upstream SM0) ────────────────────────────
+//
+// Taken VERBATIM from `upstream/main:src/embed.rs`. This is the guest-facing
+// contract — `screenMemory`, `screenStride`, and the rotation both sides agree
+// on by counting — and two implementations of it would be two chances to
+// disagree about which buffer a frame belongs to. The comments below are
+// upstream's, including the one recording the tearing that taught the counting.
+//
+// THE WINDOWS DIFFERENCE, stated once here rather than implied: these pointers
+// are HOST memory, not a mapped GPU texture. D3D11 hands out a `Map`ped pointer
+// only between Map and Unmap and it may not be held across frames, so the host
+// copies the buffer into the renderer's plane on Present — one copy where Metal
+// has none. The guest contract ("ask for an address and a stride") is identical
+// either way, which is the whole reason it was written as an address and a
+// stride. See `winui_render/src/lib.rs`'s note and the D3D12 CUSTOM-heap route
+// that would close it.
+
+// â”€â”€ shared screen memory (docs/shared_screen_memory_design.md) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+//
+// The one piece of game state that does NOT travel as a command, and cannot.
+// Everything else here flows VM â†’ host: the VM emits, the host applies. But
+// `GamePane>>screenMemory` has to *return* an address, and the address belongs
+// to the host â€” it is the `contents()` of a Metal buffer the main thread
+// created. A primitive on the VM thread has to read it directly.
+//
+// So the host PUBLISHES it here and the primitive READS it. Plain atomics, no
+// lock: the publisher is one thread (main, at pane creation and again after
+// every present, since the write buffer rotates), and readers only ever load.
+//
+// `generation` is the safety interlock. The S21 supervisor can kill and
+// respawn the primary while a demo holds an Alien over this memory, and a pane
+// can close underneath one. Every published buffer carries a generation; the
+// primitive stamps the generation it read into the Alien's size-0 case, and
+// `clear_screen_memory` bumps it so a stale handle reads as "no buffer" rather
+// than as freed memory. Belt and braces on top of the fact that the buffers
+// themselves are only freed on pane close, with the writing VM stopped first.
+// ROTATION, and why it is counted rather than published.
+//
+// The first cut published ONE pointer â€” "the current write buffer" â€” and
+// republished it after each present. That tore, visibly and badly, and the
+// reason is a race the "three buffers, no fence" argument missed: the rotation
+// happens on the MAIN thread when the Present command is drained, but the VM
+// does not wait for that. A demo sends `present` and immediately starts the
+// next frame, so it fetches the OLD published pointer and begins writing the
+// very buffer the GPU is about to read. ParallelMandel showed it worst, its
+// four workers piling into the buffer being displayed.
+//
+// The fix needs no synchronisation, only agreement. Both sides count the same
+// ordered events: the host publishes ALL the buffers once, and each side picks
+// `frame % count` â€” the VM incrementing its counter when it sends `present`,
+// the host incrementing its own when it renders one. The command stream is
+// ordered, so the two counts describe the same frame without either waiting on
+// the other.
+const MAX_SCREEN_BUFFERS: usize = 4;
+static SCREEN_PTRS: [AtomicUsize; MAX_SCREEN_BUFFERS] =
+    [const { AtomicUsize::new(0) }; MAX_SCREEN_BUFFERS];
+static SCREEN_NBUF: AtomicUsize = AtomicUsize::new(0);
+/// How many frames the VM has presented. Picks which buffer `screenMemory`
+/// hands out; the host's own count picks which one it renders.
+static SCREEN_FRAME: AtomicU64 = AtomicU64::new(0);
+static SCREEN_STRIDE: AtomicUsize = AtomicUsize::new(0);
+static SCREEN_HEIGHT: AtomicUsize = AtomicUsize::new(0);
+static SCREEN_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Count a presented frame â€” called by the `present` primitive, so the VM's
+/// notion of "which buffer am I drawing into" advances at exactly the moment
+/// it finishes a frame, not whenever the host gets round to drawing it.
+pub(crate) fn advance_screen_frame() {
+    SCREEN_FRAME.fetch_add(1, Ordering::AcqRel);
+}
+
+/// Publish the direct framebuffer's ROTATING SET â€” every buffer, once, at pane
+/// creation. Not "the current one after each present": see the note above, and
+/// the tearing that taught it.
+///
+/// # Safety contract (not `unsafe`, but a contract all the same)
+/// Every pointer must stay valid and writable until [`clear_screen_memory`],
+/// and the host must stop the writing VM before freeing them.
+pub fn publish_screen_buffers(ptrs: &[*mut u8], stride: usize, height: usize) {
+    let n = ptrs.len().min(MAX_SCREEN_BUFFERS);
+    SCREEN_STRIDE.store(stride, Ordering::Relaxed);
+    SCREEN_HEIGHT.store(height, Ordering::Relaxed);
+    SCREEN_FRAME.store(0, Ordering::Relaxed);
+    for (i, p) in ptrs.iter().take(n).enumerate() {
+        SCREEN_PTRS[i].store(*p as usize, Ordering::Relaxed);
+    }
+    // Count last, with Release: a reader that sees a non-zero count is
+    // guaranteed to see the pointers, the stride and the height that go with it.
+    SCREEN_NBUF.store(n, Ordering::Release);
+}
+
+/// Publish a SINGLE buffer â€” the degenerate case, used by tests and by any
+/// host with nothing to rotate. Identical to a rotating set of one, which
+/// means no rotation and therefore no tear-freedom: fine when one writer
+/// finishes a whole frame between presents, which is exactly what a test does.
+pub fn publish_screen_memory(ptr: *mut u8, stride: usize, height: usize) {
+    publish_screen_buffers(&[ptr], stride, height);
+}
+
+/// Retract the framebuffer â€” the pane closed, or is being rebuilt. Bumps the
+/// generation so any Alien still held over the old memory is dead rather than
+/// dangling.
+pub fn clear_screen_memory() {
+    SCREEN_NBUF.store(0, Ordering::Release);
+    for p in SCREEN_PTRS.iter() {
+        p.store(0, Ordering::Relaxed);
+    }
+    SCREEN_STRIDE.store(0, Ordering::Relaxed);
+    SCREEN_HEIGHT.store(0, Ordering::Relaxed);
+    SCREEN_FRAME.store(0, Ordering::Relaxed);
+    SCREEN_GENERATION.fetch_add(1, Ordering::AcqRel);
+}
+
+/// The published framebuffer as `(ptr, stride, height)`, or `None` when no
+/// direct pane is open.
+pub(crate) fn screen_memory() -> Option<(*mut u8, usize, usize)> {
+    let n = SCREEN_NBUF.load(Ordering::Acquire);
+    if n == 0 {
+        return None;
+    }
+    // The buffer for the frame the VM is drawing NOW â€” its own present count,
+    // not whatever the host last got round to rendering.
+    let slot = (SCREEN_FRAME.load(Ordering::Relaxed) as usize) % n;
+    let p = SCREEN_PTRS[slot].load(Ordering::Relaxed);
+    if p == 0 {
+        return None;
+    }
+    Some((
+        p as *mut u8,
+        SCREEN_STRIDE.load(Ordering::Relaxed),
+        SCREEN_HEIGHT.load(Ordering::Relaxed),
+    ))
+}
+
+
+// ── WG11-W8: the text plane (upstream SM1) ──────────────────────────────────
+//
+// A cell grid the guest writes STORES into, not commands: `cols * rows` cells
+// of four bytes, `[char, fg, bg, flags]`, laid out row by row, where fg and bg
+// are PALETTE INDICES rather than colours. A HUD redrawn every frame therefore
+// costs nothing on the command channel at all, which is the whole of SM1.
+//
+// Unlike the pixel plane this does NOT rotate — one grid, in place — so an
+// Alien over it may be kept for the life of the pane.
+static TEXT_PTR: AtomicUsize = AtomicUsize::new(0);
+static TEXT_COLS: AtomicUsize = AtomicUsize::new(0);
+static TEXT_ROWS: AtomicUsize = AtomicUsize::new(0);
+
+/// Publish the text cell grid. Unlike the framebuffer this does NOT rotate â€”
+/// there is one grid and it stays put â€” so the host publishes once when the
+/// pane is built and retracts on close.
+pub fn publish_text_memory(ptr: *mut u8, cols: usize, rows: usize) {
+    TEXT_COLS.store(cols, Ordering::Relaxed);
+    TEXT_ROWS.store(rows, Ordering::Relaxed);
+    TEXT_PTR.store(ptr as usize, Ordering::Release);
+}
+
+/// Retract the text grid â€” the pane closed.
+pub fn clear_text_memory() {
+    TEXT_PTR.store(0, Ordering::Release);
+    TEXT_COLS.store(0, Ordering::Relaxed);
+    TEXT_ROWS.store(0, Ordering::Relaxed);
+}
+
+/// The published text grid as `(ptr, cols, rows)`, or `None` when no pane is
+/// open.
+pub(crate) fn text_memory() -> Option<(*mut u8, usize, usize)> {
+    let p = TEXT_PTR.load(Ordering::Acquire);
+    if p == 0 {
+        return None;
+    }
+    Some((
+        p as *mut u8,
+        TEXT_COLS.load(Ordering::Relaxed),
+        TEXT_ROWS.load(Ordering::Relaxed),
+    ))
+}
+
+
+// ── WG11-W9: the palette as memory (upstream SM4) ───────────────────────────
+//
+// The last plane, and the one that makes the other two cheap: `entries` RGBA
+// quads the guest STORES into, laid out as `viewport_h` groups of sixteen
+// per-scanline colours followed by 240 globals. Re-colouring the whole screen
+// costs the PALETTE's size, not the SCREEN's — which is the entire trick behind
+// `45f_copper.mst`, where the picture is drawn once and never redrawn and only
+// what colour index 1 MEANS on each of 240 scanlines changes.
+static PALETTE_PTR: AtomicUsize = AtomicUsize::new(0);
+static PALETTE_ENTRIES: AtomicUsize = AtomicUsize::new(0);
+static PALETTE_GLOBAL_BASE: AtomicUsize = AtomicUsize::new(0);
+
+/// Publish the palette buffer. The host also tells its pane that the guest now
+/// owns it, so the pane stops uploading a CPU copy over the guest's writes.
+pub fn publish_palette_memory(ptr: *mut u8, entries: usize, global_base: usize) {
+    PALETTE_ENTRIES.store(entries, Ordering::Relaxed);
+    PALETTE_GLOBAL_BASE.store(global_base, Ordering::Relaxed);
+    PALETTE_PTR.store(ptr as usize, Ordering::Release);
+}
+
+pub fn clear_palette_memory() {
+    PALETTE_PTR.store(0, Ordering::Release);
+    PALETTE_ENTRIES.store(0, Ordering::Relaxed);
+    PALETTE_GLOBAL_BASE.store(0, Ordering::Relaxed);
+}
+
+/// `(ptr, entries, global_base)`, or `None` when no pane is open.
+pub(crate) fn palette_memory() -> Option<(*mut u8, usize, usize)> {
+    let p = PALETTE_PTR.load(Ordering::Acquire);
+    if p == 0 {
+        return None;
+    }
+    Some((
+        p as *mut u8,
+        PALETTE_ENTRIES.load(Ordering::Relaxed),
+        PALETTE_GLOBAL_BASE.load(Ordering::Relaxed),
+    ))
+}
+
 pub trait GameSink: Send {
     fn emit(&mut self, cmd: GameCommand);
 }
@@ -558,10 +788,8 @@ impl VmMonitorSlot {
     pub fn publish(&self, m: VmMetrics) {
         use std::sync::atomic::Ordering::Relaxed;
         *self.metrics.lock().unwrap_or_else(|e| e.into_inner()) = m;
-        *self
-            .last_publish
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
+        *self.last_publish.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(std::time::Instant::now());
         self.alive.store(true, Relaxed);
     }
 
@@ -1378,13 +1606,21 @@ impl VmHandle {
     /// (`class` may end in " class" for the metaclass side). Pins the method
     /// to tier-0 so the dispatch hook fires. Runs on the primary's own thread
     /// (the supervisor pump services the GUI's request). `Ok(msg)`/`Err(why)`.
-    pub fn set_breakpoint_by_name(&mut self, class: &str, selector: &str) -> Result<String, String> {
+    pub fn set_breakpoint_by_name(
+        &mut self,
+        class: &str,
+        selector: &str,
+    ) -> Result<String, String> {
         self.vm.debug.active = true;
         crate::runtime::debug::set_breakpoint_by_name(&mut self.vm, class, selector, 0)
     }
 
     /// The clearing twin of [`set_breakpoint_by_name`].
-    pub fn clear_breakpoint_by_name(&mut self, class: &str, selector: &str) -> Result<String, String> {
+    pub fn clear_breakpoint_by_name(
+        &mut self,
+        class: &str,
+        selector: &str,
+    ) -> Result<String, String> {
         crate::runtime::debug::clear_breakpoint_by_name(&mut self.vm, class, selector, 0)
     }
 
@@ -2670,7 +2906,6 @@ mod tests {
         );
     }
 
-
     /// Every `GamePane new` installs the default 16-colour palette
     /// (world/43_gamepane.mst — a fresh pane arrives with usable colours, so
     /// a beginner's first `cls:`/`disc:` is visible instead of silently
@@ -3257,7 +3492,8 @@ mod tests {
         )
         .expect("define UdpProbe");
         vm.exec("WkTest reset.").expect("reset");
-        vm.exec("WkTest w1: IoWorker spawn.").expect("spawn IoWorker");
+        vm.exec("WkTest w1: IoWorker spawn.")
+            .expect("spawn IoWorker");
         vm.exec("UdpProbe setUp: WkTest w1.")
             .expect("bind server, watch both sockets, send");
         vm.exec("Worker runLoopWhile: [ (WkTest tickCapped: 300) and: [ UdpProbe got isNil ] ].")
@@ -3314,7 +3550,8 @@ mod tests {
         )
         .expect("define PingProbe");
         vm.exec("WkTest reset.").expect("reset");
-        vm.exec("WkTest w1: IoWorker spawn.").expect("spawn IoWorker");
+        vm.exec("WkTest w1: IoWorker spawn.")
+            .expect("spawn IoWorker");
         vm.exec("PingProbe setUp: WkTest w1.")
             .expect("open ICMP, watch reply, send echo");
         // Where the OS refuses even the unprivileged ICMP socket, skip
@@ -3366,7 +3603,8 @@ mod tests {
             .to_string();
         if icmp_ok == "true" {
             vm.exec("WkTest reset.").expect("reset");
-            vm.exec("WkTest w1: IoWorker spawn.").expect("spawn IoWorker");
+            vm.exec("WkTest w1: IoWorker spawn.")
+                .expect("spawn IoWorker");
             vm.exec("Ping via: WkTest w1 host: '127.0.0.1' count: 3.")
                 .expect("run a non-blocking loopback ping");
             let out = captured.lock().unwrap().concat();
@@ -3824,8 +4062,10 @@ mod tests {
                  start).",
         )
         .expect("the storm tree starts (its first death arrives async)");
-        vm.exec("Worker runLoopWhile: [ (WkTest tickCapped: 200) and: [ SupTest state ~~ #givenUp ] ].")
-            .expect("run until give-up");
+        vm.exec(
+            "Worker runLoopWhile: [ (WkTest tickCapped: 200) and: [ SupTest state ~~ #givenUp ] ].",
+        )
+        .expect("run until give-up");
         assert_eq!(vm.eval("SupTest state").expect("state").trim(), "#givenUp");
         assert_eq!(
             vm.eval("SupTest restarts").expect("restarts").trim(),
@@ -4513,8 +4753,10 @@ mod tests {
             crate::runtime::workers::register_hosted_worker(&mut primary.vm, Arc::new(|| {}))
                 .expect("register the hosted UI worker");
         let mut ui = boot_ui_worker(id, to_primary);
-        ui.exec("Worker uiRequest: #refresh args: (Array with: #browser) onReply: [:r | UiT r: r].")
-            .expect("ship the #refresh request");
+        ui.exec(
+            "Worker uiRequest: #refresh args: (Array with: #browser) onReply: [:r | UiT r: r].",
+        )
+        .expect("ship the #refresh request");
         primary
             .exec("Worker dispatchInbox.")
             .expect("the primary serves the #refresh");
@@ -4573,7 +4815,9 @@ mod tests {
         // first subclass. (The multi-pane browser: classes in the outline,
         // selectors in the table.)
         assert_eq!(
-            ui.eval("(CocoaBrowser resolvePath: '') at: 1").expect("root name").trim(),
+            ui.eval("(CocoaBrowser resolvePath: '') at: 1")
+                .expect("root name")
+                .trim(),
             "'Object'"
         );
         assert_eq!(
@@ -4706,8 +4950,8 @@ mod tests {
             // pointer) — exactly `rebuild_ui`'s order.
             publish_ui_vm(std::ptr::null_mut());
             drop(ui); // Drop = Reservation munmap + deopt deregister + slot release
-            // The load-bearing assertion: THIS thread's slot count never grows
-            // across cycles — a stranded slot would climb toward the 64 cap.
+                      // The load-bearing assertion: THIS thread's slot count never grows
+                      // across cycles — a stranded slot would climb toward the 64 cap.
             assert!(
                 current_thread_jmp_slots() <= baseline,
                 "cycle {cycle}: this thread's jmp slots {} exceeded baseline {baseline} — a restart stranded a recovery slot",
@@ -6050,7 +6294,9 @@ mod tests {
                FfiBadArg class >> go: x [ <primitive: FFI function: #abs ret: #g args: #(s)> ] ]",
         )
         .expect("compiles");
-        let err = vm.eval("FfiBadArg go: 3.").expect_err("arg token s must Err");
+        let err = vm
+            .eval("FfiBadArg go: 3.")
+            .expect_err("arg token s must Err");
         assert!(
             format!("{err}").contains("unsupported argument-shape token \"s\""),
             "must name the token, got: {err}"
@@ -6148,21 +6394,40 @@ mod tests {
 
         // GetTickCount64: plausible (an up-machine has been alive >1s and
         // <10 years) and monotonic across two calls.
-        let t1: i64 = vm.eval("WinPin tick.").expect("tick 1").trim().parse().unwrap();
-        let t2: i64 = vm.eval("WinPin tick.").expect("tick 2").trim().parse().unwrap();
+        let t1: i64 = vm
+            .eval("WinPin tick.")
+            .expect("tick 1")
+            .trim()
+            .parse()
+            .unwrap();
+        let t2: i64 = vm
+            .eval("WinPin tick.")
+            .expect("tick 2")
+            .trim()
+            .parse()
+            .unwrap();
         assert!(t1 > 1_000, "GetTickCount64 must be plausible, got {t1}");
         assert!(t1 < 10 * 365 * 24 * 3600 * 1000, "implausibly large: {t1}");
         assert!(t2 >= t1, "GetTickCount64 went backwards: {t1} -> {t2}");
 
         // MulDiv rounds (6*7)/4 = 10.5 to 11 — the rounding proves the REAL
         // function ran, not a truncating reimplementation anywhere between.
-        assert_eq!(vm.eval("WinPin mulDiv: 6 by: 7 div: 4.").unwrap().trim(), "11");
-        assert_eq!(vm.eval("WinPin mulDiv: 6 by: 7 div: 3.").unwrap().trim(), "14");
+        assert_eq!(
+            vm.eval("WinPin mulDiv: 6 by: 7 div: 4.").unwrap().trim(),
+            "11"
+        );
+        assert_eq!(
+            vm.eval("WinPin mulDiv: 6 by: 7 div: 3.").unwrap().trim(),
+            "14"
+        );
 
         // One guest-owned page for the out-params.
         vm.exec("WinPin allocBuf.").expect("VirtualAlloc a page");
         let buf: i64 = vm.eval("WinPin buf.").expect("buf").trim().parse().unwrap();
-        assert!(buf > 0x1_0000, "VirtualAlloc must answer a real address, got {buf}");
+        assert!(
+            buf > 0x1_0000,
+            "VirtualAlloc must answer a real address, got {buf}"
+        );
 
         // QueryPerformanceCounter fills the buffer and answers nonzero BOOL.
         let ok = vm
@@ -6180,7 +6445,8 @@ mod tests {
         // GetSystemTimeAsFileTime: void return, pointer out-param; the
         // FILETIME (100ns ticks since 1601) must land between 2020-01-01
         // and 2100-01-01 — a garbage or unwritten buffer cannot.
-        vm.exec("WinPin fileTimeInto: WinPin buf.").expect("GetSystemTimeAsFileTime");
+        vm.exec("WinPin fileTimeInto: WinPin buf.")
+            .expect("GetSystemTimeAsFileTime");
         let ft: i64 = vm
             .eval("(Alien forAddress: WinPin buf size: 8) signedLongAt: 1.")
             .expect("read filetime")
@@ -6195,10 +6461,17 @@ mod tests {
         // user32 (WG0's first calls — win_gui_design.md): SM_CXSCREEN is
         // positive on any interactive session; MessageBeep(0xFFFFFFFF)
         // answers nonzero BOOL.
-        let cx: i64 = vm.eval("WinPin metric: 0.").expect("GetSystemMetrics").trim().parse().unwrap();
+        let cx: i64 = vm
+            .eval("WinPin metric: 0.")
+            .expect("GetSystemMetrics")
+            .trim()
+            .parse()
+            .unwrap();
         assert!(cx > 0, "SM_CXSCREEN must be positive, got {cx}");
         assert_ne!(
-            vm.eval("WinPin beep: 4294967295.").expect("MessageBeep").trim(),
+            vm.eval("WinPin beep: 4294967295.")
+                .expect("MessageBeep")
+                .trim(),
             "0",
             "MessageBeep must succeed"
         );
@@ -6232,7 +6505,9 @@ mod tests {
         // RESOLUTION ITSELF performs Win32 calls that reset last-error.
         vm.eval("WinErr lastError.").expect("warm GetLastError");
         assert_eq!(
-            vm.eval("WinErr closeHandle: 0.").expect("CloseHandle(0)").trim(),
+            vm.eval("WinErr closeHandle: 0.")
+                .expect("CloseHandle(0)")
+                .trim(),
             "0",
             "CloseHandle(NULL) must fail with BOOL 0"
         );
@@ -6293,7 +6568,9 @@ mod tests {
         .expect("alloc binding");
         vm.exec("WinFaultAlloc allocBuf.").expect("page");
         assert_ne!(
-            vm.eval("WinFault qpc: WinFaultAlloc buf.").expect("good call").trim(),
+            vm.eval("WinFault qpc: WinFaultAlloc buf.")
+                .expect("good call")
+                .trim(),
             "0",
             "the identical binding must succeed once handed a valid pointer"
         );
@@ -6323,7 +6600,10 @@ mod tests {
                 .eval("WinJitPin spin.")
                 .expect("a compiled caller's FFI call must not corrupt the stack");
             assert!(
-                out.trim().parse::<i64>().map(|n| n > 1_000).unwrap_or(false),
+                out.trim()
+                    .parse::<i64>()
+                    .map(|n| n > 1_000)
+                    .unwrap_or(false),
                 "expected a plausible tick count, got {out:?}"
             );
         }

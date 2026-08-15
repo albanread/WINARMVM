@@ -1,0 +1,128 @@
+"── 101_winui_richedit.mst — WG5c D3: the RichEdit surface ───────────────
+ docs/sprints/sprint_wg5c_detail.md D3. The two code surfaces — the
+ Workspace and the Browser's source pane — stop being plain EDITs and become
+ RichEdits, which is what makes D4's colouring possible at all: a plain EDIT
+ cannot colour text and a RichEdit does it with EM_SETCHARFORMAT over a
+ selection, with no drawing code of ours anywhere.
+
+ The sprint records why this rather than a custom-drawn pane, and the
+ deciding measurement: of the four EDIT messages this port actually uses,
+ three work unchanged on RichEdit and the fourth (EM_SETCUEBANNER, the ghost
+ line) ALREADY returns 0 on our multiline EDIT. The swap costs one feature
+ that does not currently work.
+
+ THE TWO THINGS THAT MUST HAPPEN TOGETHER, and the second is the one with
+ history:
+
+   1. `Msftedit.dll` must be loaded before the class name is used, or
+      CreateWindowExW answers NULL. 92 already reports that loudly with
+      GetLastError, so the failure names itself rather than showing up as a
+      pane that is mysteriously not there.
+   2. `isSourceSurface` hardcoded `klass = 'EDIT'`. A pane that becomes a
+      RichEdit stops being a source surface the moment it changes, and the
+      symptom is Do It / Print It / Accept greying out — which is now a bug
+      with a history in this port (WG4 D4's scar, and the click-disables-
+      itself bug the author found by using the window). Taught here, in the
+      same file that does the swap, so the two cannot drift apart."
+
+Object subclass: WinApi [
+
+    WinApi class >> loadLibrary: pathUtf16 <Integer> ^ <Integer> [
+        <primitive: FFI function: #LoadLibraryW ret: #g args: #(g)>
+        ^self primitiveFailed: 'LoadLibraryW'
+    ]
+]
+
+Object subclass: WinControl [
+
+    isSourceSurface ^ <Boolean> [
+        "WG4 D4's predicate, widened for WG5c D3: `can the thing the user is
+         typing in supply source?`. The answer does not depend on WHICH text
+         control it is — an editable multiline RichEdit is every bit as much
+         a source surface as an editable multiline EDIT, and it carries the
+         same ES_MULTILINE / ES_READONLY style bits, so only the class-name
+         test changes.
+
+         Redefined here rather than edited in 95 because this file owns the
+         swap: whoever changes which control the code panes use should not be
+         able to forget the predicate that decides whether the verbs light
+         up for them."
+        | style |
+        (self isTextSurfaceClass: klass) ifFalse: [ ^false ].
+        style := WinApi getWindowLongPtr: handle index: (0 - 16).   "GWL_STYLE"
+        ^((style bitAnd: (WinApi constant: 'ES_MULTILINE')) ~= 0)
+            and: [ (style bitAnd: (WinApi constant: 'ES_READONLY')) = 0 ]
+    ]
+
+    isTextSurfaceClass: aClass <String> ^ <Boolean> [
+        ^aClass = 'EDIT' or: [ aClass = 'RICHEDIT50W' ]
+    ]
+]
+
+Object subclass: WinShell [
+    <classVars: RichEditModule>
+
+    "── The library, loaded once ─────────────────────────────────────────"
+
+    WinShell class >> richEditClassName ^ <String> [
+        "`RICHEDIT50W` is Msftedit.dll's class — RichEdit 4.1 and later. The
+         older `RichEdit20W` comes from riched20.dll and is a different,
+         worse control; naming the new one explicitly is the difference
+         between the modern text engine and a compatibility shim."
+        ^'RICHEDIT50W'
+    ]
+
+    WinShell class >> ensureRichEdit ^ <Boolean> [
+        "LoadLibraryW registers the window class as a side effect of loading,
+         which is why this must happen BEFORE any CreateWindowExW names it —
+         there is no separate registration call to make.
+
+         Cached, and cached on the HANDLE rather than on a Boolean, so a
+         failed load can be told from a load never attempted."
+        RichEditModule isNil ifTrue: [
+            RichEditModule := [ WinApi loadLibrary: (WinArena nativeUtf16: 'Msftedit.dll') ]
+                on: Error do: [ :e | 0 ] ].
+        ^RichEditModule ~= 0
+    ]
+
+    WinShell class >> richEditAvailable ^ <Boolean> [ ^self ensureRichEdit ]
+
+    WinShell class >> codePaneClass ^ <String> [
+        "The class the two code surfaces are created with. Answers the plain
+         EDIT when Msftedit.dll will not load, which is not expected on any
+         supported Windows but is a one-line fallback rather than a window
+         with a hole in it — and `richEditAvailable` says which happened, so
+         a gate can tell a working fallback from a working RichEdit."
+        ^self ensureRichEdit
+            ifTrue: [ self richEditClassName ]
+            ifFalse: [ 'EDIT' ]
+    ]
+
+    "── What a code pane needs after it is created ───────────────────────
+     There is deliberately NO `addCodePane:` helper here. The two surfaces
+     are created in the files that own their views (93 for the Workspace, 98
+     for the Browser's source pane) with styles those files decide, and a
+     constructor here would have to be called by both to be worth anything.
+     One was written, neither file called it, and it sat looking like it was
+     doing the work — the same shape as WG5a's stale placeholder handler,
+     which RESPONDED and so looked fine until someone read it. Deleted.
+
+     What both sites DO share is `prepareCodePane:`, which is a message they
+     send rather than a constructor they must route through."
+
+    WinShell class >> prepareCodePane: c <Object> [
+        "Everything a freshly created code pane needs, in one place so the two
+         creation sites cannot drift apart."
+        c isNil ifTrue: [ ^self ].
+        "A RichEdit does NOT inherit the dialog font the way a stock control
+         does — left alone it comes up in its own default, which is not the
+         shell's and looks like a pane from a different application. The
+         monospaced face is the right one for code either way."
+        c setFont: self monoFont.
+        "And it sends NO notifications by default, unlike a plain EDIT.
+         Without this, WG5c D4's EN_CHANGE handler simply never fires — which
+         reads as a broken handler and is not one."
+        self enableChangeNotifications: c.
+        ^self
+    ]
+]

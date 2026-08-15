@@ -546,8 +546,7 @@ pub fn decide_with_budget(
             // a trap — plus code growth, which is what the A/B judges.
             let dominant = &cases[0];
             let dom = dominant.count.unwrap_or(0) as u64;
-            let proven =
-                dom >= DOMINANT_MIN_SAMPLES && dom * 100 >= total * DOMINANT_MIN_SHARE_PCT;
+            let proven = dom >= DOMINANT_MIN_SAMPLES && dom * 100 >= total * DOMINANT_MIN_SHARE_PCT;
             let inlinable = proven
                 && dominant.method.primitive() == 0
                 && inline_cost(dominant.method) <= budget.per_call_cost

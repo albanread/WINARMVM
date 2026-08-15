@@ -4,7 +4,7 @@
 //! published into the same [`CodeCache`] real compiled methods live in.
 
 use crate::compiler::assembler::{
-    d,    imm, mem, mem_post, mem_pre, sp, x, xr, Assembler, CodeBlob, Cond, RelocKind,
+    d, imm, mem, mem_post, mem_pre, sp, x, xr, Assembler, CodeBlob, Cond, RelocKind,
 };
 use crate::compiler::jasm_assembler::JasmAssembler;
 use crate::oops::layout::{
@@ -1462,9 +1462,12 @@ pub unsafe extern "C" fn rt_interpret_call(
             let kname = crate::runtime::error::name_of(k.name());
             let key = format!("{kname}>>{}", sel.as_string());
             HIST.with(|h| *h.borrow_mut().entry(key).or_insert(0) += 1);
-            if t % 500_000 == 0 {
+            if t.is_multiple_of(500_000) {
                 let c = COMPILED_AVAIL.load(Ordering::Relaxed);
-                eprintln!("c2i-census: total={t} compiled_avail={c} ({}%)", c * 100 / t);
+                eprintln!(
+                    "c2i-census: total={t} compiled_avail={c} ({}%)",
+                    c * 100 / t
+                );
                 HIST.with(|h| {
                     let mut v: Vec<(String, u64)> =
                         h.borrow().iter().map(|(s, n)| (s.clone(), *n)).collect();
@@ -2329,12 +2332,26 @@ pub unsafe extern "C" fn rt_call_primitive(
         vm.reg_block.last_compiled_fp, 0,
         "rt_call_primitive: anchor must be set by stub_call_primitive's prologue before this call"
     );
-    let desc = crate::runtime::primitives::prim_by_id(prim_id as u16).unwrap_or_else(|| {
-        panic!("rt_call_primitive: unknown primitive id {prim_id} -- driver.rs baked a bad literal")
-    });
+    // The compiled twin of try_primitive's: an unimplemented primitive falls
+    // through to the method body rather than panicking. Upstream's GamePane
+    // wrappers are written to rely on exactly that ( / ), which is
+    // how its games load on a build that has not implemented them yet.
+    let Some(desc) = crate::runtime::primitives::prim_by_id(prim_id as u16) else {
+        return crate::oops::layout::PRIM_FAIL_SENTINEL;
+    };
     let fp = vm.reg_block.last_compiled_fp;
     let rootspill_base = fp - crate::oops::layout::ROOTSPILL_BYTES as u64;
     let n = argc_plus_recv as usize;
+    // ARITY GUARD, the compiled twin of `try_primitive`'s. A method may declare
+    // any primitive number with any argument count; the primitive indexes the
+    // slice by its OWN arity, so a mismatch reads past the end and PANICS the
+    // VM from guest code. Upstream's Minesweeper does exactly that here — its
+    // 0-argument `textMemory` is primitive 271, which WINARM had allocated to a
+    // 1-argument `primWinkbStructSize:`. Fail instead, so the method's own
+    // Smalltalk body (`^nil`) runs.
+    if desc.argc as usize + 1 != n {
+        return crate::oops::layout::PRIM_FAIL_SENTINEL;
+    }
     debug_assert!(
         n <= crate::oops::layout::ROOTSPILL_SLOTS,
         "rt_call_primitive: {n} args exceeds ROOTSPILL_SLOTS -- driver.rs's own argc<=5 \

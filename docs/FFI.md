@@ -360,6 +360,47 @@ primitives future sprints haven't reached is, for Tier-1 FFI, now closed. The
 generator's contract — "produce the right *declaration*, resolvable the moment
 the real primitive exists" — is met: the primitive exists.
 
+### 6.4 Naming a library: `library:` (WINARM WG5b-2)
+
+A Tier-1 pragma may name the DLL that exports the function:
+
+```smalltalk
+WinHost class >> rawSaveMethod: cls side: side source: src [
+    <primitive: FFI function: #MacvmHostSaveMethod
+        library: #'winui_host.dll' ret: #g args: #(g g g)>
+]
+```
+
+It is OPTIONAL, and omitting it keeps the original behaviour exactly —
+`winkb` first (whose knowledge base names the exporting DLL for every Windows
+API function it knows), then the fallback probe over ucrtbase, msvcrt,
+kernel32, user32 and ws2\_32. That default is right for the population those
+two cover, and it is the only path any pragma written before WG5b-2 uses.
+
+**What it is for.** Those two paths between them can find Windows API
+functions and CRT names, and nothing else — so a DLL of the user's own was
+unreachable from Smalltalk at all. That blocked WG5b-2 concretely (the
+browser's Accept must reach `image_store::flows`, which lives DOWNSTREAM of
+the VM and can never be a primitive: `image_store` depends on `macvm`, so the
+dependency would be a cycle). But the gap was general. A Smalltalk on Windows
+that cannot call a third-party DLL is missing something a user will want on
+their first afternoon.
+
+**An explicit library does not fall back.** It goes straight to
+`GetModuleHandleA`-then-`LoadLibraryA` on the named module, and a miss is a
+miss. Falling back to the probe would silently call a same-named export from
+some system DLL — the one outcome worse than not resolving at all.
+
+**It applies to `function:` only.** `library:` on a Tier 2 `selector:` pragma
+is refused at parse time: an ObjC send resolves through the ObjC runtime and
+has no library to name, so accepting it would let someone write a pragma that
+reads as if it targets a DLL and does not.
+
+**The DLL must be findable.** `LoadLibraryA` uses the standard search order,
+which includes the executable's own directory — so a `cdylib` in the same
+cargo target directory as the host binary resolves by bare name, as
+`winui_host.dll` does.
+
 ## 7. Explicitly deferred
 
 - **Callbacks/blocks** — passing a Smalltalk closure into a Cocoa API that

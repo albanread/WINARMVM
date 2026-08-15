@@ -20,6 +20,112 @@ use crate::{Image, Side};
 /// derive from just because a class didn't come from the importer.
 pub const INTERACTIVE_SOURCE_FILE: &str = "interactive.mst";
 
+/// The editor's whole-class save: parse the buffer, write only the DIFF.
+///
+/// # Why this is here rather than in a GUI
+///
+/// It was in two GUIs. `gui`'s web editor has this logic and
+/// `cocoa_gui/src/host_service.rs` copied it, describing itself as *"the web
+/// GUI's `persist_editor_class` logic, over the shared `image_store` API"*.
+/// WG6c would have made it three, which is the failure the CG8 gate exists to
+/// prevent one level up: not two GUIs writing the image differently, but three
+/// implementations of HOW to write it, drifting independently.
+///
+/// This module's own header already argued for the move — *"extracted so the
+/// Cocoa GUI's browser drives the SAME implementation instead of a second
+/// one (dual placement covers renderers, never the write logic)"*. The editor
+/// save simply never made it here.
+///
+/// **Promoted FAITHFULLY.** The behaviour is byte-for-byte the Mac's,
+/// including the parts worth improving (see below), so that migrating the
+/// other two callers onto it is a pure delete-and-delegate with nothing to
+/// re-verify. Changing semantics in the same commit that consolidates them
+/// would be two changes wearing one hat, and would leave the untouched copies
+/// differing in a way nobody would notice.
+///
+/// **Known weakness, recorded rather than fixed here:** every image call is
+/// `let _ = ...`, so a failed write is invisible and the summary still reads
+/// as success. That is the existing behaviour in both current callers. It
+/// should be given a `Result`, once, when all three call this one.
+///
+/// # What it does
+///
+/// Sets the class shell (superclass + instance variables — the one edit a
+/// live redefinition cannot do, which is why Save goes to the database and
+/// takes effect on the next boot), then writes only what CHANGED: a
+/// byte-identical method keeps its version, so there is no history churn and
+/// no nmethod invalidation. Methods that vanished from the buffer are
+/// removed. Answers a one-line summary for the transcript.
+pub fn persist_editor_class(img: &Image, text: &str) -> String {
+    use std::collections::{HashMap, HashSet};
+    let parsed = crate::mst::parse_mst_source(text);
+    let cls = match parsed.first() {
+        Some(c) => c,
+        None => return "nothing to save (no class definition in the buffer)".to_string(),
+    };
+    let _ = img.create_or_reopen_class(
+        &cls.name,
+        cls.superclass.as_deref(),
+        "",
+        "",
+        &cls.instance_vars,
+    );
+    let _ = img.set_class_definition(&cls.name, cls.superclass.as_deref(), &cls.instance_vars);
+
+    let stored: HashMap<(String, bool), String> = img
+        .all_methods_of(&cls.name)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|m| ((m.selector, m.side == Side::Class), m.source))
+        .collect();
+
+    let (mut changed, mut added) = (0u32, 0u32);
+    for m in &cls.methods {
+        let side = if m.is_class_side {
+            Side::Class
+        } else {
+            Side::Instance
+        };
+        match stored.get(&(m.selector.clone(), m.is_class_side)) {
+            // Byte-identical: left completely alone. This is the whole point
+            // of diffing rather than rewriting -- an untouched method keeps
+            // its version and its history.
+            Some(old) if *old == m.source => {}
+            Some(_) => {
+                let _ = img.create_or_reopen_method(&cls.name, side, &m.selector, "", &m.source);
+                changed += 1;
+            }
+            None => {
+                let _ = img.create_or_reopen_method(&cls.name, side, &m.selector, "", &m.source);
+                added += 1;
+            }
+        }
+    }
+
+    let present: HashSet<(String, bool)> = cls
+        .methods
+        .iter()
+        .map(|m| (m.selector.clone(), m.is_class_side))
+        .collect();
+    let mut removed = 0u32;
+    for (sel, is_cls) in stored.keys() {
+        if !present.contains(&(sel.clone(), *is_cls)) {
+            let side = if *is_cls { Side::Class } else { Side::Instance };
+            let _ = img.remove_method(&cls.name, side, sel);
+            removed += 1;
+        }
+    }
+
+    if changed + added + removed == 0 {
+        format!("{} — no changes", cls.name)
+    } else {
+        format!(
+            "saved {} ({changed} changed, {added} added, {removed} removed)",
+            cls.name
+        )
+    }
+}
+
 /// `vm_host`'s `is_valid_var_name`, verbatim: a Smalltalk-style identifier
 /// (a letter or `_`, then letters/digits/`_`).
 pub fn is_valid_var_name(s: &str) -> bool {
@@ -32,7 +138,10 @@ pub fn is_valid_var_name(s: &str) -> bool {
 /// from the image, exactly as the web reads it from its mirror): the .mst
 /// reopen that live-compiles ONE method into an existing class.
 pub fn reopen_one_method(superclass: &str, class_name: &str, method_text: &str) -> String {
-    format!("{superclass} subclass: {class_name} [\n{}\n]\n", method_text.trim())
+    format!(
+        "{superclass} subclass: {class_name} [\n{}\n]\n",
+        method_text.trim()
+    )
 }
 
 /// The class-variable reopen `vm_host`'s `SmapplAddVar` arm live-compiles
@@ -64,14 +173,30 @@ pub fn new_class_from_source(
     if matches!(img.class_named(&pc.name), Ok(Some(_))) {
         return Err(format!("A class named {} already exists.", pc.name));
     }
-    img.create_or_reopen_class(&pc.name, pc.superclass.as_deref(), "", "", &pc.instance_vars)
-        .map_err(|e| e.to_string())?;
+    img.create_or_reopen_class(
+        &pc.name,
+        pc.superclass.as_deref(),
+        "",
+        "",
+        &pc.instance_vars,
+    )
+    .map_err(|e| e.to_string())?;
     let source_file = default_source_file.unwrap_or(INTERACTIVE_SOURCE_FILE);
     let mut failed = 0usize;
     for m in &pc.methods {
-        let side = if m.is_class_side { Side::Class } else { Side::Instance };
+        let side = if m.is_class_side {
+            Side::Class
+        } else {
+            Side::Instance
+        };
         if img
-            .create_or_reopen_method(&pc.name, side, &m.selector, "as yet unclassified", &m.source)
+            .create_or_reopen_method(
+                &pc.name,
+                side,
+                &m.selector,
+                "as yet unclassified",
+                &m.source,
+            )
             .is_err()
         {
             failed += 1;
@@ -192,7 +317,8 @@ mod tests {
         let cls = img.class_named("Painter").unwrap().expect("stored");
         assert_eq!(cls.instance_vars, "brush");
         assert_eq!(
-            img.method_source("Painter", Side::Instance, "stroke").unwrap(),
+            img.method_source("Painter", Side::Instance, "stroke")
+                .unwrap(),
             Some("stroke [ ^1 ]".to_string())
         );
         assert!(new_class_from_source(&img, "Object subclass: Painter [\n]", None).is_err());
@@ -259,7 +385,8 @@ mod tests {
         // A brand-new method via save_method: gets the synthetic home.
         save_method(&img, "Painter", Side::Instance, "dab: x [ ^x ]", None).expect("save");
         assert_eq!(
-            img.method_source_file("Painter", Side::Instance, "dab:").unwrap(),
+            img.method_source_file("Painter", Side::Instance, "dab:")
+                .unwrap(),
             Some(INTERACTIVE_SOURCE_FILE.to_string())
         );
 
@@ -271,7 +398,8 @@ mod tests {
             .unwrap();
         save_method(&img, "Painter", Side::Instance, "dab: x [ ^x + 1 ]", None).expect("re-save");
         assert_eq!(
-            img.method_source_file("Painter", Side::Instance, "dab:").unwrap(),
+            img.method_source_file("Painter", Side::Instance, "dab:")
+                .unwrap(),
             Some("12_real.mst".to_string()),
             "editing an already-homed method must not clobber its real source_file"
         );

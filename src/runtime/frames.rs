@@ -1043,6 +1043,7 @@ mod tests {
             id: NmethodId(0),
             key_klass: klass,
             key_selector: selector,
+            owns_dynamic_key: true,
             code,
             entry_off: 0,
             verified_entry_off: 0,

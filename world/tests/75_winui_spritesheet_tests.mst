@@ -1,0 +1,171 @@
+"75_winui_spritesheet_tests.mst — the Sprite Editor's sheet round trip and its
+ preview, both pure enough to check with no window and no image.
+
+ THE TWO SCRAPERS ARE THE INTERESTING PART. A sheet is source in the image,
+ so Load reads text back and must turn it into art — and it can be an honest
+ parser rather than a guesser only because this editor WROTE that text. The
+ pair is checked against `sheetSource`'s real output rather than against a
+ hand-written sample, so the day the emitter changes shape, these fail.
+
+ AND THE PREVIEW DOIT gets one assertion that looks trivial and is not: it
+ must contain `\\\\`, the modulo selector, and never a lone `\\`. The Mac's own
+ sprite editor emits the single one (`76_spriteed.mst:784`) and its animated
+ preview has therefore always been a doesNotUnderstand at step time."
+
+TestCase subclass: WinUiSpriteSheetTests [
+    WinUiSpriteSheetTests class >> isEnabled ^ <Boolean> [
+        ^Smalltalk platformName == #windows
+    ]
+
+    runAll [
+        self runTest: #testQuotedStringsAreScrapedInOrder
+             do: [ self testQuotedStringsAreScrapedInOrder ].
+        self runTest: #testATripleScrapeNeedsExactlyFortyEightNumbers
+             do: [ self testATripleScrapeNeedsExactlyFortyEightNumbers ].
+        self runTest: #testTheScrapersReadWhatSheetSourceWrites
+             do: [ self testTheScrapersReadWhatSheetSourceWrites ].
+        self runTest: #testTheRoundTripIsPixelForPixel
+             do: [ self testTheRoundTripIsPixelForPixel ].
+        self runTest: #testNudgeWrapsRatherThanEats
+             do: [ self testNudgeWrapsRatherThanEats ].
+        self runTest: #testResizeIsTheDocumentsDecision
+             do: [ self testResizeIsTheDocumentsDecision ].
+        self runTest: #testThePreviewDoitUsesTheRealModuloSelector
+             do: [ self testThePreviewDoitUsesTheRealModuloSelector ].
+        ^self
+    ]
+
+    "── the scrapers ────────────────────────────────────────────────────"
+
+    testQuotedStringsAreScrapedInOrder [
+        | got |
+        got := WinSpriteEd quotedStringsIn: 'x ''ab'' y ''cd'' z'.
+        self assert: got size equals: 2 description: 'two runs found'.
+        self assert: got first equals: 'ab' description: 'in order'.
+        self assert: (got at: 2) equals: 'cd' description: 'and complete'.
+        self assert: (WinSpriteEd quotedStringsIn: 'nothing here') isEmpty
+             description: 'no quotes, no strings'.
+    ]
+
+    testATripleScrapeNeedsExactlyFortyEightNumbers [
+        "Sixteen colours is what a sheet HAS. A short read would silently
+         recolour the sprite, so it is refused outright."
+        | src |
+        src := ''.
+        1 to: 47 do: [ :i | src := src , i printString , ' ' ].
+        self assert: (WinSpriteEd integerTriplesIn: src) isNil
+             description: 'forty-seven numbers is not a palette'.
+        src := src , '48'.
+        self assert: (WinSpriteEd integerTriplesIn: src) size equals: 16
+             description: 'forty-eight is sixteen triples'.
+        self assert: ((WinSpriteEd integerTriplesIn: src) first at: 2) equals: 2
+             description: 'grouped in the order they were written'.
+    ]
+
+    "The line of a sheet's source that a palette scrape succeeds on. Load
+     asks the image for the `palette` METHOD and scrapes that; here the whole
+     class is emitted at once, and the digits in its header comment and its
+     `installOn:` loops are exactly why the scraper must be pointed at one
+     method rather than at everything. Finding the line by ASKING THE SCRAPER
+     is the honest test: it proves the emitter puts sixteen triples somewhere
+     a triple-scrape reads them, which is the contract Load depends on."
+    paletteLineOf: src <String> ^ <Object> [
+        (src subStrings: (String with: Character nl)) do: [ :line |
+            (WinSpriteEd integerTriplesIn: line) isNil ifFalse: [ ^line ] ].
+        ^nil
+    ]
+
+    testTheScrapersReadWhatSheetSourceWrites [
+        "Checked against the REAL emitter, so a change of shape fails here
+         rather than at a user's Load button."
+        | doc src frames line triples |
+        doc := SpriteDoc new.
+        doc setPx: 0 x: 1 y: 1 color: 7.
+        doc addFrame.
+        src := doc sheetSource.
+        frames := WinSpriteEd quotedStringsIn: src.
+        self assert: frames size >= doc frameCount
+             description: 'every frame string is found'.
+        line := self paletteLineOf: src.
+        self assert: line isNil not
+             description: 'the emitter writes a scrapable palette line'.
+        triples := WinSpriteEd integerTriplesIn: line.
+        self assert: triples size equals: 16 description: 'as sixteen triples'.
+        self assert: (triples first at: 1) equals: 20
+             description: 'starting with DB16 entry 0'.
+    ]
+
+    testTheRoundTripIsPixelForPixel [
+        "Save writes source; Load reads it. The art that comes back must be
+         the art that went out, which is the whole point of a sheet."
+        | a rows b |
+        a := SpriteDoc new.
+        a setPx: 0 x: 0 y: 0 color: 3.
+        a setPx: 0 x: 5 y: 9 color: 12.
+        a addFrame.
+        a setPx: 1 x: 2 y: 2 color: 8.
+        rows := WinSpriteEd quotedStringsIn: a sheetSource.
+        b := SpriteDoc new.
+        self assert: (b loadFrames: rows
+                        palette: (WinSpriteEd integerTriplesIn:
+                                    (self paletteLineOf: a sheetSource)))
+             description: 'the emitted sheet loads'.
+        self assert: b frameCount equals: a frameCount
+             description: 'with every frame'.
+        0 to: a frameCount - 1 do: [ :f |
+            self assert: (b rowsOf: f) equals: (a rowsOf: f)
+                 description: 'frame ' , f printString , ' is identical' ].
+    ]
+
+    "── the pixel verbs ─────────────────────────────────────────────────"
+
+    testNudgeWrapsRatherThanEats [
+        "The document's shift wraps, so nudging all the way round returns the
+         picture rather than consuming it."
+        | d before |
+        WinSpriteEd handle: #frameFirst value: nil.
+        d := WinSpriteEd doc.
+        d clearFrame: 0.
+        d setPx: 0 x: 0 y: 0 color: 9.
+        before := d rowsOf: 0.
+        1 to: d width do: [ :i | WinSpriteEd handle: #nudgeRight value: nil ].
+        self assert: (d rowsOf: 0) equals: before
+             description: 'a full lap round brings it back'.
+        d clearFrame: 0.
+    ]
+
+    testResizeIsTheDocumentsDecision [
+        "Same size is DECLINED, and that is not an error — the face reports
+         both refusals under one honest message."
+        | d |
+        d := WinSpriteEd doc.
+        self assert: (d resizeTo: d width by: d height) not
+             description: 'a same-size request is declined'.
+        self assert: (d resizeTo: 99 by: 99) not
+             description: 'and so is one past the bound'.
+        self assert: (d resizeTo: 8 by: 8) description: 'a real change is taken'.
+        self assert: d width equals: 8 description: 'and applied'.
+        d resizeTo: 16 by: 16.
+    ]
+
+    "── the preview ─────────────────────────────────────────────────────"
+
+    testThePreviewDoitUsesTheRealModuloSelector [
+        "The assertion that looks trivial: the Mac emits a single backslash
+         here and there is no such selector, so its animated preview has
+         always been a doesNotUnderstand at step time."
+        | doit |
+        doit := WinSpriteEd previewDoit.
+        self assert: (doit includesSubstring: '\\')
+             description: 'modulo is spelled with TWO backslashes'.
+        self assert: (doit includesSubstring: 'GamePane new')
+             description: 'the preview builds a real pane'.
+        self assert: (doit includesSubstring: 'defineSprite:')
+             description: 'and a real sprite'.
+        self assert: (doit includesSubstring: 'p run')
+             description: 'and runs it'.
+        doit do: [ :ch |
+            self assert: ch asInteger < 128
+                 description: 'the doit is ASCII - it crosses a wire as text' ].
+    ]
+]

@@ -274,7 +274,12 @@ fn main() {
     .expect("define the action-target receiver");
     vm.exec("CG4Act reset.").expect("reset");
     let act = mint(&mut vm, "action", "CG4Act new");
-    let _ = send_gpr(act, "macvmPrintIt:", std::ptr::null_mut(), std::ptr::null_mut());
+    let _ = send_gpr(
+        act,
+        "macvmPrintIt:",
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+    );
     assert_eq!(
         vm.eval("CG4Act n").expect("n").trim(),
         "1",
@@ -285,16 +290,18 @@ fn main() {
         "#printIt",
         "the right action selector must have run"
     );
-    let _ = send_gpr(act, "macvmDoIt:", std::ptr::null_mut(), std::ptr::null_mut());
+    let _ = send_gpr(
+        act,
+        "macvmDoIt:",
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+    );
     assert_eq!(
         vm.eval("CG4Act n").expect("n").trim(),
         "2",
         "a Do It menu action must also dispatch (both selectors on one target)"
     );
-    assert_eq!(
-        vm.eval("CG4Act which").expect("which").trim(),
-        "#doIt"
-    );
+    assert_eq!(vm.eval("CG4Act which").expect("which").trim(), "#doIt");
 
     // (CG7) The outline data source's item-producing half: `child:ofItem:`
     // answers a handle object (an NSString keyed by tree path) that AppKit
@@ -406,8 +413,7 @@ fn main() {
     .expect("nested child:ofItem: send");
     assert_eq!(
         String::from_utf8_lossy(
-            &objc_bridge::nsstring_utf8_bytes(out3.gpr[0] as *mut c_void)
-                .expect("a real NSString")
+            &objc_bridge::nsstring_utf8_bytes(out3.gpr[0] as *mut c_void).expect("a real NSString")
         ),
         "1.2",
         "a nested child's handle extends its parent's path"
@@ -427,8 +433,7 @@ fn main() {
     .expect("objectValueForTableColumn:byItem: send");
     assert_eq!(
         String::from_utf8_lossy(
-            &objc_bridge::nsstring_utf8_bytes(out4.gpr[0] as *mut c_void)
-                .expect("a real NSString")
+            &objc_bridge::nsstring_utf8_bytes(out4.gpr[0] as *mut c_void).expect("a real NSString")
         ),
         "label-1",
         "the display value comes from the node the item resolves to"

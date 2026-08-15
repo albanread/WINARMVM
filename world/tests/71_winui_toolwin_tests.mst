@@ -1,0 +1,196 @@
+"71_winui_toolwin_tests.mst — WinUiToolWindowTests, the half of WG14b's
+ realizer that needs no window.
+
+ `world/124_winui_toolwin.mst` is mostly Win32 and mostly untestable here —
+ whether a BUTTON appears where a rect said needs a real window, and that is
+ the scripted gate's job. But two things in it are pure state machines, and
+ both are the kind that fail silently:
+
+   * THE REGISTRY. A tool is declared without being built, is found by id, and
+     is not open until something opens it.
+   * THE DISPATCH DISCIPLINE. Event depth counts; a rerender asked for inside
+     a handler only raises a flag; the flag is flushed once at depth zero; and
+     while ops are being applied events are suppressed. Get any of those wrong
+     and the symptom is a loop or a lost update, never an error.
+
+ The counters are checked too. They exist so an id strategy that has stopped
+ working shows up as a number rather than as a flicker, and a counter nobody
+ asserts on is a counter that quietly stops counting."
+
+TestCase subclass: WinUiToolWindowTests [
+    WinUiToolWindowTests class >> isEnabled ^ <Boolean> [
+        ^Smalltalk platformName == #windows
+    ]
+
+    runAll [
+        self runTest: #testATOOLIsDeclaredWithoutBeingBuilt
+             do: [ self testATOOLIsDeclaredWithoutBeingBuilt ].
+        self runTest: #testAnUnknownToolIsDeclinedNotInvented
+             do: [ self testAnUnknownToolIsDeclinedNotInvented ].
+        self runTest: #testNoWindowOwnsAnHwndItWasNeverGiven
+             do: [ self testNoWindowOwnsAnHwndItWasNeverGiven ].
+        self runTest: #testEventDepthCountsAndNeverGoesNegative
+             do: [ self testEventDepthCountsAndNeverGoesNegative ].
+        self runTest: #testARerenderInsideAHandlerIsDeferredNotDropped
+             do: [ self testARerenderInsideAHandlerIsDeferredNotDropped ].
+        self runTest: #testTheCountersCountBothOutcomes
+             do: [ self testTheCountersCountBothOutcomes ].
+        self runTest: #testDamageIsRecordedUnionedAndTakenOnce
+             do: [ self testDamageIsRecordedUnionedAndTakenOnce ].
+        self runTest: #testPaintRunsOncePerDirtyPaneAndOnlyThose
+             do: [ self testPaintRunsOncePerDirtyPaneAndOnlyThose ].
+        ^self
+    ]
+
+    "── the registry ────────────────────────────────────────────────────"
+
+    testATOOLIsDeclaredWithoutBeingBuilt [
+        "Registering every tool at load time is only reasonable because it
+         costs a dictionary entry and no window."
+        | tool |
+        tool := WinToolWindow
+            register: #tTestTool title: 'Test Tool' width: 400 height: 300
+            render: [ WinSpec window: 'Test Tool' id: #t body:
+                        (WinSpec stack: {} id: #root) ]
+            handler: [ :event :value | ].
+        self assert: tool isNil not description: 'registering answers the tool'.
+        self assert: tool id equals: #tTestTool description: 'which knows its id'.
+        self assert: tool title equals: 'Test Tool' description: 'and its title'.
+        self assert: tool isOpen not description: 'and is NOT open'.
+        self assert: tool hwndValue equals: 0 description: 'because it has no window'.
+        self assert: (WinToolWindow named: #tTestTool) == tool
+             description: 'and is findable by id afterwards'.
+    ]
+
+    testAnUnknownToolIsDeclinedNotInvented [
+        self assert: (WinToolWindow named: #tNoSuchTool) isNil
+             description: 'an unregistered id answers nil'.
+        self assert: (WinToolWindow open: #tNoSuchTool) not
+             description: 'and opening it answers false rather than raising'.
+    ]
+
+    testNoWindowOwnsAnHwndItWasNeverGiven [
+        "The door asks this of EVERY message before it does anything else, so
+         a wrong answer here would route the shell's own messages away."
+        self assert: (WinToolWindow ownsHwnd: 0) not
+             description: 'nobody owns hwnd zero'.
+        self assert: (WinToolWindow ownsHwnd: 16r7FFFFFFF) not
+             description: 'nor an hwnd no tool was ever built with'.
+        self assert: (WinToolWindow forHwnd: 0) isNil
+             description: 'and the lookup answers nil rather than guessing'.
+    ]
+
+    "── the dispatch discipline ─────────────────────────────────────────"
+
+    testEventDepthCountsAndNeverGoesNegative [
+        "Depth is what tells a rerender whether it is inside a handler. An
+         unbalanced leave would make every later rerender look nested — so the
+         floor at zero is not defensive, it is the invariant."
+        WinToolWindow rerenderPending: false.
+        self assert: WinToolWindow eventDepth equals: 0
+             description: 'at rest, depth is zero'.
+        WinToolWindow enterEvent.
+        self assert: WinToolWindow eventDepth equals: 1 description: 'one in'.
+        WinToolWindow enterEvent.
+        self assert: WinToolWindow eventDepth equals: 2 description: 'nested'.
+        WinToolWindow leaveEvent.
+        WinToolWindow leaveEvent.
+        self assert: WinToolWindow eventDepth equals: 0 description: 'and out again'.
+        WinToolWindow leaveEvent.
+        self assert: WinToolWindow eventDepth equals: 0
+             description: 'an extra leave cannot drive it below zero'.
+    ]
+
+    testARerenderInsideAHandlerIsDeferredNotDropped [
+        "Five state changes in one handler must cost ONE screen update. The
+         flag is how, and the flag surviving until depth zero is the whole of
+         it — a rerender that was dropped instead of deferred is a screen that
+         silently disagrees with the model."
+        | tool |
+        tool := WinToolWindow
+            register: #tDeferTool title: 'Defer' width: 300 height: 200
+            render: [ WinSpec window: 'Defer' id: #d body: (WinSpec stack: {} id: #root) ]
+            handler: [ :event :value | ].
+        WinToolWindow rerenderPending: false.
+        WinToolWindow enterEvent.
+        tool rerender.
+        self assert: WinToolWindow rerenderPending
+             description: 'inside a handler it is REMEMBERED, not done'.
+        tool rerender.
+        tool rerender.
+        self assert: WinToolWindow rerenderPending
+             description: 'and asking again is still just the one flag'.
+        WinToolWindow leaveEvent.
+        WinToolWindow rerenderPending: false.
+        self assert: WinToolWindow eventDepth equals: 0 description: 'back at rest'.
+    ]
+
+    "── the counters ────────────────────────────────────────────────────"
+
+    testTheCountersCountBothOutcomes [
+        "They are the only way an id strategy that stopped working announces
+         itself: patches falling while rebuilds climb."
+        WinToolWindow resetCounts.
+        self assert: WinToolWindow patchCount equals: 0 description: 'reset means zero'.
+        self assert: WinToolWindow rebuildCount equals: 0 description: 'both of them'.
+        WinToolWindow countPatch.
+        WinToolWindow countPatch.
+        WinToolWindow countRebuild.
+        self assert: WinToolWindow patchCount equals: 2 description: 'patches counted'.
+        self assert: WinToolWindow rebuildCount equals: 1 description: 'rebuilds too'.
+        WinToolWindow resetCounts.
+    ]
+
+    "── damage: the patch discipline extended to pixels ─────────────────"
+
+    testDamageIsRecordedUnionedAndTakenOnce [
+        | tool |
+        tool := WinToolWindow
+            register: #tDamage title: 'Damage' width: 300 height: 200
+            render: [ WinSpec window: 'D' id: #d body: (WinSpec stack: {} id: #root) ]
+            handler: [ :e :v | ]
+            paint: nil.
+        self assert: (tool damageFor: #grid) == #clean
+             description: 'an untouched pane is clean, not nil - nil MEANS whole'.
+        tool invalidatePane: #grid rect: #(27 27 27 27).
+        self assert: (tool damageFor: #grid) equals: #(27 27 27 27)
+             description: 'a region is recorded as given'.
+        tool invalidatePane: #grid rect: #(81 27 27 27).
+        self assert: (tool damageFor: #grid) equals: #(27 27 81 27)
+             description: 'two regions union into one bounding box'.
+        tool invalidatePane: #grid.
+        self assert: (tool damageFor: #grid) isNil
+             description: 'the WHOLE pane absorbs any region'.
+        tool invalidatePane: #grid rect: #(0 0 1 1).
+        self assert: (tool damageFor: #grid) isNil
+             description: 'and a later region cannot shrink it back'.
+        tool paintDirty.
+        self assert: (tool damageFor: #grid) == #clean
+             description: 'painting takes the damage - it does not linger'.
+    ]
+
+    testPaintRunsOncePerDirtyPaneAndOnlyThose [
+        "The claim the whole detour was for: a pane nobody invalidated is not
+         painted at all, and a dirty one is painted exactly once, with the
+         damage the handler recorded."
+        | calls tool |
+        calls := OrderedCollection new.
+        tool := WinToolWindow
+            register: #tPaintOnce title: 'PaintOnce' width: 300 height: 200
+            render: [ WinSpec window: 'P' id: #p body: (WinSpec stack: {} id: #root) ]
+            handler: [ :e :v | ]
+            paint: [ :t :paneId :region |
+                calls add: (Array with: paneId with: region) ].
+        tool invalidatePane: #grid rect: #(0 0 27 27).
+        tool paintDirty.
+        self assert: calls size equals: 1
+             description: 'one dirty pane, one call'.
+        self assert: (calls first at: 1) equals: 'grid'
+             description: 'named by its id'.
+        self assert: (calls first at: 2) equals: #(0 0 27 27)
+             description: 'carrying the damage the handler recorded'.
+        tool paintDirty.
+        self assert: calls size equals: 1
+             description: 'nothing dirty, nothing painted - not even once'.
+    ]
+]

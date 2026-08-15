@@ -112,7 +112,10 @@ pub fn neon_scale(a: &[f64], k: f64, c: &mut [f64]) {
         let vk = vdupq_n_f64(k);
         let mut i = 0;
         while i + 2 <= n {
-            vst1q_f64(c.as_mut_ptr().add(i), vmulq_f64(vld1q_f64(a.as_ptr().add(i)), vk));
+            vst1q_f64(
+                c.as_mut_ptr().add(i),
+                vmulq_f64(vld1q_f64(a.as_ptr().add(i)), vk),
+            );
             i += 2;
         }
         while i < n {

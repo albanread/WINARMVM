@@ -33,3 +33,169 @@
 # difference at all, which is how "the drain lands before the first control
 # exists" gets checked rather than claimed.
 92_winui_controls.mst
+# WINARM (WG4, docs/ROADMAP.md WG4 row): the shell — view bar, lazy view
+# switching, docked transcript, live metrics. Overrides 92's hooks in turn.
+93_winui_shell.mst
+# WINARM (WG4 D3): the custom-drawn command bar — Fluent glyphs, 9pt labels
+# beneath, and the system accent underline on the active view.
+94_winui_drawing.mst
+# WINARM (WG4 D4): Do It / Print It enablement, tracked by the FOCUSED
+# control rather than the active view.
+95_winui_focus.mst
+# WINARM (WG4 D5): the transcript's splitter — a visible grab bar with a
+# chevron and Clear, a draggable dock height, and Cascadia Mono.
+96_winui_splitter.mst
+# WINARM (WG5a): the Workspace — selection-or-everything, Do It / Print It
+# over the primary seam, Ctrl-D / Ctrl-P, and the ghost line.
+97_winui_workspace.mst
+# WINARM (WG5b-1): the Browser — four panes over the primary's live class
+# hierarchy, read-only. Accept and the image path are WG5b-2.
+98_winui_browser.mst
+# WINARM (WG5b-2): Accept, over `image_store::flows` — the host service
+# bindings (`winui_host.dll`, reached through the FFI's new `library:` part),
+# the image write path, and the source pane's image read. Loads last because
+# its `acceptSource` names WinHost, which this file defines, and reopens
+# WinShell to add the verb 93 now routes to.
+99_winui_host.mst
+# WINARM (WG5c D1/D2): the syntax tokenizer and colour table — both PURE, so
+# this file needs nothing from the machine and nothing from the shell. The
+# Windows layer has outgrown 90-99 and continues at three digits from 100;
+# THIS LIST is the authority on load order, but note a plain `ls` sorts 100_
+# before 90_ (`sort -V` puts it right).
+100_winui_syntax.mst
+# WINARM (WG5c D3): the RichEdit surface. Loads after 95 because it redefines
+# `isSourceSurface`, and after 93/98 is irrelevant — they reach it by message
+# send at open time, not by name at compile time.
+101_winui_richedit.mst
+# WINARM (WG5c D4): applying the colour — CHARFORMAT2W derived from winkb,
+# EM_SETCHARFORMAT over each run, selection and scroll restored, and the
+# whole thing on an edit-idle rather than per keystroke. Loads after 101,
+# whose panes it colours, and after 100, whose runs it applies.
+102_winui_colour.mst
+# WINARM (WG5c D5): the ghost line, re-implemented as an OVERLAY after
+# WG5a D4's EM_SETCUEBANNER turned out to be refused (it returns 0 on a
+# multiline control). A STATIC raised above the pane, so the hint is never
+# part of the document and so can never be evaluated, saved, or lost.
+103_winui_ghost.mst
+# WINARM (WG6a): the Outliner — one SysTreeView32 over the PRIMARY's own
+# browseSnapshot, which already carries the whole Strongtalk outline. No host
+# service and no new seam traffic: it renders a tree 98 already caches.
+104_winui_outliner.mst
+# WINARM (WG6b): Find — Implementors and Senders over the image's own
+# queries, and the payoff: a chosen hit JUMPS to the Browser through WG5b-1's
+# selection helpers. Loads after 99 (WinHost) and after 98 (the Browser's
+# selection helpers it drives).
+105_winui_find.mst
+# WINARM (WG6c-1): the editor pane — a child of OUR window class, so the door
+# is its WndProc and WM_PAINT/WM_KEYDOWN/WM_CHAR all reach Smalltalk. Paints
+# `EditorSession`'s rope with WG5c's tokenizer and palette. Loads after 100
+# (the tokenizer it names) and after 94 (the drawing helpers it reuses).
+106_winui_editorpane.mst
+# WINARM (WG6c-2): the editor pane accepts input — WM_CHAR/WM_KEYDOWN to the
+# rope's `handleKey:at:`, mouse hit-testing (WG6c-1's arithmetic inverted),
+# and undo/redo, which the persistent rope makes free.
+107_winui_editorkeys.mst
+# WINARM (WG6c-2b): the clipboard. Loads after 107, which dispatches Ctrl-C/X/V
+# to it; 91 declares the three as no-ops so 107 is complete without this file.
+108_winui_editorclip.mst
+# WINARM (WG6c-3): the Editor VIEW — a class picker over the primary's live
+# hierarchy, whole-class source from the image, and Save through the shared
+# `flows::persist_editor_class`. Loads after 106/107/108 (it positions and
+# shows their pane) and after 99, whose host verbs it calls.
+109_winui_editorview.mst
+# WINARM (WG6d-2): the pane pokes CELLS. `WinRender` over winui_render.dll —
+# DirectWrite metrics, a Direct2D/DXGI swapchain — and the WinShell half that
+# fills the grid from the tokenizer. Loads LAST because it overrides 106's
+# metrics and paint: the renderer is the one authority on a cell's size.
+110_winui_render.mst
+# WINARM (WG6e): a code pane is an OBJECT. `WinCodePane` holds one pane's
+# window, document, caret, selection and renderer attachment — because the
+# shell has eight views and three want a code surface AT ONCE, which no
+# arrangement of class variables can serve. Loads after 110 (it names
+# WinRender) and after 100 (WinSyntax).
+111_winui_codepane.mst
+# WINARM (WG7-2): the Monitor — every running VM, live. The roster is PUSHED in
+# by win_gui on the between-dispatches beat (the exe, because the roster is a
+# process-wide static and a DLL would get its own copy), and this renders it.
+112_winui_monitor.mst
+# WINARM (WG7): writing a file from the shell — the Win32 twin of the Mac's
+# `CocoaFile spit:contents:`, and the piece File In / Add to World waited on.
+# `WinIo` never shipped: it lives in the TEST file, written to prove the P5
+# resolver rather than to be a facility.
+113_winui_file.mst
+# WINARM (WG7-1): the Debugger — the native face of the VM's HALT loop. The
+# primary parks and publishes; this renders. Loads after 110 (the renderer it
+# draws on) and 93 (the view it registers into).
+114_winui_debugger.mst
+# WINARM (WG6c-3, finished in WG7): File In and Add to World. The two verbs
+# WG6c-3 named and could not build — File In needs "a fresh world, then your
+# file", which is WG7-3's restart, and both need 113's file writer.
+115_winui_filein.mst
+# WINARM (WG8/SM0): the PIXEL plane — the VM writes video memory rather than
+# sending it. Upstream's SM0 in the shape D3D11 allows, on the D3D device
+# `winui_render` already owns. Loads after 110, whose renderer holds the plane.
+116_winui_pixels.mst
+
+# WINARM (WG8): the cookbook's failure list. `docs/winui-cookbook.md`
+# is executed against a live window by `just gate-cookbook`; this is what
+# makes the result checkable rather than merely printed.
+117_winui_examples.mst
+
+# WINARM (WG9, upstream 6536294 S4): the Tests view. Runs the suite in the
+# PRIMARY through the worker seam and renders the result on a cell grid.
+# `world/86_sunit_runner.mst` is the far half and loads from world.list.
+118_winui_tests.mst
+
+# WINARM (WG10): the gallery. Life on the INDEXED plane, Julia on the direct
+# one — the demos that prove WG8 rather than decorate it. Loads after 116,
+# whose `drawGalleryOn:` hook it fills in.
+119_winui_demos.mst
+
+# WG12: the menu bar — File, World, Demos, View, Help. Built in Smalltalk
+# through the same WinApi FFI as everything else and serviced by the same
+# flag-and-drain; WM_COMMAND has been allowlisted since WG3.
+120_winui_menu.mst
+
+# WG14a: the declarative UI's PURE half — build, normalize, validate, diff.
+# No Win32 in it at all, so the whole model is checkable headless before a
+# window exists to hide a bug in. Contract adopted from wingui's spec+bind;
+# `docs/win_declarative_ui.md` is the decision record.
+122_winui_spec.mst
+
+# WG14b: where a node GOES — pure arithmetic over the spec, the space and
+# the font metrics, so the realizer that follows is only `create a control
+# per rect`. Containers are layout-only here, not windows; see the header.
+123_winui_layout.mst
+
+# WG14b: the realizer and the tool window it serves — a spec becomes real
+# controls in a second top-level window of the shell's own class, routed by
+# the same door. The lifecycle the Mac never abstracted, owned once.
+124_winui_toolwin.mst
+
+# WG14b's proof, and the shape every later tool copies: a title, a block that
+# answers a spec, a block that handles an event. No window code, no control
+# code, no layout code — that is the point. It shows its own patch/rebuild
+# counters, so `a click patches and does not rebuild` is checkable by looking.
+125_winui_demotool.mst
+
+# WG14c: the SPRITE EDITOR, the first real tool written in the declarative
+# UI. The document (44a_spritedoc.mst) is already in the world list on every
+# platform; this is only a face, and about a fifth the size of the Cocoa one
+# it replaces because the window, the layout and the lifecycle are owned
+# elsewhere. Its two surfaces are rgbaPane nodes.
+126_winui_spriteed.mst
+
+# WG14c: the Sound Editor migrated onto the declarative UI — the sliders the
+# Mac has, without its twelve hand-written mappings: the fields are a table
+# and ONE conversion serves every slider. The envelope is a damage-driven
+# rgbaPane; only the fields that change the curve repaint it. The WG13 grid
+# view (121) remains for now; this is the first-class face.
+127_winui_soundtool.mst
+
+# WG14c: HELP, the last of the Mac's four views to reach Windows. Its one
+# structural idea is copied exactly — every word lives in the file as
+# Smalltalk methods, so the app documents itself from any working directory.
+# The content is NOT copied: half the Mac's text describes Cocoa. The reader
+# is a `textGrid` pane, the declarative UI's third pane type and the first
+# thing to use it.
+128_winui_help.mst

@@ -406,6 +406,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "winui_host"
+version = "1.0.0"
+dependencies = [
+ "image_store",
+]
+
+[[package]]
+name = "winui_render"
+version = "1.0.0"
+dependencies = [
+ "windows",
+ "windows-numerics",
+]
+
+[[package]]
 name = "zerocopy"
 version = "0.8.52"
 source = "registry+https://github.com/rust-lang/crates.io-index"

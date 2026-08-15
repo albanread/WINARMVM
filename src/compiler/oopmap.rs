@@ -77,8 +77,7 @@ pub fn build_for_position(
         let Some(Assignment::Spill(slot)) = iv.assignment else {
             continue;
         };
-        let live =
-            (iv.start < position && iv.end > position) || exact_here.contains(&iv.vreg.0);
+        let live = (iv.start < position && iv.end > position) || exact_here.contains(&iv.vreg.0);
         if live {
             debug_assert!(
                 slot.0 < frame_slots,

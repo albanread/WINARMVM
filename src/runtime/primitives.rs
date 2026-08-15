@@ -1477,8 +1477,102 @@ pub static PRIMITIVES: &[PrimDesc] = &[
         can_fail: true,
     },
     // WINARM (P0 D5). See `prim_platform_name` for why the world needs this.
+    // ── WG11-W7: shared screen memory (upstream SM0) ────────────────────
+    //
+    // Upstream's ids, unchanged, which is the entire point: a game asks for
+    // `screenMemory` by number and must get the same thing on every machine.
+    // WINARM's own Windows primitives were moved to 300+ to make room (they
+    // had collided here, and Minesweeper crashed the VM proving it).
     PrimDesc {
         id: 266,
+        name: "GamePane>>overscan:",
+        f: prim_game_overscan,
+        argc: 1,
+        can_allocate: false,
+        can_fail: true,
+    },
+    PrimDesc {
+        id: 267,
+        name: "GamePane>>scrollTo:y:",
+        f: prim_game_scroll,
+        argc: 2,
+        can_allocate: false,
+        can_fail: true,
+    },
+    PrimDesc {
+        id: 268,
+        name: "GamePane>>openDirect:height:",
+        f: prim_game_open_direct,
+        argc: 2,
+        can_allocate: false,
+        can_fail: true,
+    },
+    PrimDesc {
+        id: 269,
+        name: "GamePane>>screenMemory",
+        f: prim_game_screen_memory,
+        argc: 0,
+        can_allocate: true,
+        can_fail: true,
+    },
+    PrimDesc {
+        id: 270,
+        name: "GamePane>>screenStride",
+        f: prim_game_screen_stride,
+        argc: 0,
+        can_allocate: false,
+        can_fail: true,
+    },
+    PrimDesc {
+        id: 271,
+        name: "GamePane>>textMemory",
+        f: prim_game_text_memory,
+        argc: 0,
+        can_allocate: true,
+        can_fail: true,
+    },
+    PrimDesc {
+        id: 272,
+        name: "GamePane>>textCols",
+        f: prim_game_text_cols,
+        argc: 0,
+        can_allocate: false,
+        can_fail: true,
+    },
+    PrimDesc {
+        id: 273,
+        name: "GamePane>>textRows",
+        f: prim_game_text_rows,
+        argc: 0,
+        can_allocate: false,
+        can_fail: true,
+    },
+    PrimDesc {
+        id: 274,
+        name: "Alien>>replaceFrom:to:with:startingAt:",
+        f: crate::runtime::alien::prim_alien_replace_from_to_with,
+        argc: 4,
+        can_allocate: false,
+        can_fail: true,
+    },
+    PrimDesc {
+        id: 275,
+        name: "GamePane>>paletteMemory",
+        f: prim_game_palette_memory,
+        argc: 0,
+        can_allocate: true,
+        can_fail: true,
+    },
+    PrimDesc {
+        id: 276,
+        name: "GamePane>>paletteGlobalBase",
+        f: prim_game_palette_global_base,
+        argc: 0,
+        can_allocate: false,
+        can_fail: true,
+    },
+    PrimDesc {
+        id: 300,
         name: "platformName",
         f: prim_platform_name,
         argc: 0,
@@ -1486,7 +1580,7 @@ pub static PRIMITIVES: &[PrimDesc] = &[
         can_fail: false,
     },
     PrimDesc {
-        id: 267,
+        id: 301,
         name: "wallClockMilliseconds",
         f: prim_wall_clock_milliseconds,
         argc: 0,
@@ -1501,7 +1595,7 @@ pub static PRIMITIVES: &[PrimDesc] = &[
     // three, and `docs/sprints/sprint_wg0_detail.md` D2 for the rule they
     // exist to keep ("the database is present, use it" — never transcribe).
     PrimDesc {
-        id: 268,
+        id: 302,
         name: "WinProbe class>>primWinkbAvailable",
         f: prim_winkb_available,
         argc: 0,
@@ -1509,7 +1603,7 @@ pub static PRIMITIVES: &[PrimDesc] = &[
         can_fail: false,
     },
     PrimDesc {
-        id: 269,
+        id: 303,
         name: "WinProbe class>>primWinkbConstant:",
         f: prim_winkb_constant,
         argc: 1,
@@ -1517,7 +1611,7 @@ pub static PRIMITIVES: &[PrimDesc] = &[
         can_fail: true,
     },
     PrimDesc {
-        id: 270,
+        id: 304,
         name: "WinProbe class>>primWinkbStructField:field:",
         f: prim_winkb_struct_field,
         argc: 2,
@@ -1525,7 +1619,7 @@ pub static PRIMITIVES: &[PrimDesc] = &[
         can_fail: true,
     },
     PrimDesc {
-        id: 271,
+        id: 305,
         name: "WinProbe class>>primWinkbStructSize:",
         f: prim_winkb_struct_size,
         argc: 1,
@@ -1539,7 +1633,7 @@ pub static PRIMITIVES: &[PrimDesc] = &[
     // as the four winkb rows above it: it answers an address and knows nothing
     // about windows.
     PrimDesc {
-        id: 272,
+        id: 306,
         name: "WinApi class>>primWndProcAddress",
         f: prim_wndproc_address,
         argc: 0,
@@ -1683,8 +1777,151 @@ fn prim_game_disc(vm: &mut VmState, args: &[Oop]) -> PrimResult {
 
 /// `present` (207): upload the CPU buffer and show the frame.
 fn prim_game_present(vm: &mut VmState, args: &[Oop]) -> PrimResult {
+    // WG11-W7: the VM's own count of presented frames, which picks which
+    // rotating buffer `screenMemory` hands out next. Advanced HERE, at the
+    // moment the frame is finished, rather than whenever the host gets round to
+    // drawing it — the two sides agree by counting the same ordered events, and
+    // never wait on each other.
+    crate::embed::advance_screen_frame();
     game_emit(vm, GameCommand::Present);
     PrimResult::Ok(args[0])
+}
+
+/// `overscan:` (266): grow the world buffer beyond the viewport, so a game can
+/// scroll a picture larger than the screen.
+fn prim_game_overscan(vm: &mut VmState, args: &[Oop]) -> PrimResult {
+    let Some(m) = smi_i64(args[1]) else {
+        return PrimResult::Fail;
+    };
+    if !(0..=256).contains(&m) {
+        return PrimResult::Fail;
+    }
+    game_emit(vm, GameCommand::SetOverscan { margin: m as u32 });
+    PrimResult::Ok(args[0])
+}
+
+/// `scrollTo:y:` (267): pan the viewport within the world. No redraw — the
+/// picture is already there; only which part of it is on screen changes.
+fn prim_game_scroll(vm: &mut VmState, args: &[Oop]) -> PrimResult {
+    let (Some(x), Some(y)) = (smi_i64(args[1]), smi_i64(args[2])) else {
+        return PrimResult::Fail;
+    };
+    game_emit(vm, GameCommand::Scroll { x, y });
+    PrimResult::Ok(args[0])
+}
+
+/// `paletteMemory` (275): the palette as an indirect `Alien` of RGBA quads —
+/// `viewport_h * 16` per-scanline entries then 240 globals. SM4.
+fn prim_game_palette_memory(vm: &mut VmState, _args: &[Oop]) -> PrimResult {
+    let Some((ptr, entries, _)) = crate::embed::palette_memory() else {
+        return PrimResult::Fail;
+    };
+    let bytes = entries.saturating_mul(4);
+    if bytes == 0 {
+        return PrimResult::Fail;
+    }
+    PrimResult::Ok(crate::runtime::alien::make_indirect_alien(
+        vm, ptr as u64, bytes,
+    ))
+}
+
+/// `paletteGlobalBase` (276): the entry index where the globals start, which is
+/// `viewport_h * 16`. ASKED FOR, never assumed — it is a function of the pane's
+/// HEIGHT, so a guest that hard-coded it would write globals into scanline 16's
+/// per-line colours.
+fn prim_game_palette_global_base(_vm: &mut VmState, _args: &[Oop]) -> PrimResult {
+    let Some((_, _, base)) = crate::embed::palette_memory() else {
+        return PrimResult::Fail;
+    };
+    PrimResult::Ok(SmallInt::new(base as i64).oop())
+}
+
+/// `openDirect:height:` (268): build the direct framebuffer — the rotating set
+/// of index buffers a demo writes pixels straight into. Upstream SM0.
+fn prim_game_open_direct(vm: &mut VmState, args: &[Oop]) -> PrimResult {
+    let (Some(w), Some(h)) = (smi_i64(args[1]), smi_i64(args[2])) else {
+        return PrimResult::Fail;
+    };
+    if !(1..=4096).contains(&w) || !(1..=4096).contains(&h) {
+        return PrimResult::Fail;
+    }
+    game_emit(
+        vm,
+        GameCommand::OpenDirect {
+            w: w as u32,
+            h: h as u32,
+        },
+    );
+    PrimResult::Ok(args[0])
+}
+
+/// `screenMemory` (269): the direct framebuffer as an indirect `Alien` — a
+/// LENGTH-BOUNDED view, so a demo writing pixels cannot walk off the end of the
+/// framebuffer however wrong its arithmetic is.
+///
+/// REFETCH IT EVERY FRAME. Presenting rotates the set, so the Alien answered
+/// here describes the buffer for the frame being drawn NOW; one kept across a
+/// present addresses the buffer the host is reading.
+fn prim_game_screen_memory(vm: &mut VmState, _args: &[Oop]) -> PrimResult {
+    let Some((ptr, stride, height)) = crate::embed::screen_memory() else {
+        return PrimResult::Fail;
+    };
+    let bytes = stride.saturating_mul(height);
+    if bytes == 0 {
+        return PrimResult::Fail;
+    }
+    PrimResult::Ok(crate::runtime::alien::make_indirect_alien(
+        vm, ptr as u64, bytes,
+    ))
+}
+
+/// `screenStride` (270): the framebuffer's ROW STRIDE in bytes, which is NOT
+/// its width. A demo addresses `fb[y * stride + x]`; assuming `y * width + x`
+/// draws a sheared picture, which is the single most likely mistake against
+/// this API and the reason the stride is a first-class question.
+fn prim_game_screen_stride(_vm: &mut VmState, _args: &[Oop]) -> PrimResult {
+    let Some((_, stride, _)) = crate::embed::screen_memory() else {
+        return PrimResult::Fail;
+    };
+    PrimResult::Ok(SmallInt::new(stride as i64).oop())
+}
+
+/// `textMemory` (271): the text plane's cell grid as an indirect `Alien` —
+/// `cols * rows` cells of four bytes, `[char, fg, bg, flags]`, row by row.
+/// Writing a character is a STORE; there is no command, which is why a HUD
+/// redrawn every frame costs nothing at all (SM1).
+///
+/// Unlike `screenMemory` this does NOT rotate — one grid, in place — so the
+/// Alien may be kept for the life of the pane. Fails when no pane is open.
+fn prim_game_text_memory(vm: &mut VmState, _args: &[Oop]) -> PrimResult {
+    let Some((ptr, cols, rows)) = crate::embed::text_memory() else {
+        return PrimResult::Fail;
+    };
+    let bytes = cols.saturating_mul(rows).saturating_mul(4);
+    if bytes == 0 {
+        return PrimResult::Fail;
+    }
+    PrimResult::Ok(crate::runtime::alien::make_indirect_alien(
+        vm, ptr as u64, bytes,
+    ))
+}
+
+/// `textCols` (272): the grid's width in CELLS. Cells are a fixed 6x8 pixels
+/// (a 5x7 glyph plus one column of spacing and one row of leading), so a
+/// 320x240 pane is 53x30 — and demos hard-code rows against exactly that.
+fn prim_game_text_cols(_vm: &mut VmState, _args: &[Oop]) -> PrimResult {
+    let Some((_, cols, _)) = crate::embed::text_memory() else {
+        return PrimResult::Fail;
+    };
+    PrimResult::Ok(SmallInt::new(cols as i64).oop())
+}
+
+/// `textRows` (273): the grid's height in cells. See `textCols`.
+fn prim_game_text_rows(_vm: &mut VmState, _args: &[Oop]) -> PrimResult {
+    let Some((_, _, rows)) = crate::embed::text_memory() else {
+        return PrimResult::Fail;
+    };
+    PrimResult::Ok(SmallInt::new(rows as i64).oop())
 }
 
 /// `run` (208): start the frame loop (the GUI timer begins pulling GameSteps).
@@ -1830,7 +2067,13 @@ fn prim_game_set_pane_size(vm: &mut VmState, args: &[Oop]) -> PrimResult {
     if w <= 0 || h <= 0 || w > 4096 || h > 4096 {
         return PrimResult::Fail;
     }
-    game_emit(vm, GameCommand::SetPaneSize { w: w as u32, h: h as u32 });
+    game_emit(
+        vm,
+        GameCommand::SetPaneSize {
+            w: w as u32,
+            h: h as u32,
+        },
+    );
     PrimResult::Ok(args[0])
 }
 
@@ -1860,7 +2103,18 @@ fn prim_game_text(vm: &mut VmState, args: &[Oop]) -> PrimResult {
     };
     let (r, g, b) = unpack_rgb(rgb);
     let scale = scale.clamp(1, 16) as u32;
-    game_emit(vm, GameCommand::Text { x, y, text, r, g, b, scale });
+    game_emit(
+        vm,
+        GameCommand::Text {
+            x,
+            y,
+            text,
+            r,
+            g,
+            b,
+            scale,
+        },
+    );
     PrimResult::Ok(args[0])
 }
 
@@ -1920,7 +2174,13 @@ fn prim_game_shader_param(vm: &mut VmState, args: &[Oop]) -> PrimResult {
     if !(0..8).contains(&index) {
         return PrimResult::Fail;
     }
-    game_emit(vm, GameCommand::ShaderParam { index: index as usize, value });
+    game_emit(
+        vm,
+        GameCommand::ShaderParam {
+            index: index as usize,
+            value,
+        },
+    );
     PrimResult::Ok(args[0])
 }
 
@@ -1933,7 +2193,7 @@ fn prim_game_set_frame_rate(vm: &mut VmState, args: &[Oop]) -> PrimResult {
     let Some(fps) = smi_i64(args[1]) else {
         return PrimResult::Fail;
     };
-    if fps < 1 || fps > 120 {
+    if !(1..=120).contains(&fps) {
         return PrimResult::Fail;
     }
     game_emit(vm, GameCommand::SetFrameRate { fps: fps as u32 });
@@ -1943,18 +2203,25 @@ fn prim_game_set_frame_rate(vm: &mut VmState, args: &[Oop]) -> PrimResult {
 /// `linePaletteAt:index:rgb:` (261): per-scanline palette override. Colour is a
 /// packed `0xRRGGBB` SmallInteger (see `unpack_rgb`).
 fn prim_game_line_palette(vm: &mut VmState, args: &[Oop]) -> PrimResult {
-    let (Some(line), Some(index), Some(rgb)) = (
-        smi_i64(args[1]),
-        smi_byte(args[2]),
-        smi_i64(args[3]),
-    ) else {
+    let (Some(line), Some(index), Some(rgb)) =
+        (smi_i64(args[1]), smi_byte(args[2]), smi_i64(args[3]))
+    else {
         return PrimResult::Fail;
     };
     if line < 0 || index == 0 || index > 15 {
         return PrimResult::Fail; // index 0 is transparent; per-line is 1..15
     }
     let (r, g, b) = unpack_rgb(rgb);
-    game_emit(vm, GameCommand::LinePalette { line: line as u32, index, r, g, b });
+    game_emit(
+        vm,
+        GameCommand::LinePalette {
+            line: line as u32,
+            index,
+            r,
+            g,
+            b,
+        },
+    );
     PrimResult::Ok(args[0])
 }
 
@@ -5596,18 +5863,29 @@ mod tests {
             (263, "Sound class>>playEffect:"),
             (264, "Worker class>>primEvalDoitQuiet:"),
             (265, "instVarAt:put:"),
-            (266, "platformName"),
-            (267, "wallClockMilliseconds"),
+            (266, "GamePane>>overscan:"),
+            (267, "GamePane>>scrollTo:y:"),
+            (268, "GamePane>>openDirect:height:"),
+            (269, "GamePane>>screenMemory"),
+            (270, "GamePane>>screenStride"),
+            (271, "GamePane>>textMemory"),
+            (272, "GamePane>>textCols"),
+            (273, "GamePane>>textRows"),
+            (274, "Alien>>replaceFrom:to:with:startingAt:"),
+            (275, "GamePane>>paletteMemory"),
+            (276, "GamePane>>paletteGlobalBase"),
+            (300, "platformName"),
+            (301, "wallClockMilliseconds"),
             // WINARM (WG0): winkb's data half (constants + struct offsets),
             // the one thing P5's resolver-only wiring left unreachable from
             // Smalltalk. See `prim_winkb_available`'s doc for the finding.
-            (268, "WinProbe class>>primWinkbAvailable"),
-            (269, "WinProbe class>>primWinkbConstant:"),
-            (270, "WinProbe class>>primWinkbStructField:field:"),
-            (271, "WinProbe class>>primWinkbStructSize:"),
+            (302, "WinProbe class>>primWinkbAvailable"),
+            (303, "WinProbe class>>primWinkbConstant:"),
+            (304, "WinProbe class>>primWinkbStructField:field:"),
+            (305, "WinProbe class>>primWinkbStructSize:"),
             // WINARM (WG2): the WndProc door's address — WG0 Δ 8's missing
             // channel, so a Smalltalk-built WNDCLASSW can name a Rust function.
-            (272, "WinApi class>>primWndProcAddress"),
+            (306, "WinApi class>>primWndProcAddress"),
         ];
         assert_eq!(
             PRIMITIVES.len(),
@@ -5675,7 +5953,11 @@ mod tests {
     /// The guest-side mirror is `frontend::codegen::check_limits`.
     #[test]
     fn prim_argc_within_buffer() {
-        let max = PRIMITIVES.iter().map(|d| d.argc as usize).max().unwrap_or(0);
+        let max = PRIMITIVES
+            .iter()
+            .map(|d| d.argc as usize)
+            .max()
+            .unwrap_or(0);
         assert!(
             max <= crate::oops::layout::MAX_PRIMITIVE_ARGS,
             "a primitive declares {max} args > MAX_PRIMITIVE_ARGS ({}) — it would \

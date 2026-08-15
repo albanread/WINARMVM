@@ -1,0 +1,184 @@
+"── 103_winui_ghost.mst — WG5c D5: the ghost line, for real ──────────────
+ docs/sprints/sprint_wg5c_detail.md D5, and §2.1's Workspace row weakness
+ #4: one ghosted line on an empty Workspace, telling a user who has never
+ met a Smalltalk workspace what the thing wants from them.
+
+ WHY THIS FILE EXISTS AT ALL: WG5a D4 shipped it broken. `EM_SETCUEBANNER`
+ is documented for SINGLE-LINE edit controls and returns 0 — refused — on a
+ multiline one. Nothing drew, nothing complained, and the test asserted the
+ TEXT the ghost would use rather than that anything appeared. So this file
+ is a re-implementation, and the rule that comes with it is: CHECK IT ON
+ SCREEN.
+
+ THE DESIGN, and the reason it is not the obvious one. The obvious approach
+ is to put the ghost in the pane as real greyed text and clear it on the
+ first keystroke. That makes the ghost part of the DOCUMENT, and the
+ document is what Do It evaluates and what Accept writes — so a user who
+ pressed Ctrl-D on an untouched Workspace would evaluate the hint, and any
+ bug in the `is the ghost showing?` flag would either evaluate it or discard
+ real typing.
+
+ So the ghost is an OVERLAY: a STATIC sibling raised above the pane, shown
+ only while the pane is empty. `text` stays empty because the ghost is not
+ text. It cannot be evaluated, cannot be saved, and cannot be lost — the
+ failure modes are gone by construction rather than guarded against."
+
+Object subclass: WinShell [
+    <classVars: GhostVisible>
+
+    WinShell class >> ghostName ^ <Symbol> [ ^#workspaceGhost ]
+
+    WinShell class >> buildGhost [
+        "A STATIC, because it draws text and takes no focus. SS_NOTIFY so a
+         click on it can be forwarded to the pane underneath — without it the
+         hint is a dead zone exactly where a new user is most likely to
+         click, which would teach them the opposite of what it says."
+        (self controlNamed: self ghostName) ifNotNil: [ :c | ^self ].
+        self
+            addControl: self ghostName
+            class: 'STATIC'
+            text: self ghostText
+            "SS_OWNERDRAW, so the hint is drawn GREY. A plain STATIC uses the
+             dialog text colour, which made the hint read as code the user had
+             not typed rather than as a hint — arguably worse than no hint at
+             all, since it invites a Do It on text that is not in the buffer.
+             Colouring a stock static means handling WM_CTLCOLORSTATIC, a
+             message the door does not carry; owner-draw reuses the
+             WM_DRAWITEM path WG4 D3 already built and proved."
+            style: ((((WinApi constant: 'WS_CHILD')
+                bitOr: (WinApi constant: 'SS_OWNERDRAW'))
+                bitOr: (WinApi constant: 'SS_NOTIFY'))
+                bitOr: (WinApi constant: 'WS_CLIPSIBLINGS'))
+            exStyle: 0.
+        (self controlNamed: self ghostName) ifNotNil: [ :c | c setFont: self monoFont ].
+        ^self
+    ]
+
+    WinShell class >> ghostRectIn: content <Array> ^ <Array> [
+        "Inset to sit where the pane's first line of text sits. A RichEdit
+         leaves a small internal margin and a border of its own; matching it
+         by eye is what makes the hint look like text IN the pane rather than
+         a label stuck on top of it.
+
+         Pure arithmetic over the content rect, so it is testable with no
+         window — the same treatment every other rect in this shell gets."
+        ^Array
+            with: (content at: 1) + 3
+            with: (content at: 2) + 2
+            with: ((content at: 3) - 6 max: 0)
+            with: 20
+    ]
+
+    WinShell class >> layoutGhost: content <Array> [
+        (self controlNamed: self ghostName) ifNotNil: [ :c |
+            c moveTo: (self ghostRectIn: content).
+            "Raise it ABOVE the pane. Sibling z-order is creation order, and
+             the pane may well have been created after the ghost — so being
+             on top has to be asked for rather than assumed."
+            WinApi setWindowPos: c handle after: 0
+                x: 0 y: 0 width: 0 height: 0
+                flags: (((WinApi constant: 'SWP_NOMOVE')
+                    bitOr: (WinApi constant: 'SWP_NOSIZE'))
+                    bitOr: (WinApi constant: 'SWP_NOACTIVATE')) ].
+        ^self
+    ]
+
+    "── How it draws ────────────────────────────────────────────────────
+     Here rather than in 94 for a compile-time reason: this method names
+     WinSyntax, which 100 defines, and 94 loads before 100. `drawItem:` in 94
+     reaches it by MESSAGE SEND, which is resolved at run time and so has no
+     such constraint — the same distinction that moved the source pane's
+     image read from 98 to 99."
+
+    WinShell class >> drawGhost: hdc <Integer> x: x <Integer> y: y <Integer>
+                      w: w <Integer> h: h <Integer> ^ <Integer> [
+        "WG5c D5's hint, in the pane's own background with GREY text. The grey
+         is what makes it read as a hint rather than as content — the whole
+         point of the word ghost.
+
+         The background is filled explicitly rather than left transparent:
+         the overlay sits on top of a RichEdit, and letting the pane show
+         through would put the hint over whatever the pane last drew there."
+        | rect brush old |
+        rect := self drawRectScratch.
+        self setRect: rect x: x y: y w: w h: h.
+        brush := WinApi createSolidBrush: 16rFFFFFF.
+        WinApi fillRect: hdc rect: rect brush: brush.
+        WinApi deleteObject: brush.
+        WinApi setBkMode: hdc mode: (WinApi constant: 'TRANSPARENT').
+        WinApi setTextColor: hdc color: (WinSyntax colorRefRed: 150 green: 150 blue: 150).
+        old := WinApi selectObject: hdc object: self monoFont.
+        WinApi drawText: hdc
+            text: (WinArena scratchUtf16: self ghostText) count: 0 - 1
+            rect: rect
+            format: ((WinApi constant: 'DT_LEFT')
+                bitOr: ((WinApi constant: 'DT_VCENTER') bitOr: (WinApi constant: 'DT_SINGLELINE'))).
+        WinApi selectObject: hdc object: old.
+        ^1
+    ]
+
+
+    "── When it shows ────────────────────────────────────────────────────"
+
+    WinShell class >> workspaceIsEmpty ^ <Boolean> [
+        "WM_GETTEXTLENGTH rather than reading the text: this is asked on every
+         drain pass, and the answer is one number rather than a copy of the
+         whole document."
+        | c |
+        c := self controlNamed: (self contentNameFor: #workspace).
+        c isNil ifTrue: [ ^false ].
+        ^(c send: (WinApi constant: 'WM_GETTEXTLENGTH') wParam: 0 lParam: 0) = 0
+    ]
+
+    WinShell class >> ghostShouldShow ^ <Boolean> [
+        "Empty, and the Workspace on screen. NOT `and unfocused`, which is
+         EM_SETCUEBANNER's rule and the wrong one here: the hint is a
+         TEACHING affordance, and the moment it is most wanted is exactly
+         when a new user has clicked into an empty pane and does not know
+         what to type. It goes on the first keystroke, which is §2.1's own
+         wording."
+        (self activeView == #workspace) ifFalse: [ ^false ].
+        ^self workspaceIsEmpty
+    ]
+
+    WinShell class >> serviceGhost ^ <Boolean> [
+        "Reconciled every drain pass and IDEMPOTENT — the same shape WG4 D4's
+         enablement had to be rewritten into after it got stuck permanently
+         off. A pass where nothing changed costs one WM_GETTEXTLENGTH and a
+         Boolean compare, and touches no window at all.
+
+         Answers whether it changed anything, so a gate can tell `it decided
+         not to` from `it never ran`."
+        | want |
+        want := self ghostShouldShow.
+        want = GhostVisible ifTrue: [ ^false ].
+        GhostVisible := want.
+        (self controlNamed: self ghostName) ifNotNil: [ :c | c show: want ].
+        ^true
+    ]
+
+    WinShell class >> ghostIsVisible ^ <Boolean> [
+        ^GhostVisible == true ]
+
+    WinShell class >> onGhostClicked [
+        "Forward the click to the pane the hint is sitting on, so the hint is
+         not a dead zone. Without this, clicking the one thing on screen that
+         invites you to type does nothing at all."
+        (self controlNamed: (self contentNameFor: #workspace)) ifNotNil: [ :c |
+            WinApi setFocus: c handle ].
+        ^self
+    ]
+
+    "── The old implementation, retired ──────────────────────────────────"
+
+    WinShell class >> installGhost [
+        "WG5a D4's EM_SETCUEBANNER, replaced. Kept as a method because 93
+         calls it when the Workspace is built, and turned into the thing that
+         actually works: build the overlay.
+
+         The cue banner is NOT sent any more. It returned 0 on this control —
+         the refusal was always there to be read, and nobody read it."
+        self buildGhost.
+        ^self
+    ]
+]

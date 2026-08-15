@@ -30,7 +30,11 @@ fn real_world_has_zero_type_findings() {
         "sanity: the real world has 100+ classes, got {}",
         model.classes.len()
     );
-    assert_eq!(errors, vec![], "the unannotated real world must have ZERO findings");
+    assert_eq!(
+        errors,
+        vec![],
+        "the unannotated real world must have ZERO findings"
+    );
 }
 
 #[test]
@@ -57,9 +61,9 @@ fn direct_api_reports_each_t1_error_kind() {
         "expected a MalformedTypeExpr from '<Cltn[]>', got {errors:#?}"
     );
     assert!(
-        errors
-            .iter()
-            .any(|e| matches!(e, TypeError::UndeclaredTypeName { name, .. } if name == "StillUndeclared")),
+        errors.iter().any(
+            |e| matches!(e, TypeError::UndeclaredTypeName { name, .. } if name == "StillUndeclared")
+        ),
         "expected an UndeclaredTypeName from '<StillUndeclared>', got {errors:#?}"
     );
     assert!(
@@ -109,9 +113,9 @@ fn direct_api_reports_each_t2_error_kind() {
 
     let (_model, errors) = typecheck_world(&dir).expect("typecheck the fixture");
     assert!(
-        errors
-            .iter()
-            .any(|e| matches!(e, TypeError::AssignmentNotSubtype { var_name, .. } if var_name == "x")),
+        errors.iter().any(
+            |e| matches!(e, TypeError::AssignmentNotSubtype { var_name, .. } if var_name == "x")
+        ),
         "expected an AssignmentNotSubtype from x := 'hello', got {errors:#?}"
     );
     assert!(
@@ -151,8 +155,14 @@ fn cli_reports_and_exits_zero_without_strict() {
     std::fs::write(dir.join("world.list"), "01_object.mst\n02_foo.mst\n").unwrap();
 
     let (status, stdout) = run(&["typecheck", "--world", dir.to_str().unwrap()]);
-    assert_eq!(status, 0, "advisory: findings must not fail the exit code by default");
-    assert!(stdout.contains("undeclared type name 'Missing'"), "got: {stdout}");
+    assert_eq!(
+        status, 0,
+        "advisory: findings must not fail the exit code by default"
+    );
+    assert!(
+        stdout.contains("undeclared type name 'Missing'"),
+        "got: {stdout}"
+    );
     assert!(stdout.contains("1 finding"), "got: {stdout}");
 
     std::fs::remove_dir_all(&dir).ok();
@@ -226,8 +236,14 @@ fn cli_json_output_is_well_formed_per_finding() {
     let (status, stdout) = run(&["typecheck", "--world", dir.to_str().unwrap(), "--json"]);
     assert_eq!(status, 0);
     let stdout = stdout.trim();
-    assert!(stdout.starts_with('[') && stdout.ends_with(']'), "got: {stdout}");
-    assert!(stdout.contains("\"kind\":\"UndeclaredTypeName\""), "got: {stdout}");
+    assert!(
+        stdout.starts_with('[') && stdout.ends_with(']'),
+        "got: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"kind\":\"UndeclaredTypeName\""),
+        "got: {stdout}"
+    );
 
     std::fs::remove_dir_all(&dir).ok();
 }

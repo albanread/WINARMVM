@@ -432,7 +432,7 @@ impl<'a> Parser<'a> {
                 let all_digits = format!("{int_digits}{frac_digits}");
                 let numerator = Self::intlit_to_literal(negative, 10, &all_digits);
                 let mut den_digits = String::from("1");
-                den_digits.extend(std::iter::repeat('0').take(frac_digits.len()));
+                den_digits.extend(std::iter::repeat_n('0', frac_digits.len()));
                 let denominator = Self::intlit_to_literal(false, 10, &den_digits);
                 Ok((
                     Expr::Send {
@@ -921,6 +921,7 @@ impl<'a> Parser<'a> {
         let mut function: Option<String> = None;
         let mut selector: Option<String> = None;
         let mut class: Option<String> = None;
+        let mut library: Option<String> = None;
         let mut class_side: Option<bool> = None;
         let mut ret: Option<String> = None;
         let mut args: Option<Vec<String>> = None;
@@ -932,7 +933,7 @@ impl<'a> Parser<'a> {
             let Tok::Keyword(k) = self.cur.0.clone() else {
                 return Err(self.error(
                     self.cur.1,
-                    "expected a keyword part (function:/selector:/class:/classSide:/ret:/args:) \
+                    "expected a keyword part (function:/selector:/class:/classSide:/library:/ret:/args:) \
                      in <primitive: FFI …>",
                 ));
             };
@@ -958,6 +959,10 @@ impl<'a> Parser<'a> {
                 "class:" => {
                     dup_check!(class, "class:");
                     class = Some(self.expect_ffi_sym("class:")?);
+                }
+                "library:" => {
+                    dup_check!(library, "library:");
+                    library = Some(self.expect_ffi_sym("library:")?);
                 }
                 "classSide:" => {
                     dup_check!(class_side, "classSide:");
@@ -986,10 +991,21 @@ impl<'a> Parser<'a> {
         let args = args.unwrap_or_default();
 
         match (function, selector) {
-            (Some(name), None) => Ok(FfiPragma::Function { name, ret, args }),
+            (Some(name), None) => Ok(FfiPragma::Function {
+                name,
+                library,
+                ret,
+                args,
+            }),
             (None, Some(selector)) => {
                 let class = class
                     .ok_or_else(|| self.error(start, "FFI 'selector:' pragma missing 'class:'"))?;
+                if library.is_some() {
+                    return Err(self.error(
+                        start,
+                        "FFI 'library:' applies to 'function:' pragmas only - a Tier 2                          'selector:' send resolves through the ObjC runtime, which has no                          library to name",
+                    ));
+                }
                 Ok(FfiPragma::Selector {
                     selector,
                     class,
@@ -1251,8 +1267,7 @@ impl<'a> Parser<'a> {
                         let param_ty = self.capture_type_annotation()?; // (D11)
                         let return_type = self.capture_return_type_annotation()?;
                         self.expect(&Tok::LBracket, "expected '['")?;
-                        let (primitive, ffi, temps, temp_types, body) =
-                            self.parse_method_body()?;
+                        let (primitive, ffi, temps, temp_types, body) = self.parse_method_body()?;
                         self.expect(&Tok::RBracket, "expected ']'")?;
                         methods.push(MethodNode {
                             pattern_selector: "|".to_string(),
@@ -1275,7 +1290,8 @@ impl<'a> Parser<'a> {
                             self.check_not_reserved(self.cur.1, &n)?;
                             names.push(n);
                             self.bump()?;
-                            inst_var_types.push(self.capture_type_annotation()?); // `| count <Integer> |` (D11)
+                            inst_var_types.push(self.capture_type_annotation()?);
+                            // `| count <Integer> |` (D11)
                         }
                         self.expect(&Tok::VBar, "expected closing '|' after instance variables")?;
                         inst_vars.extend(names);
@@ -1810,14 +1826,73 @@ mod tests {
         let m = &c.methods[0];
         assert_eq!(m.primitive, None);
         match &m.ffi {
-            Some(FfiPragma::Function { name, ret, args }) => {
+            Some(FfiPragma::Function {
+                name,
+                library,
+                ret,
+                args,
+            }) => {
                 assert_eq!(name, "mmap");
                 assert_eq!(ret, "g");
                 assert_eq!(args, &vec!["g", "g", "g", "g", "g", "g"]);
+                assert_eq!(
+                    library, &None,
+                    "a pragma naming no library must parse as None — that is what \
+                     keeps every pre-WG5b-2 pragma resolving exactly as it did"
+                );
             }
             other => panic!("expected FfiPragma::Function, got {other:?}"),
         }
         assert_eq!(m.body.len(), 0, "the pragma is the whole body — no ^expr");
+    }
+
+    /// WINARM (WG5b-2): `library:` names the exporting DLL. It is the only
+    /// way a guest can reach Rust that lives DOWNSTREAM of the VM -- winkb
+    /// knows Windows API functions and the fallback probe knows five system
+    /// DLLs, so a host service of one's own was previously unreachable from
+    /// Smalltalk at all.
+    #[test]
+    fn parse_ffi_pragma_names_its_library() {
+        let items = parse_file(
+            "Object subclass: X [ \
+                X class >> saveMethod: a1 [ \
+                    <primitive: FFI function: #MacvmSaveMethod \
+                        library: #'winui_host.dll' ret: #g args: #(g)> \
+                ] \
+            ]",
+        )
+        .unwrap();
+        let TopItem::ClassDef(c) = &items[0] else {
+            panic!()
+        };
+        match &c.methods[0].ffi {
+            Some(FfiPragma::Function { name, library, .. }) => {
+                assert_eq!(name, "MacvmSaveMethod");
+                assert_eq!(library.as_deref(), Some("winui_host.dll"));
+            }
+            other => panic!("expected FfiPragma::Function, got {other:?}"),
+        }
+    }
+
+    /// The same part on a Tier 2 pragma is REFUSED rather than ignored: an
+    /// ObjC selector send resolves through the ObjC runtime and has no
+    /// library to name, so accepting it silently would let someone write a
+    /// pragma that READS as if it targets a DLL and does not.
+    #[test]
+    fn parse_ffi_pragma_refuses_library_on_a_selector() {
+        let err = parse_file(
+            "Object subclass: X [ \
+                X class >> alpha: a1 [ \
+                    <primitive: FFI selector: #alpha: class: #NSColor \
+                        library: #'foo.dll' ret: #g args: #(f)> \
+                ] \
+            ]",
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:?}").contains("applies to 'function:' pragmas only"),
+            "the refusal must name the rule, got: {err:?}"
+        );
     }
 
     #[test]
@@ -2028,7 +2103,10 @@ mod tests {
             panic!("nested")
         };
         assert_eq!(elems.len(), 3);
-        assert!(matches!(elems[1], Expr::DynArray { .. }), "nested brace array");
+        assert!(
+            matches!(elems[1], Expr::DynArray { .. }),
+            "nested brace array"
+        );
     }
 
     #[test]
@@ -2074,7 +2152,10 @@ mod tests {
         let (TopItem::ClassDef(ca), TopItem::ClassDef(cb)) = (&a[0], &b[0]) else {
             panic!("both parse to a class def");
         };
-        assert_eq!(ca.inst_vars, cb.inst_vars, "ivar names identical, annotations gone");
+        assert_eq!(
+            ca.inst_vars, cb.inst_vars,
+            "ivar names identical, annotations gone"
+        );
         assert_eq!(ca.methods.len(), cb.methods.len());
         for (ma, mb) in ca.methods.iter().zip(&cb.methods) {
             assert_eq!(ma.pattern_selector, mb.pattern_selector);
@@ -2128,6 +2209,8 @@ mod tests {
         // Missing period BETWEEN statements is still garbage, not silence.
         assert!(parse_top_items("3 + 4  5").is_err());
         // Whitespace/comments-only answers an empty list, not an error.
-        assert!(parse_top_items(" \"just a comment\" ").expect("ok").is_empty());
+        assert!(parse_top_items(" \"just a comment\" ")
+            .expect("ok")
+            .is_empty());
     }
 }

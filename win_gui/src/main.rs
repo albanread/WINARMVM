@@ -108,6 +108,18 @@ fn main() {
     std::process::exit(1);
 }
 
+// WG4 D1: the two-VM handshake (docs/sprints/sprint_wg4_detail.md). A local
+// module, not a `#[path]` include: the Cocoa twin it mirrors is close but not
+// identical (the wake is a `PostMessageW`, not a run-loop hop), and a shared
+// copy would have to grow a platform switch inside it.
+#[cfg(windows)]
+mod boot;
+mod debugger;
+mod game;
+mod game_input;
+mod sound;
+mod text_overlay;
+
 #[cfg(windows)]
 #[path = "../../gui/src/control.rs"]
 mod control;
@@ -131,9 +143,9 @@ mod app {
     use windows::Win32::System::Threading::GetCurrentThreadId;
     use windows::Win32::UI::WindowsAndMessaging::{
         DispatchMessageW, GetDlgItem, GetMessageW, GetWindowThreadProcessId, IsWindow,
-        PeekMessageW, PostQuitMessage, PostThreadMessageW, SendMessageW, SetWindowPos,
-        TranslateMessage, HWND_TOP, MSG, PM_NOREMOVE, PM_REMOVE, SWP_NOMOVE, SWP_NOZORDER, WM_APP,
-        WM_QUIT,
+        PeekMessageW, PostMessageW, PostQuitMessage, PostThreadMessageW, SendMessageW,
+        SetWindowPos, TranslateMessage, HWND_TOP, MSG, PM_NOREMOVE, PM_REMOVE, SWP_NOMOVE,
+        SWP_NOZORDER, WM_APP, WM_QUIT,
     };
 
     use crate::control::CtlReq;
@@ -220,6 +232,267 @@ mod app {
         vm.exec(src)
     }
 
+    /// `1536` -> `"1.5K"`, base-1024, one decimal past the first suffix — the
+    /// same compact style the Mac's toolbar and the WKWebView GUI both use, so
+    /// a screenshot of either reads the same way (§2.1: this is identity, not
+    /// decoration).
+    fn format_bytes(n: u64) -> String {
+        const UNITS: [&str; 5] = ["B", "K", "M", "G", "T"];
+        let mut v = n as f64;
+        let mut u = 0;
+        while v >= 1024.0 && u < UNITS.len() - 1 {
+            v /= 1024.0;
+            u += 1;
+        }
+        if u == 0 {
+            format!("{n}{}", UNITS[0])
+        } else {
+            format!("{v:.1}{}", UNITS[u])
+        }
+    }
+
+    /// WG4 D2: sample the PRIMARY's live metrics and push one formatted readout
+    /// into the cluster.
+    ///
+    /// The sample is read off the shared snapshot the primary republishes each
+    /// beat — not asked for over the request seam, because a metric is a sample
+    /// and not a request (see `boot::MetricsSnapshot`). The five values travel
+    /// as ONE call, so the cluster can never show a mixture of two moments.
+    ///
+    /// Throttled to ~4 Hz: this runs from the pump, which turns as fast as
+    /// Windows delivers messages, and a resize drag would otherwise spend a VM
+    /// entry per frame formatting numbers nobody can read that fast.
+    /// WG7-2: the Monitor's roster, pushed into the guest ~1 Hz.
+    ///
+    /// `macvm::embed::monitor_snapshot()` is fed by each VM from its OWN
+    /// thread, so reading it crosses into nobody — which is the property that
+    /// makes a roster of live VMs safe to render at all.
+    ///
+    /// PUSHED, not pulled, and from the EXE rather than a DLL. The roster is a
+    /// process-wide `static`, and a cdylib that linked `macvm` separately would
+    /// get its OWN copy — a Monitor reading it would show one VM (its own) and
+    /// look plausible while being completely wrong. `win_gui` is the exe every
+    /// VM in this process was booted by, so it is the only place the roster is
+    /// the real one. That is the same "two copies is split state" pitfall
+    /// WG6d's design records for `winui_render`.
+    ///
+    /// ONE STRING for the WHOLE table each refresh — blast, don't patch, the
+    /// rule 60's editor note settled and `85_cocoamonitor.mst` states for this
+    /// view specifically. Rows are newline-separated, fields US-separated
+    /// (0x1F), the same wire format WG6b's Find already uses and the guest
+    /// already parses.
+    /// Where File In writes its buffer, and where the restart reads it.
+    ///
+    /// BOTH SIDES DERIVE IT, neither carries it: the guest builds the same
+    /// path from `GetTempPathW` and both read TMP/TEMP, so nothing has to
+    /// marshal a string through a private message's `wParam`. The coupling is
+    /// this constant, named in both files.
+    fn filein_scratch_path() -> std::path::PathBuf {
+        std::env::temp_dir().join("macvm-editor-filein.mst")
+    }
+
+    fn refresh_monitor(vm: &mut VmHandle) {
+        use std::time::{Duration, Instant};
+        static LAST: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+        {
+            let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(t) = *last {
+                if t.elapsed() < Duration::from_millis(1000) {
+                    return;
+                }
+            }
+            *last = Some(Instant::now());
+        }
+        const US: char = '\u{1f}';
+        let rows: Vec<String> = macvm::embed::monitor_snapshot()
+            .into_iter()
+            .map(|r| {
+                let m = &r.metrics;
+                // STALENESS is a column, not a footnote: a VM whose owner has
+                // stopped publishing shows its age rather than a confident,
+                // frozen, wrong number. Same argument the metrics cluster makes.
+                let age = match r.age_ms {
+                    Some(ms) if ms > 2000 => format!("{}s", ms / 1000),
+                    Some(_) => "live".to_string(),
+                    None => "—".to_string(),
+                };
+                let state = if !r.alive {
+                    "dead"
+                } else if r.busy {
+                    "busy"
+                } else {
+                    "idle"
+                };
+                format!(
+                    // ASCII ONLY in this table. The guest writes cells from a
+                    // String that is UTF-8 BYTES, and the renderer takes
+                    // CODEPOINTS — so a multi-byte character arrives as two
+                    // cells of raw bytes and shows as mojibake. A middot in
+                    // the GC column rendered as `0Â·0`, measured on screen.
+                    // The general fix is the UTF-8→codepoint conversion that
+                    // 106 already names as a known gap; not emitting non-ASCII
+                    // from here is the honest fix for THIS table.
+                    "{}{US}{}{US}{}{US}{}{US}{}{US}{}/{}{US}{}{US}{}",
+                    r.label,
+                    r.kind,
+                    state,
+                    age,
+                    format_bytes(m.eden_used + m.old_used),
+                    m.scavenges,
+                    m.full_gcs,
+                    m.bytes_allocated,
+                    m.compilations,
+                )
+            })
+            .collect();
+        // Escaped for a Smalltalk literal: the labels are ours, but a doit
+        // built by string concatenation is a place where "ours" is an
+        // assumption rather than a fact.
+        let payload = rows.join("\n").replace('\'', "''");
+        let _ = guarded_exec(vm, &format!("WinShell monitorRowsArrived: '{payload}'."));
+    }
+
+    fn refresh_metrics(
+        vm: &mut VmHandle,
+        snap: &crate::boot::MetricsSnapshot,
+        prev_alloc: &mut Option<u64>,
+    ) {
+        use std::time::{Duration, Instant};
+        static LAST: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+        {
+            let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(t) = *last {
+                if t.elapsed() < Duration::from_millis(250) {
+                    return;
+                }
+            }
+            *last = Some(Instant::now());
+        }
+        let Some((m, taken)) = (match snap.lock() {
+            Ok(g) => *g,
+            Err(e) => *e.into_inner(),
+        }) else {
+            return; // the primary has not published its first sample yet
+        };
+        // `old_reserved`, not `old_committed`: the committed figure starts small
+        // and grows on demand, so it reads as "this VM can only ever use 20 MiB"
+        // — misleadingly small against a 512 MiB reservation. Same choice the
+        // Mac's own cluster makes, and for the same reason.
+        let mem = format!(
+            "{}/{}",
+            format_bytes(m.eden_used + m.old_used),
+            format_bytes(m.eden_capacity + m.old_reserved)
+        );
+        let jit = if m.compilations == 0 {
+            "—".to_string()
+        } else {
+            format!("{}c", m.compilations)
+        };
+        let code = format!("{} nm", m.nmethods);
+        let alloc = match *prev_alloc {
+            // One beat is 250ms, so *4 approximates bytes/sec.
+            Some(prev) => format!(
+                "{}/s",
+                format_bytes(m.bytes_allocated.saturating_sub(prev).saturating_mul(4))
+            ),
+            None => "—".to_string(),
+        };
+        *prev_alloc = Some(m.bytes_allocated);
+        let gc = format!("{}·{}", m.scavenges, m.full_gcs);
+        // STALENESS, which is the whole point of reading a live primary rather
+        // than being fed literals: if the primary is wedged in a long doit or
+        // dead, its samples stop and the cluster says so instead of showing a
+        // confident, frozen, wrong number.
+        let age = taken.elapsed().as_millis();
+        let gc = if age > 2000 {
+            format!("{gc} (stale {}s)", age / 1000)
+        } else {
+            gc
+        };
+        let doit = format!(
+            "WinShell updateMetricsMem: '{mem}' jit: '{jit}' code: '{code}' alloc: '{alloc}' gc: '{gc}'."
+        );
+        let _ = guarded_exec(vm, &doit);
+    }
+
+    /// The UI window's HWND, cached for ONE purpose: the primary's wake.
+    ///
+    /// `shell_hwnd` deliberately never caches — `WinShell` is the authority and
+    /// a Rust copy goes stale the moment a doit closes the window. This is the
+    /// one exception, and it is safe for the same reason it is necessary: the
+    /// wake fires on the PRIMARY's thread, which may not touch the UI VM at
+    /// all, so it cannot ask. A stale handle costs nothing — `PostMessageW`
+    /// fails and answers 0, and the heartbeat still runs — whereas asking
+    /// across the seam would be exactly the shared-state coupling §2.2 forbids.
+    static UI_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+    /// Publish (or clear) the HWND the primary's wake posts to. Called from the
+    /// UI thread only.
+    fn publish_ui_hwnd(h: isize) {
+        UI_HWND.store(h, std::sync::atomic::Ordering::Release);
+    }
+
+    /// The primary's `InboxWakeFn`: get the UI thread to LOOK AT ITS INBOX.
+    ///
+    /// Runs on the primary's thread, so it does exactly one thing and that
+    /// thing is thread-safe by design: post `WM_APP_DRAIN`. The reply pump is
+    /// then an ordinary drain callee, which is what keeps §2.4a intact with a
+    /// second VM in the picture — the wake RECORDS that there is work; the
+    /// drain does it.
+    ///
+    /// It cannot call `win_wndproc::request_drain`: that reads and writes the
+    /// UI thread's own thread-locals (the requested flag and the posted latch),
+    /// and setting them from here would mark the wrong thread. The cost is that
+    /// a chatty primary posts more than the latch would allow; the WORK still
+    /// coalesces in the drain, which is the property that matters.
+    pub(crate) fn wake_ui_thread() {
+        let h = UI_HWND.load(std::sync::atomic::Ordering::Acquire);
+        if h == 0 {
+            return; // no window yet — the heartbeat will find the work
+        }
+        unsafe {
+            let _ = PostMessageW(
+                Some(HWND(h as *mut core::ffi::c_void)),
+                macvm::runtime::win_wndproc::WM_APP_DRAIN,
+                WPARAM(0),
+                LPARAM(0),
+            );
+        }
+    }
+
+    /// The two per-sprint escape hatches, applied to a UI VM that has already
+    /// loaded `winui.list`. Shared by both boot paths, because a hatch that
+    /// only worked on one of them would silently stop bisecting the moment the
+    /// default path changed — which is exactly what the hatches exist to
+    /// prevent.
+    fn apply_layer_hatches(vm: &mut VmHandle) {
+        // WG3: `tests_wg3.md` item 1 wants WG2's whole gate re-run "with the
+        // drain installed and NO CONTROL CREATED" — a themed list view
+        // repaints, a repaint sends `NM_CUSTOMDRAW`, and WG2's gate counts
+        // every message that crossed the door; controls also put white
+        // list-view pixels exactly where WG1's and WG2's gates read the
+        // window's background fill.
+        if matches!(
+            std::env::var("MACVM_WINUI_CONTROLS").as_deref(),
+            Ok("off") | Ok("0") | Ok("false")
+        ) {
+            if let Err(e) = guarded_exec(vm, "WinShell controlsEnabled: false.") {
+                eprintln!("macvm-winui: MACVM_WINUI_CONTROLS=off: {e}");
+            }
+        }
+        // WG4: the same hatch one sprint on. `gate-wg3` runs with the shell
+        // off, because its assertions are about WG3's three controls in WG3's
+        // three bands.
+        if matches!(
+            std::env::var("MACVM_WINUI_WG4").as_deref(),
+            Ok("off") | Ok("0") | Ok("false")
+        ) {
+            if let Err(e) = guarded_exec(vm, "WinShell wg4Enabled: false.") {
+                eprintln!("macvm-winui: MACVM_WINUI_WG4=off: {e}");
+            }
+        }
+    }
+
     /// Boot the UI VM **on the current thread**, then layer `winui.list`.
     fn boot_ui_vm() -> Result<VmHandle, String> {
         let world = world_dir();
@@ -242,13 +515,7 @@ mod app {
         // fill. So the older gates set this and go on testing the
         // configuration they were written against. Default is ON: this is the
         // sprint that adds controls.
-        if matches!(
-            std::env::var("MACVM_WINUI_CONTROLS").as_deref(),
-            Ok("off") | Ok("0") | Ok("false")
-        ) {
-            guarded_exec(&mut vm, "WinShell controlsEnabled: false.")
-                .map_err(|e| format!("MACVM_WINUI_CONTROLS=off: {e}"))?;
-        }
+        apply_layer_hatches(&mut vm);
         Ok(vm)
     }
 
@@ -271,7 +538,11 @@ mod app {
     /// worker and can only be *submitted* to), `eval` answers INLINE with the
     /// real `printString`. That is what makes the gate a script: `gui eval
     /// "WinShell clientWidth"` returns the number Win32 just gave Smalltalk.
-    pub fn drain_control_requests(vm: &mut VmHandle, rx: &Receiver<CtlReq>) {
+    pub fn drain_control_requests(
+        vm: &mut VmHandle,
+        rx: &Receiver<CtlReq>,
+        link: &mut Option<crate::boot::PrimaryLink>,
+    ) {
         while let Ok(req) = rx.try_recv() {
             let cmd = req.cmd.trim().to_string();
             let (verb, arg) = match cmd.split_once(' ') {
@@ -409,6 +680,49 @@ mod app {
                     let reply = send_verb(vm, arg);
                     let _ = req.reply.send(reply);
                 }
+                // WG7-3. `restart` replaces the primary WITHOUT touching the
+                // window: same HWND, same UI VM, same views, a brand new world
+                // behind them. It is the machinery File In and Add to World
+                // need — WG6c-3 left both unbuilt for want of it — and it runs
+                // HERE, on the control drain between dispatches, because
+                // joining a thread from inside the door would be a VM entry
+                // waiting on another VM.
+                // WG7-1: one command line into the parked halt loop —
+                // `step`, `over`, `finish`, `continue`, `abort`. Answers
+                // whether it was ACCEPTED, because a command sent while
+                // nothing is halted is dropped on purpose (see `send_command`).
+                "dbg" => {
+                    let ok = crate::debugger::send_command(arg.to_string());
+                    let _ = req.reply.send(if ok {
+                        format!("OK dbg {arg}")
+                    } else {
+                        "ERR dbg: nothing is halted".to_string()
+                    });
+                }
+                "dbgreport" => {
+                    let _ = req.reply.send(format!("OK {}", crate::debugger::report()));
+                }
+                "restart" => {
+                    let reply = match link.as_mut() {
+                        None => "ERR no primary to restart (single-VM path)".to_string(),
+                        Some(l) => {
+                            let before = l.hosted_id;
+                            match crate::boot::restart_primary(
+                                vm,
+                                l,
+                                world_dir(),
+                                std::sync::Arc::new(wake_ui_thread),
+                                crate::boot::PrimarySeed::none(),
+                            ) {
+                                Ok(()) => {
+                                    format!("OK restart hosted_id {} -> {}", before, l.hosted_id)
+                                }
+                                Err(e) => format!("ERR restart: {}", e.msg),
+                            }
+                        }
+                    };
+                    let _ = req.reply.send(reply);
+                }
                 // The control channel's own exit path. `sprint_wg1_detail.md`
                 // records why it exists: closing is TWO events — `WM_CLOSE`
                 // destroys the window and `WM_DESTROY` should `PostQuitMessage`
@@ -451,17 +765,8 @@ mod app {
         // SetWindowPos dispatches WM_SIZE into the door SYNCHRONOUSLY from
         // here — which is exactly the point: no `eval` is live, no door entry
         // is live, so the depth guard is 0 and the message crosses.
-        let ok = unsafe {
-            SetWindowPos(
-                hwnd,
-                Some(HWND_TOP),
-                0,
-                0,
-                w,
-                h,
-                SWP_NOMOVE | SWP_NOZORDER,
-            )
-        };
+        let ok =
+            unsafe { SetWindowPos(hwnd, Some(HWND_TOP), 0, 0, w, h, SWP_NOMOVE | SWP_NOZORDER) };
         match ok {
             Ok(()) => format!("OK resized to {w}x{h}"),
             Err(e) => format!("ERR SetWindowPos: {e}"),
@@ -685,8 +990,29 @@ mod app {
     /// paths print different lines and `just gate-wg2` asserts it saw the
     /// Smalltalk one and did NOT see this one. Safety and provability, rather
     /// than a choice between them.
-    pub fn pump(vmp: *mut VmHandle, rx: Option<&Receiver<CtlReq>>, window: HWND) -> i32 {
+    /// `inbox`: the primary -> UI channel, when the two-VM split is on (WG4
+    /// D1). `None` on the single-VM path, where there is no primary to hear
+    /// from — the older gates' configuration.
+    pub fn pump(
+        vmp: *mut VmHandle,
+        rx: Option<&Receiver<CtlReq>>,
+        window: HWND,
+        link: &mut Option<crate::boot::PrimaryLink>,
+    ) -> i32 {
         let mut msg = MSG::default();
+        // WG7-2: this VM's own row in the Monitor's roster. Registered here
+        // rather than at boot because this is the thread that will publish it,
+        // and a slot published from anywhere but its owner's thread is a heap
+        // read racing the mutator.
+        let ui_mon = macvm::embed::monitor_register("ui".into(), "ui");
+        // The previous allocation total, so ALLOC can report a RATE rather than
+        // a running sum — the Mac's own cluster does the same.
+        let mut prev_alloc: Option<u64> = None;
+        // WG11-W1: the Canvas pane's hwnd, learned once. Zero until the view is
+        // built; re-asked only while it is zero, so a running game costs no VM
+        // entry to find out where its pixels go.
+        let mut game_pane_hwnd: i64 = 0;
+        let mut game_mode_set = false;
         let mut had_window = !window.0.is_null();
         loop {
             let rc = unsafe { GetMessageW(&mut msg, None, 0, 0) }.0;
@@ -712,7 +1038,179 @@ mod app {
                         // running here (we are between dispatches on the one
                         // thread that dispatches), so this `&mut` is unique.
                         let vm: &mut VmHandle = unsafe { &mut *vmp };
-                        drain_control_requests(vm, rx);
+                        drain_control_requests(vm, rx, link);
+                    }
+                    // WG4 D1: the primary -> UI inbox, pumped HERE and nowhere
+                    // else. This is the Windows twin of the Mac's
+                    // `drain_perform` envelope loop, and the placement is the
+                    // whole of §2.4a's rule with a second VM in the picture:
+                    // `DispatchMessageW` has RETURNED, so the VM is quiescent
+                    // and provably not inside a callback. An envelope
+                    // dispatched from the door would be a nested VM entry —
+                    // the exact failure the drain exists to prevent.
+                    // WG4 D2: the metrics cluster, sampled off the primary.
+                    // Runs on the same "between dispatches" beat as the inbox
+                    // pump and throttles itself to ~4 Hz.
+                    // WG7-3: read through the LINK every pass rather than
+                    // holding a borrow across the loop. A restart replaces the
+                    // inbox and the metrics slot, and a pump still draining the
+                    // old ones would be draining a channel nobody sends on —
+                    // silent, and indistinguishable from a primary that has
+                    // stopped answering.
+                    if let Some(snap) = link.as_ref().map(|l| l.metrics.clone()) {
+                        let vm: &mut VmHandle = unsafe { &mut *vmp };
+                        refresh_metrics(vm, &snap, &mut prev_alloc);
+                    }
+                    // WG7-2: the Monitor's roster, on the same between-
+                    // dispatches beat and throttled to its own 1 Hz. This VM
+                    // publishes its OWN row first, from its own thread, which
+                    // is the same rule the primary follows on its beat.
+                    {
+                        let vm: &mut VmHandle = unsafe { &mut *vmp };
+                        ui_mon.publish(vm.metrics());
+                        refresh_monitor(vm);
+                    }
+                    // WG7-1: a fresh halt report. Pushed on the SAME beat and
+                    // for the same reason everything else is — the primary is
+                    // parked inside the halt, so it cannot be asked; it can
+                    // only have told us. That the pump is still running at all
+                    // while the VM it debugs is frozen is WG4 D1's two-VM
+                    // split doing its job.
+                    // WG6c-3/WG7: FILE IN — a fresh world, then the file the
+                    // guest just wrote. Acted on HERE because it joins the
+                    // primary's thread, which a wndproc must never do.
+                    if macvm::runtime::win_wndproc::take_filein_requested() {
+                        let vm: &mut VmHandle = unsafe { &mut *vmp };
+                        let path = filein_scratch_path();
+                        let msg = match link.as_mut() {
+                            None => "file-in needs the two-VM path".to_string(),
+                            Some(l) => match crate::boot::restart_primary(
+                                vm,
+                                l,
+                                world_dir(),
+                                std::sync::Arc::new(wake_ui_thread),
+                                crate::boot::PrimarySeed::file(path.clone()),
+                            ) {
+                                Ok(()) => format!("filed in {}", path.display()),
+                                Err(e) => format!("file-in FAILED: {}", e.msg),
+                            },
+                        };
+                        let _ = guarded_exec(
+                            vm,
+                            &format!("WinShell appendTranscript: 'editor: {msg}'."),
+                        );
+                    }
+                    // WG9-2: LOAD THE TEST CORPUS — a fresh world, then the
+                    // world's own SUnit classes, so the Tests view has the real
+                    // 8000-assertion corpus to run rather than an empty image.
+                    // Same door and the same reason as file-in: it joins the
+                    // primary's thread.
+                    // WG11-W1: the GAME FRAME. A presented frame is uploaded to
+                    // the Canvas pane and shown. Done HERE, between dispatches,
+                    // because the renderer's per-hwnd state is thread_local to
+                    // this thread and the frame was drawn on the primary's.
+                    //
+                    // The pane's hwnd is CACHED and re-asked only while it is
+                    // zero: a `guarded_eval` per frame would be sixty VM entries
+                    // a second to learn a number that changes once.
+                    // Learn the pane as soon as the game is RUNNING, not only
+                    // once a frame is pending: the input driver needs the hwnd
+                    // to scale the pointer, and waiting for the first Present
+                    // would make the first steps report (0,-1,-1,0).
+                    if crate::game::is_running() || crate::game::frame_pending() {
+                        let vm: &mut VmHandle = unsafe { &mut *vmp };
+                        if game_pane_hwnd == 0 {
+                            game_pane_hwnd = guarded_eval(vm, "WinShell canvasPaneHwnd")
+                                .ok()
+                                .and_then(|s| s.trim().parse::<i64>().ok())
+                                .unwrap_or(0);
+                        }
+                        if game_pane_hwnd != 0 {
+                            // ONCE: tell the Canvas a game owns it, so its own
+                            // WM_PAINT stops redrawing the shell's demo over
+                            // the game's frame. One VM entry per game, not
+                            // per frame.
+                            if !game_mode_set {
+                                let _ = guarded_exec(vm, "WinShell canvasMode: #game.");
+                                // The input driver cannot see this local, and
+                                // needs the pane to scale the pointer into
+                                // game pixels.
+                                crate::game::set_pane_hwnd(game_pane_hwnd);
+                                game_mode_set = true;
+                            }
+                            // HAND THE CANVAS BACK when the game ends, and clear
+                            // the latch — otherwise a second launch never
+                            // re-issues #game and the shell keeps the pane.
+                            if game_mode_set && !crate::game::is_running()
+                                && !crate::game::frame_pending()
+                            {
+                                let _ = guarded_exec(vm, "WinShell canvasMode: #plasma.");
+                                game_mode_set = false;
+                            }
+                            crate::game::upload_and_present(game_pane_hwnd);
+                        }
+                    }
+                    // WG11-W13: WIPE, THEN LAUNCH. The guest posted and did NOT
+                    // send the launch, precisely so these two happen in this
+                    // order on this one thread: the previous demo's layers go
+                    // first, and only then is the primary told to start the
+                    // next one. `stop()` is the whole teardown — the Mac gets
+                    // it by dropping its pane object; here it is spelled out.
+                    if macvm::runtime::win_wndproc::take_demo_requested() {
+                        crate::game::stop();
+                        game_pane_hwnd = 0;
+                        game_mode_set = false;
+                        let vm: &mut VmHandle = unsafe { &mut *vmp };
+                        let _ = guarded_exec(vm, "WinShell launchPendingDemo.");
+                    }
+                    if macvm::runtime::win_wndproc::take_loadtests_requested() {
+                        let vm: &mut VmHandle = unsafe { &mut *vmp };
+                        let msg = match link.as_mut() {
+                            None => "loading tests needs the two-VM path".to_string(),
+                            Some(l) => match crate::boot::restart_primary(
+                                vm,
+                                l,
+                                world_dir(),
+                                std::sync::Arc::new(wake_ui_thread),
+                                crate::boot::PrimarySeed::tests(),
+                            ) {
+                                Ok(()) => "test corpus loaded into a fresh world".to_string(),
+                                Err(e) => format!("loading the test corpus FAILED: {}", e.msg),
+                            },
+                        };
+                        let _ = guarded_exec(
+                            vm,
+                            &format!("WinShell testCorpusArrived: 'tests: {msg}'."),
+                        );
+                    }
+                    if crate::debugger::take_halt_arrived() {
+                        let vm: &mut VmHandle = unsafe { &mut *vmp };
+                        let payload = crate::debugger::report().replace('\u{27}', "''");
+                        let _ = guarded_exec(
+                            vm,
+                            &format!("WinShell haltArrived: '{payload}'."),
+                        );
+                    }
+                    if let Some(inbox) = link.as_ref().map(|l| &l.inbox) {
+                        // SAFETY: as above — between dispatches, on the one
+                        // thread that dispatches, no door running.
+                        let vm: &mut VmHandle = unsafe { &mut *vmp };
+                        while let Some(env) = inbox.poll() {
+                            // A payload-less envelope is a BARE NUDGE — the
+                            // primary's boot poke is exactly one, and its only
+                            // job is to make the wake fire so this loop runs.
+                            // Handing empty bytes to the unpickler raises `bad
+                            // pickle bytes` in the guest, and that recovered
+                            // error unwinds the dispatch and leaves the reply
+                            // routing broken for every LATER envelope — which
+                            // is how a working round trip silently stopped
+                            // working after the first one. Measured, then
+                            // fixed here.
+                            if env.bytes.is_empty() {
+                                continue;
+                            }
+                            let _ = vm.dispatch_hosted_envelope(env);
+                        }
                     }
                     if had_window && !unsafe { IsWindow(Some(window)) }.as_bool() {
                         // WG1's Δ 2 rule, still: a remembered HWND is not a
@@ -797,15 +1295,84 @@ mod app {
     }
 
     /// The default mode: open the window and pump until it goes away.
+    /// Is the two-VM split on? Default YES — it is §2.2's commitment 2 and the
+    /// reason the UI does not block. `MACVM_WINUI_PRIMARY=off` boots the single
+    /// VM WG1..WG3 were written against: those gates count MESSAGES, and the
+    /// primary's boot poke is one more `WM_APP_DRAIN` than their arithmetic
+    /// expects. Same shape of hatch, same reason, as `MACVM_WINUI_WG4`.
+    fn primary_enabled() -> bool {
+        !matches!(
+            std::env::var("MACVM_WINUI_PRIMARY").as_deref(),
+            Ok("off") | Ok("0") | Ok("false")
+        )
+    }
+
     pub fn run() -> i32 {
+        // WINARM (WG6d): THE JIT IS ON HERE UNLESS TOLD OTHERWISE.
+        //
+        // `VmOptions::from_env` defaults `MACVM_JIT` to `Off`, and that default
+        // is right for the reason its own comment gives: hundreds of pre-S10
+        // tests were verified against pure-interpreter behaviour and
+        // `test_vm()` reads the same env, so defaulting it on would let
+        // ambient shell state change unrelated test results.
+        //
+        // NONE OF THAT APPLIES TO A WINDOW. This process is not a test
+        // harness; it is a GUI whose every keystroke runs guest Smalltalk, and
+        // inheriting a test-suite default meant the whole world interpreted.
+        // Reported as "the UI is chronically slow", correctly, and the other
+        // half of that was a debug build.
+        //
+        // Set rather than forced: an explicit `MACVM_JIT` still wins, so
+        // `MACVM_JIT=off` remains the way to measure the interpreter.
+        if std::env::var_os("MACVM_JIT").is_none() {
+            std::env::set_var("MACVM_JIT", "threshold=20");
+        }
         ensure_message_queue();
-        let mut vm = match boot_ui_vm() {
-            Ok(vm) => Box::new(vm),
-            Err(e) => {
-                eprintln!("macvm-winui: {e}");
-                return 2;
+        // WG4 D1: the primary VM on a background thread, the UI VM in place on
+        // THIS one. The handshake parks until the primary is up and has
+        // registered us as its hosted peer, so by the time this returns the
+        // seam is live in both directions.
+        let (mut vm, wired) = if primary_enabled() {
+            match crate::boot::handshake_wire_vms(
+                world_dir(),
+                world_dir().join("winui.list"),
+                FatalMode::ExitProcess,
+                std::sync::Arc::new(wake_ui_thread),
+            ) {
+                Ok(w) => {
+                    let boxed = Box::new(w.ui_worker);
+                    println!(
+                        "macvm-winui: two VMs wired — primary on {:?}, UI worker id {} on main",
+                        w.link
+                            .thread
+                            .as_ref()
+                            .and_then(|t| t.thread().name().map(|n| n.to_string()))
+                            .unwrap_or_else(|| "?".into()),
+                        w.link.hosted_id,
+                    );
+                    (boxed, Some(w.link))
+                }
+                Err(e) => {
+                    eprintln!("macvm-winui: {}", e.msg);
+                    return 2;
+                }
+            }
+        } else {
+            match boot_ui_vm() {
+                Ok(vm) => (Box::new(vm), None),
+                Err(e) => {
+                    eprintln!("macvm-winui: {e}");
+                    return 2;
+                }
             }
         };
+        // The handshake loads `winui.list` itself, but the two env hatches
+        // WG3 and WG4 own are applied by `boot_ui_vm` — so apply them here too
+        // on the two-VM path, before anything opens a window.
+        if wired.is_some() {
+            apply_layer_hatches(&mut vm);
+        }
+        let _wired = wired;
         // WG2: the door's half of the arrangement. `publish_ui_vm` is the CG3
         // mechanism — a thread-local `*mut VmHandle` a trampoline can read with
         // no Rust lifetime to borrow against — and it is NOT
@@ -820,7 +1387,7 @@ mod app {
         //
         // Published BEFORE `openMain`, because `CreateWindowExW` calls the door
         // before it returns the HWND.
-        let vmp: *mut VmHandle = &mut *vm;
+        let vmp: *mut VmHandle = &mut **&mut vm;
         publish_ui_vm(vmp);
         println!(
             "macvm-winui: WndProc door published at 16r{:X} (allowlist {} messages, enabled={})",
@@ -863,6 +1430,12 @@ mod app {
         // state, so the door starts counting from a live, shown window.
         win_wndproc::reset_stats();
         let window = shell_hwnd(&mut vm);
+        // WG4 D1: publish the handle the PRIMARY's wake posts to. Until this
+        // runs the wake is a no-op and a reply only gets noticed when some
+        // other message happens to wake the pump — which works, and hides a
+        // latency bug behind whatever else the window was doing. Published
+        // once the window is real, cleared when it goes (below).
+        publish_ui_hwnd(window.0 as isize);
         // A window owned by another thread would never receive a dispatched
         // message and the app would look hung with nothing in any log, so
         // this is a refusal to start rather than a warning. No window at all
@@ -874,7 +1447,8 @@ mod app {
             return 3;
         }
 
-        let code = pump(vmp, rx.as_ref(), window);
+        let mut link = _wired;
+        let code = pump(vmp, rx.as_ref(), window, &mut link);
         println!("macvm-winui: {}", win_wndproc::stats_line());
         println!("macvm-winui: message loop ended, exit {code}");
         // The door outlives nothing: unpublish before the box drops, so a late
@@ -908,7 +1482,11 @@ mod app {
         // 1. snap with no window — a named error, not a hang and not a
         //    zero-byte PNG. Checked FIRST, while there genuinely is no window.
         let (tx, rrx) = std::sync::mpsc::sync_channel::<String>(1);
-        snap::snap_hwnd(shell_hwnd(&mut vm), "target/winui-selftest-nowindow.png", tx);
+        snap::snap_hwnd(
+            shell_hwnd(&mut vm),
+            "target/winui-selftest-nowindow.png",
+            tx,
+        );
         let reply = rrx.recv().unwrap_or_else(|_| "<no reply>".into());
         println!("SELFTEST snap-before-window: {reply}");
         if reply != "ERR no window yet" {
@@ -1191,17 +1769,28 @@ mod app {
             );
         }
 
-        /// The allowlist is six messages and `WM_PAINT` is not one of them.
+        /// The allowlist is a CLOSED set and this test is its second signature.
         /// Asserted from THIS side of the crate boundary as well, because the
-        /// number six is the design decision — "do not route every message" —
-        /// and a seventh appearing silently is how that decision gets lost.
+        /// count is the design decision — "do not route every message" — and
+        /// an entry appearing silently is how that decision gets lost.
+        ///
+        /// The set has grown with the sprints, deliberately each time: WG2's
+        /// six, WG3's five (WM_NOTIFY and the four modal-loop transitions),
+        /// then WG4's WM_PAINT and WM_DRAWITEM, and the mouse trio plus
+        /// WM_MOUSEWHEEL that FreeCell's dragging and the editor's scrolling
+        /// asked for — all under flag-and-drain, where a storm of arrivals
+        /// coalesces into one drain pass instead of one VM entry each.
         #[test]
         fn the_allowlist_is_the_messages_d1_names() {
             use macvm::runtime::win_wndproc as door;
-            // WG2's six, plus WG3's five: WM_NOTIFY (D3, how list/tree views
-            // speak) and the four modal-loop transitions D2 suppresses on.
-            assert_eq!(door::ALLOWLIST.len(), 11);
+            assert_eq!(door::ALLOWLIST.len(), 17);
             for m in [
+                door::WM_DRAWITEM,
+                door::WM_PAINT,
+                door::WM_MOUSEWHEEL,
+                door::WM_LBUTTONDOWN,
+                door::WM_LBUTTONUP,
+                door::WM_MOUSEMOVE,
                 door::WM_CLOSE,
                 door::WM_DESTROY,
                 door::WM_SIZE,
@@ -1216,10 +1805,9 @@ mod app {
             ] {
                 assert!(door::ALLOWLIST.contains(&m));
             }
-            assert!(!door::ALLOWLIST.contains(&0x000F), "WM_PAINT is WG4's");
             assert!(
-                !door::ALLOWLIST.contains(&0x0200),
-                "WM_MOUSEMOVE arrives in storms and must never cross"
+                !door::ALLOWLIST.contains(&0x0020),
+                "WM_SETCURSOR arrives in storms and must never cross"
             );
             // The drain's own plumbing is handled by the trampoline BEFORE the
             // allowlist and must never be routed to `WinShell`: a heartbeat
@@ -1264,6 +1852,10 @@ mod app {
 #[cfg(windows)]
 fn main() {
     let selftest = std::env::args().any(|a| a == "--selftest");
-    let code = if selftest { app::selftest() } else { app::run() };
+    let code = if selftest {
+        app::selftest()
+    } else {
+        app::run()
+    };
     std::process::exit(code);
 }

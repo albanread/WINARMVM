@@ -80,7 +80,11 @@ fn indexed_pane_renders_one_frame_headless_into_an_offscreen_texture() {
         4, // bytes per row for the single-pixel region we read
         metal::MTLRegion {
             origin: metal::MTLOrigin { x: 0, y: 0, z: 0 },
-            size: metal::MTLSize { width: 1, height: 1, depth: 1 },
+            size: metal::MTLSize {
+                width: 1,
+                height: 1,
+                depth: 1,
+            },
         },
         0,
     );
@@ -88,5 +92,8 @@ fn indexed_pane_renders_one_frame_headless_into_an_offscreen_texture() {
     assert_eq!(px[2], r, "R channel (BGRA[2])");
     assert_eq!(px[1], g, "G channel (BGRA[1])");
     assert_eq!(px[0], b, "B channel (BGRA[0])");
-    assert_eq!(px[3], 255, "opaque alpha — palette index 16 is not transparent");
+    assert_eq!(
+        px[3], 255,
+        "opaque alpha — palette index 16 is not transparent"
+    );
 }

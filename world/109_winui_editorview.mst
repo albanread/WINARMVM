@@ -1,0 +1,207 @@
+"── 109_winui_editorview.mst — WG6c-3: the Editor view ───────────────────
+ docs/sprints/sprint_wg6c_detail.md WG6c-3. WG6c-1 made the pane paint,
+ WG6c-2 made it type; this gives it a class to open and somewhere to put it
+ back.
+
+ A CLASS PICKER AND A BUFFER, and the split between where each gets its facts
+ is the one the Browser already records and this view keeps: the ROWS come
+ from the primary's LIVE hierarchy (the same `browserRows` the Browser and the
+ Outliner walk, filled by one `#uiReq` snapshot shared between all three), and
+ the TEXT comes from the IMAGE. So what you edit is what the next boot reads,
+ and what you pick is what is actually running.
+
+ SAVE IS A DIFF, not a rewrite, and it is `image_store::flows` doing it — the
+ same function the web GUI and the Mac call, reached through WG6c-3's
+ groundwork commit. A byte-identical method keeps its version, so there is no
+ history churn and no nmethod invalidation, and a method you deleted from the
+ buffer is removed. This file does none of that; it hands over a buffer.
+
+ IT HAS ITS OWN SAVE CELL rather than joining the bar's Accept, and that is a
+ deliberate narrowing. Accept's enablement is WG4 D4's focus predicate, which
+ asks Win32 whether the focused control is an editable multiline EDIT — and
+ this pane is not an EDIT at all, it is a child of our own window class. That
+ predicate has been the cause of two shipped regressions in this port already
+ (a verb that disabled itself on the way down, and a code pane that stopped
+ being a source surface when it became a RichEdit), so teaching it a third
+ shape belongs in a change that is ABOUT it, with its own gate, and not as a
+ side effect of adding a view.
+
+ FILE IN AND ADD TO WORLD LIVE IN 115, and the reason they are not here is
+ worth keeping: when this file was written they could not be built at all.
+ File In's contract is *a fresh world, then your file*, and `win_gui` booted
+ its primary once and held it for the process lifetime — there was no
+ teardown to build on. That was host machinery, not a view feature, and
+ inventing a weaker File In that merely evaluated the buffer into the CURRENT
+ world would have been a different verb wearing the same name.
+
+ WG7-3 built the restart and 113 built the file writer; 115 is the short file
+ between them. This view contributes the two BUTTONS and nothing else."
+
+Object subclass: WinShell [
+    <classVars: EditorViewClass EditorSaveCount EditorSaveMessage>
+
+    "── The panes ────────────────────────────────────────────────────────"
+
+    WinShell class >> editorViewPaneNames ^ <Array> [
+        "WG6c-3's own row, completed: Save, File In, Add to World. The last two
+         waited on WG7-3's restart and 113's file writer, and are the reason
+         this list changed rather than the view being rebuilt."
+        ^#(#editorClasses #editorSave #editorFileIn #editorAddWorld) ]
+
+    WinShell class >> buildEditorViewPanes [
+        (self controlNamed: #editorClasses) ifNotNil: [ :c | ^self ].
+        self addControl: #editorClasses class: 'LISTBOX' text: ''
+            style: (((WinApi constant: 'WS_CHILD')
+                bitOr: ((WinApi constant: 'WS_BORDER') bitOr: (WinApi constant: 'WS_VSCROLL')))
+                bitOr: (WinApi constant: 'LBS_NOTIFY'))
+            exStyle: 0.
+        #(#editorSave 'Save' #editorFileIn 'File In' #editorAddWorld 'Add to World')
+            pairsDo: [ :sym :label |
+                self addControl: sym class: 'BUTTON' text: label
+                    style: (((WinApi constant: 'WS_CHILD')
+                        bitOr: (WinApi constant: 'WS_VISIBLE'))
+                        bitOr: (WinApi constant: 'WS_TABSTOP'))
+                    exStyle: 0 ].
+        self editorViewPaneNames do: [ :n |
+            (self controlNamed: n) ifNotNil: [ :c | c setFont: self guiFont ] ].
+        "THE CUSTOM PANE LAST, and the order is load-bearing. A child window is
+         created at the TOP of its siblings' z-order, and this pane carries
+         WS_CLIPSIBLINGS — so anything created after it would sit above it and
+         clip its paint away entirely. That failure looks like nothing at all:
+         `paintCalls` climbs, `paintError` stays empty, and the screen is
+         blank. Measured exactly that way against the Workspace's own content
+         child, which is the same trap WG5c D5 hit with the ghost overlay."
+        self buildEditorPane.
+        ^self
+    ]
+
+    WinShell class >> editorViewRects: content <Array> ^ <Dictionary> [
+        "A class column on the left, a Save row across the top of the buffer,
+         the buffer filling the rest. Pure arithmetic over the content rect,
+         like every other layout in this shell, so it is exact rather than
+         approximate and needs no window to check."
+        | out x y w h col top btn |
+        out := Dictionary new.
+        x := content at: 1. y := content at: 2. w := content at: 3. h := content at: 4.
+        col := 220 min: (w // 2).
+        top := 30.
+        btn := 96.
+        out at: #editorClasses put: (Array with: x with: y with: col with: h).
+        "Three verbs, packed from the RIGHT so the widest one does not push the
+         others off the edge as the pane narrows."
+        out at: #editorAddWorld put: (Array
+            with: x + w - btn with: y with: btn with: 24).
+        out at: #editorFileIn put: (Array
+            with: x + w - (btn * 2) - 6 with: y with: btn with: 24).
+        out at: #editorSave put: (Array
+            with: x + w - (btn * 3) - 12 with: y with: btn with: 24).
+        out at: self editorPaneName put: (Array
+            with: x + col + 6
+            with: y + top
+            with: ((w - col - 6) max: 0)
+            with: ((h - top) max: 0)).
+        ^out
+    ]
+
+    WinShell class >> layoutEditorViewPanes: content <Array> [
+        | rects |
+        rects := self editorViewRects: content.
+        self editorViewPaneNames do: [ :n |
+            (self controlNamed: n) ifNotNil: [ :c | c moveTo: (rects at: n) ] ].
+        (self controlNamed: self editorPaneName)
+            ifNotNil: [ :c | c moveTo: (rects at: self editorPaneName) ].
+        ^self
+    ]
+
+    WinShell class >> showEditorViewPanes: aBool <Boolean> [
+        self editorViewPaneNames do: [ :n |
+            (self controlNamed: n) ifNotNil: [ :c | c show: aBool ] ].
+        (self controlNamed: self editorPaneName) ifNotNil: [ :c | c show: aBool ].
+        "The caret is a THREAD-wide resource, so a pane going off screen must
+         give it up — `syncEditorCaret` destroys it when the pane does not have
+         focus, and a hidden window never does."
+        aBool ifFalse: [ self syncEditorCaret ].
+        ^self
+    ]
+
+    WinShell class >> isEditorViewPane: aName <Symbol> ^ <Boolean> [
+        ^(self editorViewPaneNames indexOf: aName) > 0
+    ]
+
+    "── The picker, over the primary's own hierarchy ─────────────────────"
+
+    WinShell class >> rebuildEditorClasses [
+        "The SAME rows the Browser and the Outliner draw, from the one snapshot
+         `browserTreeArrived:` delivers — three views, one traversal of the
+         image. Names only: the Editor opens a whole class, so the indentation
+         the Browser uses to show inheritance would be describing something
+         this view cannot act on."
+        (self controlNamed: #editorClasses) isNil ifTrue: [ ^self ].
+        self listSet: #editorClasses
+            items: (self browserRows collect: [ :r | r at: 1 ]).
+        ^self
+    ]
+
+    WinShell class >> rebuildEditorClassesIfBuilt [
+        "Called from `browserTreeArrived:`, which fires whether or not this
+         view has ever been opened. No picker means nothing to fill, and that
+         is the ordinary state of a session that never touched the Editor."
+        (self controlNamed: #editorClasses) isNil ifTrue: [ ^self ].
+        ^self rebuildEditorClasses
+    ]
+
+    WinShell class >> onEditorClassChosen [
+        | c i rows |
+        c := self controlNamed: #editorClasses.
+        c isNil ifTrue: [ ^self ].
+        i := c send: (WinApi constant: 'LB_GETCURSEL') wParam: 0 lParam: 0.
+        i < 0 ifTrue: [ ^self ].
+        rows := self browserRows.
+        "The list was filled FROM these rows, but a snapshot can arrive between
+         the fill and the click — so the index is checked against the rows as
+         they are NOW rather than trusted."
+        i + 1 > rows size ifTrue: [ ^self ].
+        ^self openEditorOnClassNamed: ((rows at: i + 1) at: 1)
+    ]
+
+    WinShell class >> openEditorOnClassNamed: aName <String> [
+        "Text from the IMAGE, through WG6c-3's own host verb. A class the image
+         has never heard of answers an empty buffer rather than a refusal —
+         `classSourceFor:` documents why — so the pane opens empty and says so
+         instead of showing the last class's source under a new name."
+        | reply |
+        reply := WinHost classSourceFor: aName.
+        (reply at: 1) ifFalse: [
+            ^self appendTranscript: 'editor: ' , (reply at: 2) ].
+        EditorViewClass := aName.
+        self openEditorOn: (reply at: 2).
+        (reply at: 2) isEmpty ifTrue: [
+            self appendTranscript: 'editor: ' , aName , ' has no source in the image' ].
+        ^self
+    ]
+
+    WinShell class >> editorViewClass ^ <Object> [ ^EditorViewClass ]
+
+    "── Save ─────────────────────────────────────────────────────────────"
+
+    WinShell class >> saveEditorClass [
+        "The buffer, back through `flows::persist_editor_class`. It answers a
+         summary either way — including its refusal for a buffer with no class
+         in it — and that message goes to the transcript verbatim, because the
+         whole value of sharing the write path is reporting exactly what the
+         other two GUIs would."
+        | reply |
+        EditorSession current isNil ifTrue: [
+            ^self appendTranscript: 'editor: nothing open to save' ].
+        reply := WinHost persistClass: self editorText.
+        EditorSaveCount := self editorSaveCount + 1.
+        EditorSaveMessage := reply at: 2.
+        self appendTranscript: 'editor: ' , (reply at: 2).
+        ^self
+    ]
+
+    WinShell class >> editorSaveCount ^ <Integer> [
+        ^EditorSaveCount isNil ifTrue: [ 0 ] ifFalse: [ EditorSaveCount ] ]
+    WinShell class >> editorSaveMessage ^ <String> [
+        ^EditorSaveMessage isNil ifTrue: [ '' ] ifFalse: [ EditorSaveMessage ] ]
+]

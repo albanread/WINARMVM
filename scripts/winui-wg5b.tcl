@@ -1,0 +1,152 @@
+# winui-wg5b.tcl — drive the running macvm-winui and prove, from a script
+# rather than from someone's eyes, that WG5b's Browser and Accept are really
+# there: that the Accept cell exists and takes part in the same focus-driven
+# enablement the other two verbs do, that the browser's panes filled from the
+# primary's live hierarchy, and that the source pane now reads the IMAGE
+# rather than printing a promise about it.
+#
+#   MACVM_WINUI_CTL=7671 ./target/debug/macvm-winui.exe &
+#   ./target/debug/macvm rusttcl scripts/winui-wg5b.tcl
+#
+# Every line of the form `WG5B <key> <value...>` is read by `just gate-wg5b`.
+#
+# THE MECHANISM NOTE THAT STILL BINDS, and it is the one every winui script
+# leans on: A MESSAGE THAT REACHES SMALLTALK MUST ORIGINATE OUTSIDE EVERY VM
+# ENTRY. A view-bar click is therefore `gui send` (the host's control drain,
+# where the pump acts) and never `gui doit` — a doit that posted WM_COMMAND
+# to its own window would be declined by the busy guard, correctly, and the
+# test would be measuring the guard instead of the shell.
+#
+# WHAT THIS FILE DOES NOT DO: write the image. The write path is gated
+# separately, against a scratch image, by world/bench/wg5b_accept.mst. A
+# windowed run uses whatever MACVM_IMAGE_PATH names, and a gate that wrote
+# the developer's own image as a side effect of taking a screenshot would be
+# a genuinely nasty thing to leave behind.
+
+gui connect 7671
+puts "WG5B ping [gui ping]"
+puts "WG5B open [gui eval {WinShell isOpen}]"
+
+# ── the Accept cell exists, and is a BAR cell ───────────────────────────
+# Not decoration and not a view button: a bar cell, owner-drawn by the same
+# path that draws Do It and Print It. A cell that existed but was not drawn
+# by that path would look like a plain Win32 button in the middle of a
+# Fluent strip — present, and obviously wrong.
+puts "WG5B accept-exists [gui eval {(WinShell controlNamed: #accept) notNil}]"
+puts "WG5B accept-is-bar-cell [gui eval {WinShell isBarControl: #accept}]"
+
+# ── enablement follows FOCUS, exactly as WG4 D4 built it ────────────────
+# The claim is that Accept JOINED the existing rule rather than acquiring one
+# of its own. Proven in both directions, because a cell stuck ON looks
+# identical to a working one right up until the moment it matters.
+gui doit {WinApi setFocus: (WinShell controlNamed: #transcript) handle.}
+gui doit {WinShell checkFocusChanged.}
+puts "WG5B accept-on-readonly [gui eval {(WinShell controlNamed: #accept) isEnabled}]"
+
+# ── the bar painted its FIRST frame ─────────────────────────────────────
+# A BS_OWNERDRAW cell is drawn by nobody until someone invalidates it, and
+# for a while nobody did: the strip came up as a row of empty boxes and only
+# filled in when an unrelated event happened to dirty it. Reported as `where
+# is the rest of the app?`. Non-zero draw calls before anything has been
+# clicked is the whole assertion.
+puts "WG5B drawcalls-at-open [gui eval {WinShell drawCalls}]"
+
+# ── A VERB MUST SURVIVE BEING CLICKED ───────────────────────────────────
+# The bug this pins was as bad as a bug gets: clicking `Do It` gave the
+# BUTTON focus, a button is not a source surface, so enablement disabled it
+# — and a disabled button never sends WM_COMMAND. The verb switched itself
+# off on the way down and the click vanished. `no response from print it or
+# doit`, and correctly.
+#
+# WG4 D4's own tests missed it because they set focus synthetically and
+# asserted both directions, but never made the ONE transition a human makes
+# every time: source surface -> verb cell. Asserted here in exactly that
+# order, because the order IS the bug.
+gui doit {WinApi setFocus: (WinShell controlNamed: (WinShell contentNameFor: #workspace)) handle.}
+gui doit {WinShell checkFocusChanged.}
+puts "WG5B enabled-on-workspace [gui eval {WinShell commandsEnabled}]"
+gui doit {WinApi setFocus: (WinShell controlNamed: #doit) handle.}
+gui doit {WinShell checkFocusChanged.}
+puts "WG5B enabled-after-clicking-a-verb [gui eval {WinShell commandsEnabled}]"
+puts "WG5B doit-still-clickable [gui eval {(WinShell controlNamed: #doit) isEnabled}]"
+
+# ── and Do It really runs, through a real WM_COMMAND ────────────────────
+gui doit {(WinShell controlNamed: (WinShell contentNameFor: #workspace)) setText: '3 + 4 * 2'.}
+gui doit {WinApi setFocus: (WinShell controlNamed: (WinShell contentNameFor: #workspace)) handle.}
+gui drain now
+gui send "0 0x111 [gui eval {(WinShell controlNamed: #doit) id}] 0"
+gui drain now
+puts "WG5B doit-fired [gui eval {WinShell doItCount}]"
+
+# ── the Browser, over the primary's live hierarchy ──────────────────────
+# A real WM_COMMAND (0x111) from outside every VM entry, then the panes. The
+# class count is a RELATIONSHIP, never a frozen integer (WG2 Δ 14): the world
+# grows, and a gate that pinned today's count would fail on the next file.
+gui send "0 0x111 [gui eval {(WinShell controlNamed: #view_browser) id}] 0"
+gui drain
+puts "WG5B active-view [gui eval {WinShell activeView}]"
+# The panes fill from a REPLY, not from the switch: `refreshBrowser` ships a
+# #uiReq to the primary and the tree arrives on a later drain pass. THE WAIT
+# IS NOT HERE, and that is the finding: `gui sleep` blocks the APP, not just
+# this driver, so twelve rounds of sleep-then-drain delivered nothing at all
+# (0 refreshes after six seconds -- indistinguishable from a browser that
+# never filled). The recipe disconnects and waits in bash instead, letting
+# the window pump freely, then runs winui-wg5b-2.tcl. Split for that reason
+# alone.
+# ── WG5c D3: the code surfaces are RichEdits ────────────────────────────
+# Two claims, and the second is the one with history. First that the swap
+# happened at all — Msftedit.dll loaded and the pane really is RICHEDIT50W
+# rather than the EDIT fallback silently standing in. Second that
+# `isSourceSurface` was taught the new class IN THE SAME CHANGE: a code pane
+# that stops being a source surface greys out Do It / Print It / Accept,
+# which is a failure this port has now shipped twice and should not ship a
+# third time.
+puts "WG5C richedit-loaded [gui eval {WinShell richEditAvailable}]"
+puts "WG5C pane-class [gui eval {WinShell codePaneClass}]"
+puts "WG5C workspace-is-source [gui eval {(WinShell controlNamed: (WinShell contentNameFor: #workspace)) isSourceSurface}]"
+
+# ── WG5c D5: the ghost line, and the claim that matters ─────────────────
+# WG5a D4 shipped this broken — EM_SETCUEBANNER returns 0 on a multiline
+# control, nothing drew, and its test asserted the TEXT the ghost would use
+# rather than that anything appeared. So the assertions here are about the
+# WINDOW, and about the property that makes the overlay design safe: the
+# hint is NOT in the document. If it were, Do It would evaluate it.
+# BACK TO THE WORKSPACE FIRST — the browser-switch above left another view
+# active, and the hint is correctly hidden on any view that is not the
+# Workspace. Measured that way: `ghost-shown-when-empty false`, which was the
+# gate asking in the wrong view rather than the ghost failing.
+gui eval {WinShell switchToView: #workspace}
+gui doit {(WinShell controlNamed: (WinShell contentNameFor: #workspace)) setText: ''.}
+gui drain now
+puts "WG5D ghost-shown-when-empty [gui eval {WinShell ghostIsVisible}]"
+puts "WG5D buffer-really-empty [gui eval {WinShell workspaceText isEmpty}]"
+puts "WG5D doit-would-see-nothing [gui eval {WinShell workspaceTarget first isEmpty}]"
+puts "WG5D drew-without-error [gui eval {WinShell drawError}]"
+gui doit {(WinShell controlNamed: (WinShell contentNameFor: #workspace)) setText: 'x'.}
+gui drain now
+puts "WG5D ghost-gone-when-typed [gui eval {WinShell ghostIsVisible}]"
+
+# ── WG5c D4: the colour is applied ──────────────────────────────────────
+# Three claims. That runs are computed AND applied (a gate asserting only
+# that the tokenizer ran would repeat WG5a D4's mistake exactly — it checked
+# the text the ghost would use, never that anything appeared). That the
+# SELECTION SURVIVES, because a recolour that moves the caret puts the user's
+# next keystroke somewhere else and is worse than no colour at all. And that
+# a real EN_CHANGE routes to the debounce.
+gui doit {(WinShell controlNamed: (WinShell contentNameFor: #workspace)) setText: '"c" self foo: 3 + 4. ^Point new'.}
+gui drain now
+puts "WG5C runs-found [gui eval {(WinSyntax colouredRunsFor: (WinShell controlNamed: (WinShell contentNameFor: #workspace)) text) size}]"
+puts "WG5C runs-applied [gui eval {WinShell colourise: (WinShell contentNameFor: #workspace)}]"
+gui doit {WinShell select: (WinShell controlNamed: (WinShell contentNameFor: #workspace)) from: 4 to: 8.}
+gui doit {WinShell colourise: (WinShell contentNameFor: #workspace).}
+puts "WG5C selection-survives [gui eval {WinShell selectionOf: (WinShell controlNamed: (WinShell contentNameFor: #workspace))}]"
+
+# A REAL EN_CHANGE through the door. The wParam is built in Smalltalk because
+# this tcl's `expr` has no `<<` — found the hard way, after three "failures"
+# that were malformed sends rather than a broken route.
+puts "WG5C passes-before-idle [gui eval {WinShell colourPasses}]"
+gui send "0 0x111 [gui eval {(768 * 65536) + (WinShell controlNamed: (WinShell contentNameFor: #workspace)) id}] 0"
+gui drain now
+
+# Part 1 ends here. `just gate-wg5b` now waits in bash and runs
+# scripts/winui-wg5b-2.tcl, which reads the panes and closes the window.

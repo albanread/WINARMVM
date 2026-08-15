@@ -1,0 +1,146 @@
+"── 86_sunit_runner.mst — WG9: discovery, and a headless runner ──────────
+ upstream `6536294` S2/S3, ported. Two things `85_sunit.mst` deliberately does
+ not have: a way to FIND the test classes, and a way to run them that answers
+ rather than prints.
+
+ WHY FINDING MATTERS. `99_run_all.mst` names all sixty-odd test classes by hand,
+ which is fine for a file that is edited whenever a test file is added and is
+ useless to anything else — a Tests tab cannot read a list that only exists as
+ the body of a script. A test class someone writes in the Browser at three in
+ the afternoon has to be runnable at three-oh-one, and nothing will have edited
+ `99_run_all.mst` in between.
+
+ WHY ANSWERING MATTERS. `TestRunner report` prints to the Transcript and calls
+ `Smalltalk quit:`. Both are right for a cargo run and fatal for a GUI: a Tests
+ tab that ran the suite would kill the process it was drawing in. So the running
+ here is separated from the reporting, and what it answers is a STRING — because
+ the result has to cross the worker seam to the UI VM, and that seam carries
+ pickled payloads rather than object graphs.
+
+ THE LINE FORMAT is `Name|run|failed|firstFailure`, one class per line. Flat and
+ boring on purpose: it is parsed on the far side of a seam by code that cannot
+ see these classes, so anything richer would need a schema both halves agree on.
+ A `|` in a failure message would break it, which is why the message is the LAST
+ field — a split that keeps the remainder intact cannot be confused by one."
+
+Object subclass: TestRunner [
+
+    TestRunner class >> allTestClasses ^ <OrderedCollection> [
+        "Every class whose superclass chain reaches TestCase, TestCase itself
+         excluded — it is the base, not a suite, and running it would report a
+         zero-assertion pass that means nothing.
+
+         By the CHAIN rather than by direct superclass, so a project that puts
+         its own `MyProjectTestCase` in between still has its tests found. That
+         is not hypothetical: it is the first thing anyone does after writing
+         three test classes with the same setup."
+        | out |
+        out := OrderedCollection new.
+        ClassMirror allClasses do: [ :c |
+            (c ~~ TestCase and: [ self class: c inheritsFrom: TestCase ])
+                ifTrue: [
+                    "AND IT MUST WANT TO RUN HERE. `isEnabled` is how a class
+                     declines an image it cannot survive — the POSIX I/O tests
+                     on Windows call `Posix close: -1`, which does not fail,
+                     it ENDS THE PROCESS. Discovery that ignored this took the
+                     GUI down the first time it ran the world's own corpus."
+                    ([ c isEnabled ] on: Error do: [ :e | true ])
+                        ifTrue: [ out add: c ] ] ].
+        ^out
+    ]
+
+    TestRunner class >> disabledTestClasses ^ <OrderedCollection> [
+        "The ones that declined, so a Tests view can SAY which and why rather
+         than silently showing a shorter list than the image contains."
+        | out |
+        out := OrderedCollection new.
+        ClassMirror allClasses do: [ :c |
+            (c ~~ TestCase and: [ self class: c inheritsFrom: TestCase ])
+                ifTrue: [
+                    ([ c isEnabled ] on: Error do: [ :e | true ])
+                        ifFalse: [ out add: c ] ] ].
+        ^out
+    ]
+
+    TestRunner class >> class: aClass inheritsFrom: anAncestor ^ <Boolean> [
+        "Walks up, stopping at nil. PURE over two classes, so the rule is
+         checkable without running a single test."
+        | c |
+        c := aClass.
+        [ c isNil ] whileFalse: [
+            c == anAncestor ifTrue: [ ^true ].
+            c := c superclass ].
+        ^false
+    ]
+
+    TestRunner class >> namesOfTestClasses ^ <OrderedCollection> [
+        ^self allTestClasses collect: [ :c | c name asString ] ]
+
+    TestRunner class >> runOne: aClass ^ <Array> [
+        "One class, its own TestResult. `{class name. run. failed. failures}`.
+
+         ITS OWN result, not the shared `Total`: a Tests tab shows a row per
+         class, and a shared counter can only say how many assertions ran in
+         the whole image. It also means one class can be re-run on its own
+         after a fix, which is the loop anyone actually works in."
+        | r |
+        r := TestResult new.
+        r init.
+        [ aClass runWith: r ] on: Error do: [ :e |
+            "A test that RAISES rather than failing an assertion would abort
+             the sweep and take every later class with it. Recorded as a
+             failure of this class instead — the same reason the cookbook
+             wraps each block, and the same consequence if it did not."
+            r fail: aClass name asString , ': raised ' , e messageText ].
+        ^Array with: aClass name asString with: r runCount with: r failCount with: r failures
+    ]
+
+    TestRunner class >> runAllReporting ^ <String> [
+        "Every discovered class, one line each. Answers rather than prints, and
+         never quits — see the file note."
+        ^self reportFor: self allTestClasses
+    ]
+
+    TestRunner class >> reportFor: classes <Collection> ^ <String> [
+        | s |
+        s := WriteStream on: String new.
+        classes do: [ :c | | row |
+            row := self runOne: c.
+            s nextPutAll: (row at: 1);
+              nextPut: $|; nextPutAll: (row at: 2) printString;
+              nextPut: $|; nextPutAll: (row at: 3) printString;
+              nextPut: $|; nextPutAll: (self firstFailureOf: (row at: 4)).
+            s nl ].
+        ^s contents
+    ]
+
+    TestRunner class >> firstFailureOf: failures <Collection> ^ <String> [
+        "The FIRST failure only, and one line of it. A class with forty broken
+         assertions has one broken idea in it nine times out of ten, and forty
+         lines in a pane is how the tenth case gets missed too.
+
+         Newlines and pipes are flattened rather than escaped: this crosses a
+         line-oriented seam, and a failure message that split its own row would
+         be a parse bug reported as a test result."
+        | raw s |
+        failures isEmpty ifTrue: [ ^'' ].
+        raw := failures first.
+        s := WriteStream on: String new.
+        raw do: [ :ch |
+            (ch = Character nl or: [ ch asInteger = 13 or: [ ch = $| ] ])
+                ifTrue: [ s nextPut: $  ]
+                ifFalse: [ s nextPut: ch ] ].
+        ^s contents
+    ]
+
+    TestRunner class >> runNamed: aName <String> ^ <String> [
+        "One class by NAME, for the Tests tab's re-run-this-one. Answers the
+         same line format so both paths parse identically — a second format for
+         the single-class case is a second parser and a second thing to drift."
+        | hit |
+        hit := nil.
+        self allTestClasses do: [ :c | c name asString = aName ifTrue: [ hit := c ] ].
+        hit isNil ifTrue: [ ^aName , '|0|1|no such test class in this image' , (String with: Character nl) ].
+        ^self reportFor: (Array with: hit)
+    ]
+]

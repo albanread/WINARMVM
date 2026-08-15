@@ -1,0 +1,165 @@
+"85_sunit.mst — SUnit-lite, IN THE WORLD (WG9, upstream 6536294 S1).
+
+ It lived in `world/tests/` and was loaded only by `tests/it_world.rs`, which
+ made it part of the HARNESS rather than part of the language. That was fine
+ while the only tests were ours and the only runner was cargo. It stopped being
+ fine the moment the shell grew a Browser that compiles classes into a running
+ image: a TestCase someone writes in the Browser has to be a real class in the
+ primary, and the Tests tab has to be able to find and run it there.
+
+ So it loads from `world.list` now, for everyone — `macvm run`, `macvm repl`,
+ the web GUI, the Windows shell, and the test harness alike. `tests.list` no
+ longer carries a copy; two identical definitions would shadow each other and
+ hide any drift between them.
+
+ NO EXCEPTIONS IN v1 (SPEC §1.3): error:/DNU kills the whole process, so
+ assertion failures are RECORDED via TestResult, not raised — only a genuinely
+ erroneous test aborts the run outright. The runner prints each test's name
+ before running it, so the culprit is identifiable from stdout even then."
+
+Object subclass: TestResult [
+    | runCount failCount failures |
+    init [
+        runCount := 0.
+        failCount := 0.
+        failures := OrderedCollection new.
+    ]
+    ranOne [
+        runCount := runCount + 1
+    ]
+    fail: aString [
+        failCount := failCount + 1.
+        failures add: aString.
+    ]
+    runCount [
+        ^runCount
+    ]
+    failCount [
+        ^failCount
+    ]
+    failures [
+        ^failures
+    ]
+    isSuccess [
+        ^failCount = 0
+    ]
+    printOn: s [
+        s nextPutAll: runCount printString.
+        s nextPutAll: ' run, '.
+        s nextPutAll: failCount printString.
+        s nextPutAll: ' failed'
+    ]
+]
+
+Object subclass: TestCase [
+    | result current |
+    result: r [
+        result := r
+    ]
+    "Hook for subclasses that need per-instance setup; no-op by default."
+    init [
+    ]
+    "ranOne counts ASSERTIONS, not test methods (tests_s06.md's target
+     '~215 assertions'/'report prints the assertion count' — the pinned
+     pseudocode's `ranOne` placement inside runTest:do: would only count
+     ~70 methods across the 15 classes, well under the >= 200 gate).
+     Counts on both pass and fail, mirroring 'N run, M failed' where M<=N."
+    assert: aBool [
+        result ranOne.
+        aBool == true ifFalse: [ result fail: current , ': assertion failed' ]
+    ]
+    assert: aBooleanOrBlock description: aString [
+        "SUnit's OWN labelled assertion, and it has to exist here or the
+         message resolves to `Object >> assert:description:`
+         (80_numeric_completion.mst) — which is a general-purpose assertion
+         that SIGNALS. Inside a TestCase that is doubly wrong: the failure
+         aborts the whole suite run instead of being recorded and counted,
+         and `ranOne` is never called, so the assertions do not appear in the
+         `N run` total at all.
+
+         Found the way it always is: fourteen new tests left the run count
+         unchanged at 7873, and a single wrong expectation in one of them
+         killed all 7873 rather than reporting `1 failed`. Both symptoms, one
+         missing method.
+
+         Takes a Boolean or a block, matching Object's, so the two forms stay
+         interchangeable for anyone who has already written either."
+        | ok |
+        ok := aBooleanOrBlock.
+        (ok == true or: [ ok == false ]) ifFalse: [ ok := aBooleanOrBlock value ].
+        result ranOne.
+        ok == true ifFalse: [ result fail: current , ': ' , aString ]
+    ]
+    assert: a equals: b [
+        result ranOne.
+        a = b ifFalse: [
+            result fail: current , ': expected ' , b printString , ' got ' , a printString ]
+    ]
+    assert: a equals: b description: aString [
+        "WG10. `assert:equals:` reports what it got, which is most of what you
+         want; this adds what you were CHECKING, which is the rest. Written the
+         moment a Life test wanted to say `a blinker keeps three cells` and had
+         to choose between the value and the reason.
+
+         Both, and in that order: the description first because it says what
+         broke, the numbers after because they say how."
+        result ranOne.
+        a = b ifFalse: [
+            result fail: current , ': ' , aString
+                , ' (expected ' , b printString , ', got ' , a printString , ')' ]
+    ]
+    deny: aBool [
+        self assert: aBool == false
+    ]
+    runTest: name do: aBlock [
+        current := name asString.
+        Transcript show: '  ' , current.
+        Transcript cr.
+        [ aBlock value ] ensure: [ ]
+    ]
+    TestCase class >> isEnabled ^ <Boolean> [
+        "Should this class run IN THIS IMAGE? True unless a subclass says
+         otherwise.
+
+         WG9-2, and it exists because discovery found a real hole. The world's
+         platform gating lived in `99_run_all.mst` as guards around each
+         `TestRunner run:` line — bookkeeping a SCRIPT can see and a DISCOVERY
+         cannot. `TestRunner allTestClasses` sweeps the image by superclass
+         chain, found `PosixIoTests` on Windows, and ran `Posix close: -1`,
+         which took the whole process down: a GUI that vanished when you
+         clicked Run Tests.
+
+         So the condition belongs ON THE CLASS, where anything that can find
+         the class can also find its answer — a script, a Tests view, a future
+         runner nobody has written. The runner script's guards stay as they
+         are; they are now a second expression of the same fact rather than the
+         only one."
+        ^true
+    ]
+
+    TestCase class >> runWith: aResult [
+        | c |
+        c := self new.
+        c result: aResult.
+        c init.
+        c runAll.
+        ^c
+    ]
+]
+
+Object subclass: TestRunner [
+    <classVars: Total>
+    TestRunner class >> start [
+        Total := TestResult new.
+        Total init.
+    ]
+    TestRunner class >> run: aClass [
+        Transcript show: aClass name asString; cr.
+        aClass runWith: Total.
+    ]
+    TestRunner class >> report [
+        Transcript show: Total printString; cr.
+        Total failures do: [:f | Transcript show: f; cr ].
+        Smalltalk quit: (Total isSuccess ifTrue: [ 0 ] ifFalse: [ 1 ])
+    ]
+]

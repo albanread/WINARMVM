@@ -408,7 +408,10 @@ pub fn ic_transition(
                         pairs.at_put(2 * arity as usize, rcvr_klass.oop());
                         pairs.at_put(2 * arity as usize + 1, m.oop());
                         // The appending dispatch IS the new arm's first hit.
-                        pairs.at_put(2 * IC_POLY_MAX_PAIRS + arity as usize, SmallInt::new(1).oop());
+                        pairs.at_put(
+                            2 * IC_POLY_MAX_PAIRS + arity as usize,
+                            SmallInt::new(1).oop(),
+                        );
                         // `pairs` itself may be old, the new pair young.
                         crate::memory::store::post_write_barrier(vm, pairs.as_mem());
                         ic.set_poly(vm, pairs, epoch); // row 9

@@ -233,7 +233,12 @@ impl Waker {
             return;
         };
         unsafe {
-            let _ = PostMessageW(Some(HWND(hwnd as *mut _)), WM_VM_DRAIN, WPARAM(0), LPARAM(0));
+            let _ = PostMessageW(
+                Some(HWND(hwnd as *mut _)),
+                WM_VM_DRAIN,
+                WPARAM(0),
+                LPARAM(0),
+            );
         }
     }
 }
@@ -275,7 +280,7 @@ extern "system" fn wndproc(window: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRES
                 LRESULT(0)
             }
             WM_COMMAND => {
-                dispatch_menu_command((w.0 & 0xffff) as usize);
+                dispatch_menu_command(w.0 & 0xffff);
                 LRESULT(0)
             }
             // Keep the web view filling the client area.
@@ -295,8 +300,7 @@ extern "system" fn wndproc(window: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRES
             WM_SETFOCUS => {
                 CONTROLLER.with(|c| {
                     if let Some(controller) = c.borrow().as_ref() {
-                        let _ =
-                            controller.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
+                        let _ = controller.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
                     }
                 });
                 LRESULT(0)

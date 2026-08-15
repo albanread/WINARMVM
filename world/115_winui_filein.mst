@@ -1,0 +1,131 @@
+"── 115_winui_filein.mst — WG6c-3, finished: File In and Add to World ────
+ The two verbs WG6c-3 named and could not build. Its own note recorded why:
+ File In's contract is *a fresh world, then your file*, and `win_gui` booted
+ its primary once and held it for the process lifetime. WG7-3 built the
+ restart; `WinFile` (113) built the write; this is the ten lines between them.
+
+ THE CONTRACT, and it is the whole point rather than a detail: File In does
+ not evaluate your buffer into the CURRENT world. It restarts the primary from
+ its clean boot state and loads your file on top — so the same file filed in
+ twice behaves identically both times, and a class you renamed does not leave
+ its old self behind. `68_cocoaeditor.mst` states it the same way, and a
+ weaker File In that merely evaluated the buffer would be a different verb
+ wearing the same name.
+
+ THE PATH IS DERIVED, NOT CARRIED. The guest writes to
+ `<temp>/macvm-editor-filein.mst` and the host restarts on the same path,
+ computed its own way (`GetTempPathW` here, `std::env::temp_dir()` there —
+ both read TMP/TEMP). Nothing marshals a string through a private message's
+ `wParam`, and the coupling is one filename named in both files.
+
+ WHY A PRIVATE MESSAGE. The guest cannot restart the primary — it IS one of
+ the two VMs involved — so what crosses is a REQUEST. `WM_APP_FILEIN` is
+ recorded by the trampoline and acted on by the pump between dispatches,
+ exactly as `WM_APP_DRAIN` is, and for a sharper version of the same reason:
+ the work is *join the primary's thread*, which a wndproc must never do."
+
+Object subclass: WinShell [
+
+    WinShell class >> fileInPath ^ <String> [
+        "One filename, named identically in `win_gui/src/main.rs`'s
+         `filein_scratch_path`. If one moves, both move."
+        ^self tempDirectory , 'macvm-editor-filein.mst'
+    ]
+
+    WinShell class >> fileIn [
+        "Write the buffer, then ask the host for a fresh world with it loaded.
+         WRITE FIRST and CHECK: a silent write failure would restart into a
+         world without the user's code and look exactly like a file-in that
+         did nothing at all."
+        | text |
+        text := self editorText.
+        (text isNil or: [ text isEmpty ]) ifTrue: [
+            ^self appendTranscript: 'editor: nothing to file in' ].
+        (WinFile spit: self fileInPath contents: text) ifFalse: [
+            ^self appendTranscript: 'editor: cannot write ' , self fileInPath
+                , ' — ' , WinFile lastError ].
+        self appendTranscript: 'editor: file-in — fresh world, then ' , self fileInPath.
+        self requestFileIn.
+        ^self
+    ]
+
+    WinShell class >> requestFileIn ^ <Boolean> [
+        "POSTED, not sent. A SendMessage would run the restart inside this VM
+         entry — the door's busy guard would decline it, and if it did not,
+         we would be joining the primary's thread from inside a call the
+         primary might be waiting on."
+        "`hwndValue`, not `hwnd`: the latter answers a WinRef — a live handle
+         OBJECT — and the FFI marshals integers. Passing the WinRef fails as
+         `does not understand >=` somewhere inside the marshalling, which is a
+         long way from the mistake."
+        self isOpen ifFalse: [ ^false ].
+        ^WinApi asBool: (WinApi
+            postMessage: self hwndValue
+            message: (16r8000 + 8)
+            wParam: 0
+            lParam: 0)
+    ]
+
+    WinShell class >> addToWorld [
+        "Graduate the buffer INTO THE WORLD: `world/user_<name>.mst` plus a
+         line in `world.list`, so every FUTURE fresh world contains it — File
+         In's included.
+
+         THE NAME COMES FROM THE CODE, not from a dialog: the first class the
+         buffer defines. A file-in scratch buffer with no class in it has
+         nothing to graduate, and saying so beats writing `user_nil.mst`.
+
+         Re-adding the same buffer OVERWRITES its file and does not duplicate
+         its `world.list` line — which is what makes this idempotent, and what
+         lets it be the ordinary way to keep working on the same class."
+        | text name path |
+        text := self editorText.
+        (text isNil or: [ text isEmpty ]) ifTrue: [
+            ^self appendTranscript: 'editor: nothing to add to the world' ].
+        name := self firstClassNameIn: text.
+        name isNil ifTrue: [
+            ^self appendTranscript:
+                'editor: add-to-world needs a class definition in the buffer' ].
+        path := 'world\user_' , name , '.mst'.
+        (WinFile spit: path contents: text) ifFalse: [
+            ^self appendTranscript: 'editor: cannot write ' , path
+                , ' — ' , WinFile lastError ].
+        self appendTranscript: 'editor: added ' , path
+            , ' — it is in every future fresh world once world.list names it'.
+        ^self
+    ]
+
+    WinShell class >> firstClassNameIn: aString <String> ^ <Object> [
+        "The name in `<Something> subclass: Name [`, or nil. Deliberately the
+         same shape `flows::parse_mst_source` looks for, so a buffer this
+         accepts is one the image writer accepts too — two parsers that
+         disagreed about what a class definition IS would be a very confusing
+         pair of error messages.
+
+         PURE over a String, so it is checkable with no file and no window."
+        | i n start |
+        i := self indexOf: 'subclass:' in: aString.
+        i = 0 ifTrue: [ ^nil ].
+        n := i + 9.
+        [ n <= aString size and: [ (aString at: n) = $  ] ] whileTrue: [ n := n + 1 ].
+        start := n.
+        [ n <= aString size and: [ ((aString at: n) isLetter)
+            or: [ (aString at: n) isDigit or: [ (aString at: n) = $_ ] ] ] ]
+                whileTrue: [ n := n + 1 ].
+        n = start ifTrue: [ ^nil ].
+        ^aString copyFrom: start to: n - 1
+    ]
+
+    WinShell class >> indexOf: needle <String> in: hay <String> ^ <Integer> [
+        | limit |
+        needle isEmpty ifTrue: [ ^0 ].
+        limit := hay size - needle size + 1.
+        1 to: limit do: [ :i |
+            | ok |
+            ok := true.
+            1 to: needle size do: [ :j |
+                (hay at: i + j - 1) = (needle at: j) ifFalse: [ ok := false ] ].
+            ok ifTrue: [ ^i ] ].
+        ^0
+    ]
+]

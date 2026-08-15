@@ -1181,3 +1181,891 @@ gate-s12: gate-s11
     sed '$s/.*/Soak run: 400./' world/bench/soak.mst > /tmp/macvm_soak_s12.mst
     MACVM_JIT=threshold=1 cargo run --release --quiet -- run /tmp/macvm_soak_s12.mst --world world
     just soak-s12
+
+# WG4 (docs/ROADMAP.md's WG4 row): the shell — a view bar, views that build
+# LAZILY, a transcript dock that collapses as a height change, and a metrics
+# cluster that takes one sample at a time.
+#
+# Depends on gate-wg3, and the dependency is the point: WG4's window is WG3's
+# window with a grammar on top, so a WG4 gate that passed while WG3's had
+# broken would be measuring the wrong thing. gate-wg3 runs with
+# MACVM_WINUI_WG4=off (its assertions are about WG3's three controls in WG3's
+# three bands); this one runs with the shell on, which is the default.
+gate-wg4: gate-wg3
+    #!/usr/bin/env bash
+    set -euo pipefail
+    PORT=7671
+    SHOT=target/winui-wg4.png
+    cargo build --quiet
+    cargo build --quiet -p win_gui
+
+    # ── the in-language half ─────────────────────────────────────────────
+    # The layout grammar and the view registry are pure guest state, so they
+    # are checked with no window at all — the same split WG3 drew, and the
+    # reason WG4's arithmetic is testable on a machine with no Win32.
+    grep -v '^#' world/tests/tests.list | grep -v '^$' | sed 's|^|world/tests/|' \
+        | xargs cat > /tmp/macvm_wg4_tests.mst
+    ./target/debug/macvm run /tmp/macvm_wg4_tests.mst --world world | tee /tmp/wg4_present.txt
+    grep -q ', 0 failed' /tmp/wg4_present.txt
+    grep -q 'WinUiShellWg4Tests' /tmp/wg4_present.txt
+    # Counts are RELATIONSHIPS, never frozen integers (WG2 Δ 14): WG4's suite
+    # is strictly larger than WG3's was, and nothing is failing.
+    PRESENT=$(grep -oE '^[0-9]+ run, 0 failed' /tmp/wg4_present.txt | cut -d' ' -f1)
+    echo "world: $PRESENT with the shell layer loaded"
+    test "$PRESENT" -ge 7850
+
+    # ── the live half ────────────────────────────────────────────────────
+    rm -f "$SHOT" /tmp/wg4_exit /tmp/wg4_app.txt
+    ( MACVM_WINUI_CTL=$PORT ./target/debug/macvm-winui.exe > /tmp/wg4_app.txt 2>&1; \
+      echo $? > /tmp/wg4_exit ) &
+    for i in $(seq 1 60); do
+        (exec 3<>/dev/tcp/127.0.0.1/$PORT) 2>/dev/null && break || sleep 0.5
+    done
+    ./target/debug/macvm rusttcl scripts/winui-wg4.tcl | tee /tmp/wg4_gate.txt
+    cat /tmp/wg4_app.txt
+
+    # ── the shell came up ─────────────────────────────────────────────────
+    grep -q 'WG4 open true' /tmp/wg4_gate.txt
+    grep -q 'WG4 enabled true' /tmp/wg4_gate.txt
+
+    # ── LAZY BUILD, which is the WG4 row's own word ───────────────────────
+    # Views registered, and exactly ONE built at open. A shell that built every
+    # view up front would answer the full count here and would pay every future
+    # view's handles at startup — the difference this assertion exists for.
+    #
+    # A RELATIONSHIP, not a frozen integer (WG2 Δ 14): this read `WG4 views 3`
+    # and the shell has had seven since WG6a, so it had been failing silently
+    # for three sprints. The claim was never "there are three views" — it is
+    # "registering a view does not build it", and that is what is asserted now.
+    VIEWS=$(grep -E '^WG4 views ' /tmp/wg4_gate.txt | awk '{print $NF}')
+    echo "shell: $VIEWS views registered, 1 built"
+    test "$VIEWS" -ge 3
+    grep -q 'WG4 built-at-open 1' /tmp/wg4_gate.txt
+    grep -q "WG4 active-at-open #welcome" /tmp/wg4_gate.txt
+
+    # A real WM_COMMAND crossed the door, was QUEUED there, and the view
+    # switched one drain pass later — the flag-and-drain contract, at the
+    # shell's own layer.
+    grep -q 'WG4 queued-in-door 1' /tmp/wg4_gate.txt
+    grep -q "WG4 active-after-click #transcript" /tmp/wg4_gate.txt
+    grep -q 'WG4 built-after-click 2' /tmp/wg4_gate.txt
+
+    # Switching to a view ALREADY built builds nothing: the build count holds
+    # at 2 while the switch count goes up. A shell that rebuilt per visit
+    # would leak a window handle per click, invisibly, until it wasn't.
+    grep -q 'WG4 built-after-reswitch 2' /tmp/wg4_gate.txt
+    grep -q 'WG4 switches-after-reswitch 3' /tmp/wg4_gate.txt
+    # ...and a third view still builds on ITS first visit.
+    grep -q 'WG4 built-third 3' /tmp/wg4_gate.txt
+
+    # ── the dock is a HEIGHT change, not a structural one ─────────────────
+    # Collapsed is height 0 with the band still present; reopening restores a
+    # number rather than reconstructing a band.
+    grep -q 'WG4 dock-collapsed-0 false' /tmp/wg4_gate.txt
+    grep -q 'WG4 dock-height-0 120' /tmp/wg4_gate.txt
+    grep -q 'WG4 dock-collapsed-1 true' /tmp/wg4_gate.txt
+    grep -q 'WG4 dock-height-1 0' /tmp/wg4_gate.txt
+    grep -q 'WG4 dock-collapsed-2 false' /tmp/wg4_gate.txt
+    grep -q 'WG4 dock-height-2 120' /tmp/wg4_gate.txt
+
+    # ── the metrics cluster, read back out of Win32 ───────────────────────
+    # Not out of the Smalltalk variable: the claim is that the CONTROL shows
+    # the sample, and only GetWindowTextW can settle that.
+    grep -q 'WG4 metrics-updates 1' /tmp/wg4_gate.txt
+    grep -q 'MEM 540K/68M' /tmp/wg4_gate.txt
+    grep -q 'GC 2/4' /tmp/wg4_gate.txt
+
+    # ── the transcript: newest first, and it BREAKS ───────────────────────
+    # A Win32 multiline EDIT breaks on CRLF and on nothing else. The first WG4
+    # snap ran every line together; this is the assertion that catches it.
+    grep -q "WG4 transcript-first 'gate line two'" /tmp/wg4_gate.txt
+    grep -q 'WG4 transcript-breaks true' /tmp/wg4_gate.txt
+
+    # ── the layout actually placed the shell's children ───────────────────
+    grep -q 'WG4 metrics-right-of-buttons true' /tmp/wg4_gate.txt
+    LAYOUTS=$(grep '^WG4 layouts ' /tmp/wg4_gate.txt | cut -d' ' -f3)
+    test "$LAYOUTS" -ge 1
+
+    # ── D3: the bar actually painted, and nothing raised inside a paint ───
+    DRAWN=$(grep '^WG4 draw-calls ' /tmp/wg4_gate.txt | cut -d' ' -f3)
+    test "$DRAWN" -ge 5
+    grep -q "WG4 draw-error $" /tmp/wg4_gate.txt || grep -q "WG4 draw-error ''" /tmp/wg4_gate.txt
+    grep -q 'WG4 accent-read true' /tmp/wg4_gate.txt
+
+    # ── D4: enablement tracks FOCUS, and answers both ways ────────────────
+    grep -q 'WG4 edit-is-source true' /tmp/wg4_gate.txt
+    grep -q 'WG4 ro-is-source false' /tmp/wg4_gate.txt
+    grep -q 'WG4 enabled-on-source true' /tmp/wg4_gate.txt
+    grep -q 'WG4 enabled-off-source false' /tmp/wg4_gate.txt
+
+    # ── D5: the dock is the user's, and clamps ────────────────────────────
+    grep -q 'WG4 dock-set 150' /tmp/wg4_gate.txt
+    grep -q 'WG4 dock-floor true' /tmp/wg4_gate.txt
+    grep -q 'WG4 dock-ceiling true' /tmp/wg4_gate.txt
+
+    # ── D6: a switch costs NO layout. The flicker assertion. ──────────────
+    BEFORE=$(grep '^WG4 layouts-before-switch ' /tmp/wg4_gate.txt | cut -d' ' -f3)
+    AFTER=$(grep '^WG4 layouts-after-switch ' /tmp/wg4_gate.txt | cut -d' ' -f3)
+    echo "layouts across two view switches: $BEFORE -> $AFTER"
+    test "$BEFORE" -eq "$AFTER"
+
+    # ── the window survived all of it ─────────────────────────────────────
+    test -s "$SHOT"
+    echo "snap: $SHOT ($(wc -c < "$SHOT") bytes)"
+    { echo "gui connect $PORT"; echo "gui quit"; } > /tmp/wg4_quit.tcl
+    ./target/debug/macvm rusttcl /tmp/wg4_quit.tcl >/dev/null 2>&1 || true
+    for i in $(seq 1 60); do [ -f /tmp/wg4_exit ] && break || sleep 0.5; done
+    test "$(cat /tmp/wg4_exit)" = "0"
+    echo "gate-wg4: PASS"
+
+# WG5b-2 (docs/sprints/sprint_wg5_detail.md): Accept, over
+# `image_store::flows`. The CG8 gate re-run for Windows — *a `#saveMethod`
+# round-trips through `image_store` byte-identically to the web edit path*.
+#
+# THREE LAYERS, because each proves something the others cannot:
+#
+#   1. `cargo test -p winui_host` — the DIFFERENTIAL. The same save through
+#      the Windows entry point and through `flows::save_method` (the web
+#      GUI's own call), against two identically-seeded images, compared on
+#      every stored consequence: source, selector, side, home file, version
+#      count. This is the CG8 gate proper.
+#   2. The world suite's `WinUiHostWg5bTests` — the CHANNEL. That an FFI
+#      pragma naming `library:` resolves a DLL in neither winkb nor the
+#      five-DLL probe list, which is WG5b-2's one core change.
+#   3. `world/bench/wg5b_accept.mst` — END TO END. A Smalltalk String through
+#      `nativeUtf16:`, LoadLibraryA, the A64 trampoline, `image_store`, and
+#      back out as UTF-16 read by count. It drives `acceptSourceText:`, the
+#      SAME method the Accept cell reaches.
+#
+# The scratch image is built fresh and thrown away. Nothing here writes
+# `world/image.sqlite3` — which does not exist in a checkout anyway (it is a
+# generated artifact) and must never be created as a side effect of a gate.
+gate-wg5b:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    IMG=/tmp/wg5b_gate.sqlite3
+    # A LEFTOVER WINDOW BLOCKS THE BUILD, and this is new with WG5b-2: the GUI
+    # now LOADS winui_host.dll, so a still-running macvm-winui.exe holds it
+    # open and `cargo build -p winui_host` fails with "Access is denied" --
+    # a message that says nothing about the real cause. Close it first.
+    taskkill //F //IM macvm-winui.exe > /dev/null 2>&1 || true
+    # Fingerprint the developer's own image up front, so the last assertion
+    # can prove no part of this gate wrote it.
+    OWN_IMAGE_SUM=""
+    if [ -f world/image.sqlite3 ]; then OWN_IMAGE_SUM="$(md5sum < world/image.sqlite3)"; fi
+    cargo build -p winui_host
+    # 1: the CG8 differential.
+    cargo test -p winui_host
+    # 2: the channel, inside the ordinary world suite.
+    just run-world-tests | tee /tmp/wg5b_world.txt
+    grep -q '0 failed' /tmp/wg5b_world.txt
+    # 3: end to end, against a scratch image.
+    rm -f "$IMG"
+    cargo run -q -p image_store --bin import_world -- world "$IMG"
+    grep -v '^#' world/winui.list | grep -v '^$' | sed 's|^|world/|' \
+        | xargs cat > /tmp/wg5b_layer.mst
+    cat /tmp/wg5b_layer.mst world/bench/wg5b_accept.mst > /tmp/wg5b_run.mst
+    MACVM_IMAGE_PATH="$IMG" cargo run -q -- run /tmp/wg5b_run.mst --world world \
+        | tee /tmp/wg5b_e2e.txt
+    grep -q 'ALL CHECKS PASSED' /tmp/wg5b_e2e.txt
+    rm -f "$IMG"
+
+    # 4: THE WINDOW. The three layers above are all headless; none of them can
+    #    tell you the Accept cell was actually built, drawn by the bar's own
+    #    owner-draw path, and greyed by the same focus rule as the other two
+    #    verbs -- or that `library:` resolves in the process that really owns
+    #    the window rather than in a test harness. Same shape as gate-wg4.
+    rm -f /tmp/wg5b_exit /tmp/wg5b_app.txt target/winui-wg5b.png
+    ( MACVM_WINUI_CTL=7671 ./target/debug/macvm-winui.exe > /tmp/wg5b_app.txt 2>&1;       echo $? > /tmp/wg5b_exit ) &
+    for i in $(seq 1 60); do
+        (exec 3<>/dev/tcp/127.0.0.1/7671) 2>/dev/null && break || sleep 0.5
+    done
+    ./target/debug/macvm rusttcl scripts/winui-wg5b.tcl | tee /tmp/wg5b_gate.txt
+    # The browser fills from a REPLY across the seam, and on a fresh start the
+    # primary is still loading the world. The wait has to happen with NOTHING
+    # attached: `gui sleep` blocks the app itself, so waiting inside the
+    # script starves the drain pass it is waiting for.
+    sleep 15
+    ./target/debug/macvm rusttcl scripts/winui-wg5b-2.tcl | tee -a /tmp/wg5b_gate.txt
+    cat /tmp/wg5b_app.txt
+
+    grep -q 'WG5B open true' /tmp/wg5b_gate.txt
+    # The verb is there and is a BAR cell -- owner-drawn like Do It and Print
+    # It, not a stock Win32 button dropped into a Fluent strip.
+    grep -q 'WG5B accept-exists true' /tmp/wg5b_gate.txt
+    grep -q 'WG5B accept-is-bar-cell true' /tmp/wg5b_gate.txt
+    # And it JOINED WG4 D4's focus rule rather than getting one of its own: a
+    # read-only surface cannot supply source, so Accept is off.
+    grep -q 'WG5B accept-on-readonly false' /tmp/wg5b_gate.txt
+    # The strip painted its own first frame -- it used to come up as a row of
+    # empty boxes and stay that way until something unrelated dirtied it.
+    DRAWN=$(grep -E '^WG5B drawcalls-at-open ' /tmp/wg5b_gate.txt | awk '{print $NF}')
+    echo "bar: $DRAWN cells drawn before any click"
+    test "$DRAWN" -gt 0
+    # A VERB SURVIVES BEING CLICKED. Clicking one used to move focus onto it,
+    # which made it not-a-source-surface, which disabled it -- and a disabled
+    # button never sends WM_COMMAND. The verb switched itself off on the way
+    # down. Both halves asserted, in the order that breaks.
+    grep -q 'WG5B enabled-on-workspace true' /tmp/wg5b_gate.txt
+    grep -q 'WG5B enabled-after-clicking-a-verb true' /tmp/wg5b_gate.txt
+    grep -q 'WG5B doit-still-clickable true' /tmp/wg5b_gate.txt
+    # And the click actually reaches Do It.
+    grep -q 'WG5B doit-fired 1' /tmp/wg5b_gate.txt
+    # The Browser filled from the PRIMARY, across the seam.
+    grep -q 'WG5B active-view #browser' /tmp/wg5b_gate.txt
+    # `grep -oE '[0-9]+'` on the whole line would also match the 5 in WG5B --
+    # which yielded two lines (5, then 0) and a `test: integer expected`.
+    # Take the last field instead.
+    CLASSES=$(grep -E '^WG5B browser-classes ' /tmp/wg5b_gate.txt | awk '{print $NF}')
+    echo "browser: $CLASSES classes from the primary's live hierarchy"
+    test "$CLASSES" -ge 100
+    # The source pane keeps WG5b-1's promise instead of restating it.
+    grep -q 'WG5B source-still-a-promise false' /tmp/wg5b_gate.txt
+    # WG5c D3: the swap really happened, and the enablement predicate learned
+    # the new class in the same change.
+    grep -q 'WG5C richedit-loaded true' /tmp/wg5b_gate.txt
+    grep -q "WG5C pane-class 'RICHEDIT50W'" /tmp/wg5b_gate.txt
+    grep -q 'WG5C workspace-is-source true' /tmp/wg5b_gate.txt
+    grep -q 'WG5C browser-source-is-source true' /tmp/wg5b_gate.txt
+    # WG5c D5: the ghost line, whose predecessor shipped invisible. The
+    # window claims first, then the property that makes the design safe.
+    grep -q 'WG5D ghost-shown-when-empty true' /tmp/wg5b_gate.txt
+    grep -q 'WG5D ghost-gone-when-typed false' /tmp/wg5b_gate.txt
+    grep -q "WG5D drew-without-error ''" /tmp/wg5b_gate.txt
+    # THE HINT IS NOT IN THE DOCUMENT. If it were, Do It would evaluate it and
+    # Accept would write it — which is why it is an overlay and not greyed
+    # text in the pane.
+    grep -q 'WG5D buffer-really-empty true' /tmp/wg5b_gate.txt
+    grep -q 'WG5D doit-would-see-nothing true' /tmp/wg5b_gate.txt
+    # WG5c D4: runs are not merely COMPUTED, they are APPLIED — and the
+    # selection survives the pass, which is what separates colouring from
+    # sabotaging the editor.
+    FOUND=$(grep -E '^WG5C runs-found ' /tmp/wg5b_gate.txt | awk '{print $NF}')
+    APPLIED=$(grep -E '^WG5C runs-applied ' /tmp/wg5b_gate.txt | awk '{print $NF}')
+    echo "colour: $FOUND runs found, $APPLIED applied"
+    test "$FOUND" -gt 0
+    test "$APPLIED" = "$FOUND"
+    grep -q 'WG5C selection-survives #(4 8)' /tmp/wg5b_gate.txt
+    # And a real EN_CHANGE through the door reached the debounce, which fired.
+    BEFORE=$(grep -E '^WG5C passes-before-idle ' /tmp/wg5b_gate.txt | awk '{print $NF}')
+    AFTER=$(grep -E '^WG5C passes-after-idle ' /tmp/wg5b_gate.txt | awk '{print $NF}')
+    echo "colour: $BEFORE passes before idle, $AFTER after"
+    test "$AFTER" -gt "$BEFORE"
+    # WG6b: Find really searched, really filled its list, and the jump
+    # landed. The counts are RELATIONSHIPS (WG2 Δ 14) — the world grows.
+    IMPL=$(grep -E '^WG6B implementors ' /tmp/wg5b_gate.txt | awk '{print $NF}')
+    LB=$(grep -E '^WG6B listbox-rows ' /tmp/wg5b_gate.txt | awk '{print $NF}')
+    echo "find: $IMPL implementors of printString, $LB rows shown"
+    test "$IMPL" -gt 0
+    # THE LIST MUST MATCH THE SEARCH. It once did not: `listSet:items:` takes
+    # a NAME and was handed a control, so it returned in silence and the view
+    # showed an empty list while the transcript reported five hits.
+    test "$LB" = "$IMPL"
+    # The jump is the payoff, so it is gated as hard as the search.
+    grep -q 'WG6B jumped true' /tmp/wg5b_gate.txt
+    grep -q 'WG6B landed-view #browser' /tmp/wg5b_gate.txt
+    grep -q "WG6B landed-selector 'printString'" /tmp/wg5b_gate.txt
+    # WG6a: the Outliner rendered the primary's own tree, in a real window.
+    grep -q 'WG6A active-view #outliner' /tmp/wg5b_gate.txt
+    ROWS=$(grep -E '^WG6A rows ' /tmp/wg5b_gate.txt | awk '{print $NF}')
+    echo "outliner: $ROWS class rows over the primary's hierarchy"
+    # The HIERARCHY only — a class's own rows are added when it is selected.
+    # Eager insertion was 3507 rows and ~600ms of synchronous UI work on the
+    # first open, which timed out three control-port calls in a row and would
+    # have been a visible freeze on a view switch. A relationship, not a
+    # frozen integer: the world grows.
+    test "$ROWS" -gt 100
+    test "$ROWS" -lt 1000
+    grep -q 'WG6A built true' /tmp/wg5b_gate.txt
+    # TVINSERTSTRUCTW's recorded size is 24 and would be a 48-byte heap
+    # overwrite; the composed one must be larger. Asserted as a relationship.
+    REC=$(grep -E '^WG6A tv-recorded ' /tmp/wg5b_gate.txt | awk '{print $NF}')
+    COMP=$(grep -E '^WG6A tv-composed ' /tmp/wg5b_gate.txt | awk '{print $NF}')
+    echo "TVINSERTSTRUCTW: recorded $REC, composed $COMP"
+    test "$COMP" -gt "$REC"
+    # And the channel resolves HERE, in the process that owns the window.
+    grep -q 'WG5B host-available true' /tmp/wg5b_gate.txt
+    grep -q 'WG5B host-ping 22343' /tmp/wg5b_gate.txt
+    test -s target/winui-wg5b.png
+    for i in $(seq 1 60); do [ -f /tmp/wg5b_exit ] && break || sleep 0.5; done
+    test "$(cat /tmp/wg5b_exit)" = "0"
+
+    # And the developer's OWN image is untouched. Not "does not exist" -- it
+    # legitimately does once `import_world` has been run, and the GUI needs it
+    # to show source at all. What must hold is that a GATE never writes it:
+    # the write path is exercised against $IMG and nowhere else.
+    if [ -f world/image.sqlite3 ]; then
+        test "$(md5sum < world/image.sqlite3)" = "$OWN_IMAGE_SUM"
+        echo "own image: unchanged"
+    fi
+    echo "gate-wg5b: PASS"
+
+# --- WG6c-2: the editor pane accepts input ----------------------------------
+#
+# docs/sprints/sprint_wg6c_detail.md, WG6c-2. The slice's own gate is one
+# sentence — "typing changes the document and undo restores it, which costs
+# nothing because the rope is persistent" — and it is asserted here twice, from
+# the two sides that can fail independently:
+#
+#   1. HEADLESS, the arithmetic. `world/tests/67_winui_editor_tests.mst`:
+#      offset <-> (line, col) round-trips over EVERY position, pixel <-> offset
+#      inverts, the caret clamps, typing-then-undo restores. Pure over the
+#      text, so it needs no window and runs on every platform's suite.
+#   2. THE WINDOW, the route. Nothing headless touches WG6c-2's actual shell
+#      change, which is four lines in 91's door routing by HWND to the pane —
+#      67 calls `editorApply:` directly and never crosses
+#      `window:message:wParam:lParam:` at all. A pane wired up wrongly passes
+#      all six of those tests and is stone dead on screen, so the second half
+#      drives REAL WM_CHAR / WM_KEYDOWN / WM_LBUTTONDOWN through the real door.
+#
+# WHY A REBUILD IS NOT OPTIONAL HERE, and it cost an afternoon to find: the
+# world's `.mst` files are read from disk at runtime, so an editor change shows
+# up in a stale `macvm-winui.exe` — but WM_PAINT joining the ALLOWLIST is Rust,
+# compiled in. Running WG6c against a binary built before that commit gives a
+# pane that is visible, focused, correctly positioned, types perfectly, and
+# never paints once. `cargo build` is therefore part of the gate rather than
+# something the developer is trusted to remember.
+gate-wg6c:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # A leftover window holds its own .exe open and the next build fails with
+    # "Access is denied" — a message that says nothing about the real cause.
+    taskkill //F //IM macvm-winui.exe > /dev/null 2>&1 || true
+
+    # 1: the arithmetic, inside the ordinary world suite.
+    just run-world-tests | tee /tmp/wg6c_world.txt
+    grep -q ', 0 failed' /tmp/wg6c_world.txt
+    # The suite must have actually RUN it. A test file that fell out of
+    # tests.list still reports "0 failed", which is the most comfortable way
+    # for a gate to pass while checking nothing.
+    grep -q 'WinUiEditorWg6cTests' /tmp/wg6c_world.txt
+    grep -q 'testTypingThenUndoRestoresExactly' /tmp/wg6c_world.txt
+    grep -q 'testReplacingASelectionIsOneUndo' /tmp/wg6c_world.txt
+    grep -q 'testSelectionRectsCoverExactlyTheSelectedLines' /tmp/wg6c_world.txt
+
+    # 2: THE WINDOW.
+    #
+    # WG6c-3 makes this the first winui gate whose WINDOW can WRITE — the
+    # Editor's Save cell reaches `image_store::flows` through winui_host.dll —
+    # so it runs against a SCRATCH image and proves the developer's own is
+    # untouched, exactly as gate-wg5b does for its end-to-end leg. A gate that
+    # wrote `world/image.sqlite3` as a side effect of taking a screenshot
+    # would be a genuinely nasty thing to leave behind.
+    OWN_IMAGE_SUM=""
+    if [ -f world/image.sqlite3 ]; then OWN_IMAGE_SUM="$(md5sum < world/image.sqlite3)"; fi
+    IMG=/tmp/wg6c_gate.sqlite3
+    rm -f "$IMG"
+    cargo build --quiet -p win_gui
+    cargo build --quiet -p winui_host
+    rm -f /tmp/wg6c_exit /tmp/wg6c_app.txt target/winui-wg6c.png
+    ( MACVM_WINUI_CTL=7673 MACVM_IMAGE_PATH="$IMG" ./target/debug/macvm-winui.exe > /tmp/wg6c_app.txt 2>&1; \
+        echo $? > /tmp/wg6c_exit ) &
+    for i in $(seq 1 60); do
+        (exec 3<>/dev/tcp/127.0.0.1/7673) 2>/dev/null && break || sleep 0.5
+    done
+    ./target/debug/macvm rusttcl scripts/winui-wg6c.tcl | tee /tmp/wg6c_gate.txt
+    # The picker fills from a REPLY across the seam, and the wait has to happen
+    # with NOTHING attached: `gui sleep` blocks the app itself, so waiting
+    # inside the script starves the drain pass it is waiting for. Same shape,
+    # same reason, as gate-wg5b's own split.
+    sleep 15
+    ./target/debug/macvm rusttcl scripts/winui-wg6c-2.tcl | tee -a /tmp/wg6c_gate.txt
+    cat /tmp/wg6c_app.txt
+
+    grep -q 'WG6C open true' /tmp/wg6c_gate.txt
+    grep -q 'WG6C pane-exists true' /tmp/wg6c_gate.txt
+    grep -q 'WG6C pane-hwnd-nonzero true' /tmp/wg6c_gate.txt
+    # THE FONT WAS MEASURED before any pixel arithmetic. `editorCharWidth`
+    # answers a DEFAULT of 8 until the first paint runs DT_CALCRECT and finds
+    # the real 7, and it changes exactly once — so a click encoded before that
+    # transition and decoded after it lands somewhere else entirely. That is
+    # not hypothetical: it moved a click from line 1 column 4 to the end of the
+    # document when repaints were added elsewhere in the script.
+    grep -q 'WG6C metrics-measured true' /tmp/wg6c_gate.txt
+    # FOCUS IS THE WHOLE ARCHITECTURAL CLAIM. WG6c-1 rejected an SS_OWNERDRAW
+    # STATIC because a STATIC can hold focus and still never receive a
+    # WM_KEYDOWN — focusable and mute. This asserts the half that was easy.
+    grep -q 'WG6C pane-has-focus true' /tmp/wg6c_gate.txt
+
+    # TYPING, through a real WM_CHAR from outside every VM entry.
+    BEFORE=$(grep -E '^WG6C doc-before ' /tmp/wg6c_gate.txt | awk '{print $NF}')
+    AFTER=$(grep -E '^WG6C doc-after-typing ' /tmp/wg6c_gate.txt | awk '{print $NF}')
+    echo "editor: $BEFORE chars, $AFTER after one keystroke"
+    test "$AFTER" -eq "$((BEFORE + 1))"
+    # Not merely LONGER — the right character, at the right place. A document
+    # that grew by one is also what a stray newline looks like.
+    grep -q 'WG6C typed-char-landed true' /tmp/wg6c_gate.txt
+    EB=$(grep -E '^WG6C edits-before ' /tmp/wg6c_gate.txt | awk '{print $NF}')
+    EA=$(grep -E '^WG6C edits-after ' /tmp/wg6c_gate.txt | awk '{print $NF}')
+    test "$EA" -gt "$EB"
+
+    # NAVIGATION, through a real WM_KEYDOWN. Arrows need no modifier, so this
+    # is a complete proof of that route rather than a partial one.
+    CT=$(grep -E '^WG6C caret-after-typing ' /tmp/wg6c_gate.txt | awk '{print $NF}')
+    CL=$(grep -E '^WG6C caret-after-left ' /tmp/wg6c_gate.txt | awk '{print $NF}')
+    echo "caret: $CT after typing, $CL after Left"
+    test "$CL" -lt "$CT"
+
+    # AND THE MODIFIER GATE REALLY GATES. A bare Z must not undo: `editorKeyDown:`
+    # asks GetKeyState, the real keyboard, and a synthesised message cannot lie
+    # to it. Asserted as "nothing happened" — the edit counter did not move.
+    EZ=$(grep -E '^WG6C edits-after-bare-z ' /tmp/wg6c_gate.txt | awk '{print $NF}')
+    test "$EZ" -eq "$EA"
+
+    # BACKSPACE, and the double-application it would be if `editorChar:` did not
+    # decline the control range: WM_CHAR delivers 8 for this key too. A document
+    # that shrank by TWO is that bug, so the assertion is exact.
+    BS=$(grep -E '^WG6C doc-after-backspace ' /tmp/wg6c_gate.txt | awk '{print $NF}')
+    test "$BS" -eq "$BEFORE"
+
+    # A CLICK PLACES THE CARET, through a real WM_LBUTTONDOWN — WG6c-1's
+    # arithmetic inverted, against pixels this gate computed from the pane's own
+    # metrics. Line and column rather than an offset: an offset would pass for
+    # the wrong reason on a document whose lines happened to be equal length.
+    grep -q 'WG6C click-line 1' /tmp/wg6c_gate.txt
+    grep -q 'WG6C click-col 4' /tmp/wg6c_gate.txt
+
+    # THE SLICE'S STATED GATE. Exact equality against the string the document
+    # started as, never a length: a journal that replayed badly comes back the
+    # right length most of the time.
+    grep -q 'WG6C undo-restored-exactly true' /tmp/wg6c_gate.txt
+
+    # ── WG6c-2b: the selection, and what it is for ──────────────────────
+    # A DRAG IS THREE MESSAGES and needs no modifier, so unlike shift-extend
+    # and Ctrl-Z this is a complete proof rather than a partial one: press,
+    # move, release, and the six characters under the gesture are selected.
+    grep -q "WG6C drag-selected 'Object'" /tmp/wg6c_gate.txt
+    # AND IT IS VISIBLE. This project has shipped an invisible feature before —
+    # WG5a D4's ghost line, whose test asserted the text a drawing WOULD use
+    # and never that anything appeared — so the highlight's rectangles are
+    # asserted to exist, and the snapshot at the end carries the rest.
+    RECTS=$(grep -E '^WG6C drag-rects ' /tmp/wg6c_gate.txt | awk '{print $NF}')
+    test "$RECTS" -ge 1
+    # AND THE MOUSE WAS RELEASED. A capture that leaks is invisible until every
+    # other control in the app stops responding, which is a long way from the
+    # drag that caused it — WG4 D5's recorded hazard against exactly this trio.
+    grep -q 'WG6C capture-released true' /tmp/wg6c_gate.txt
+
+    # THE CLIPBOARD IS REAL — Win32's own, global and shared, not a variable
+    # pretending to be one. Round-tripped, then used: copy puts the dragged
+    # selection on it, and paste over a different selection puts it back.
+    grep -q 'WG6C clip-put true' /tmp/wg6c_gate.txt
+    grep -q "WG6C clip-got 'ROUNDTRIP'" /tmp/wg6c_gate.txt
+    grep -q "WG6C clip-error ''" /tmp/wg6c_gate.txt
+    grep -q "WG6C clip-after-copy 'Object'" /tmp/wg6c_gate.txt
+    grep -q "WG6C doc-after-paste 'Object'" /tmp/wg6c_gate.txt
+    # ONE Ctrl-Z after a paste over a selection, not two. Delete-then-insert as
+    # two commits left the first undo on a document the user never saw.
+    grep -q 'WG6C undo-after-paste-restores true' /tmp/wg6c_gate.txt
+
+    # AND IT PAINTED. Zero paints with an empty paintError is exactly what a
+    # stale binary looks like (see the note above this recipe), and it is
+    # indistinguishable from success on every other line of this gate.
+    PC=$(grep -E '^WG6C paint-calls ' /tmp/wg6c_gate.txt | awk '{print $NF}')
+    echo "editor: $PC paints"
+    test "$PC" -gt 0
+    grep -q "WG6C paint-error ''" /tmp/wg6c_gate.txt
+
+    # ── WG6c-3: the Editor VIEW ─────────────────────────────────────────
+    # Reached by a real WM_COMMAND on its bar cell, like a click.
+    grep -q 'WG6C view-active #editor' /tmp/wg6c_gate.txt
+    grep -q 'WG6C view-picker-exists true' /tmp/wg6c_gate.txt
+    grep -q 'WG6C view-save-exists true' /tmp/wg6c_gate.txt
+    # The pane is laid out by the VIEW now, to the right of the picker. A pane
+    # covering the picker would look like a view with no class list at all.
+    grep -q 'WG6C pane-right-of-picker true' /tmp/wg6c_gate.txt
+
+    # A CLASS ALL THE WAY ROUND, through the view's own Save cell and back
+    # through its own open — both over `flows`, which is the whole point.
+    grep -q 'WG6C save-message.*saved GateDemo' /tmp/wg6c_gate.txt
+    grep -q 'WG6C reopened-class .GateDemo.' /tmp/wg6c_gate.txt
+    grep -q 'WG6C reopened-has-method true' /tmp/wg6c_gate.txt
+
+    # AND THE PARSE GATE REFUSES WITHOUT CHANGING ANYTHING — the sprint's own
+    # phrase. `flows` reports its refusal as a summary rather than an error,
+    # deliberately (the guest must not invent a status the other two callers do
+    # not report), so the words are asserted here and the survival of the class
+    # written a moment ago is asserted separately. A refusal that had already
+    # half-written something is worse than no gate at all.
+    grep -q 'WG6C refusal-message.*nothing to save' /tmp/wg6c_gate.txt
+    grep -q 'WG6C survived-the-refusal true' /tmp/wg6c_gate.txt
+
+    # THE CLASS PICKER FILLED, from the primary's own hierarchy and across the
+    # seam — the half a screenshot taken too early shows as an empty box.
+    # Counts as a RELATIONSHIP (WG2 Δ 14): the world grows, so what is asserted
+    # is that the picker holds exactly what the snapshot holds. A list that
+    # filled with a different number is the `listSet:items:` bug WG6b hit, where
+    # the view showed nothing while the transcript reported five hits.
+    CLASSES=$(grep -E '^WG6C2 browser-classes ' /tmp/wg6c_gate.txt | awk '{print $NF}')
+    ROWS=$(grep -E '^WG6C2 picker-rows ' /tmp/wg6c_gate.txt | awk '{print $NF}')
+    echo "editor: $ROWS picker rows over the primary's $CLASSES classes"
+    test "$CLASSES" -ge 100
+    test "$ROWS" = "$CLASSES"
+    grep -q 'WG6C2 still-editor #editor' /tmp/wg6c_gate.txt
+    grep -q "WG6C2 paint-error ''" /tmp/wg6c_gate.txt
+
+    # A PARTIAL PAINT still gets provoked, but the origin assertion is GONE —
+    # WG6d made that defect unrepresentable rather than fixing it. The renderer
+    # redraws the entire grid every present and ignores rcPaint, so there is no
+    # partial composition left to be wrong about. What is still worth asserting
+    # is that the real WM_PAINT reached a present without error, and that
+    # FRAMES CLIMBED — the renderer's replacement for `paintCalls`, and the
+    # only thing that distinguishes "presented" from "quietly did nothing".
+    grep -q "WG6C2 partial-paint-error ''" /tmp/wg6c_gate.txt
+    FRAMES=$(grep -E '^WG6C2 frames-after-partial ' /tmp/wg6c_gate.txt | awk '{print $NF}')
+    echo "editor: $FRAMES frames presented"
+    test "$FRAMES" -gt 0
+
+    test -s target/winui-wg6c.png
+    for i in $(seq 1 60); do [ -f /tmp/wg6c_exit ] && break || sleep 0.5; done
+    test "$(cat /tmp/wg6c_exit)" = "0"
+
+    # The scratch image was really written — otherwise every assertion above
+    # could be describing a Save that never reached the disk.
+    test -s "$IMG"
+    rm -f "$IMG"
+    # And the developer's OWN image is untouched. Not "does not exist": it
+    # legitimately does once `import_world` has been run, and the GUI needs it
+    # to show source at all. What must hold is that a GATE never writes it.
+    if [ -f world/image.sqlite3 ]; then
+        test "$(md5sum < world/image.sqlite3)" = "$OWN_IMAGE_SUM"
+        echo "own image: unchanged"
+    fi
+    echo "gate-wg6c: PASS"
+
+# --- WG7-3: the primary, restarted in place -------------------------------
+#
+# docs/sprints/sprint_wg7_detail.md WG7-3, ordered FIRST despite being listed
+# third: it is the piece with real risk (thread lifetime, in-flight requests),
+# and the Debugger's own gate wants to halt and resume repeatedly against a
+# known world — so finding restart bugs while debugging the Debugger would be
+# the worst possible order.
+#
+# It is also what WG6c-3 was missing. File In's contract is "a fresh world,
+# then your file", and `win_gui` booted its primary once and held it for the
+# process lifetime; there was no teardown to build on. That is why File In and
+# Add to World were left unbuilt, and this is the machinery they need.
+#
+# THE CONTRACT PULLS BOTH WAYS, which is the whole reason it is gated rather
+# than eyeballed: the new primary must be indistinguishable from a fresh boot
+# TO THE WORLD, and the restart must be completely invisible TO THE WINDOW. A
+# restart that rebuilt the views would satisfy the first and break the second.
+gate-wg7:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    taskkill //F //IM macvm-winui.exe > /dev/null 2>&1 || true
+    cargo build --quiet -p win_gui -p winui_host -p winui_render
+    rm -f /tmp/wg7_exit /tmp/wg7_app.txt /tmp/wg7_gate.txt target/winui-wg7.png
+    ( MACVM_WINUI_CTL=7715 ./target/debug/macvm-winui.exe > /tmp/wg7_app.txt 2>&1; \
+        echo $? > /tmp/wg7_exit ) &
+    for i in $(seq 1 90); do
+        (exec 3<>/dev/tcp/127.0.0.1/7715) 2>/dev/null && break || sleep 0.5
+    done
+    # Four parts with bash sleeps between: the browser fills from a REPLY, and
+    # `gui sleep` blocks the APP rather than only the driver — it would starve
+    # the drain pass it is waiting for. winui-wg5b.tcl records the same finding.
+    ./target/debug/macvm rusttcl scripts/winui-wg7-a.tcl | tee    /tmp/wg7_gate.txt
+    sleep 8
+    ./target/debug/macvm rusttcl scripts/winui-wg7-b.tcl | tee -a /tmp/wg7_gate.txt
+    sleep 8
+    ./target/debug/macvm rusttcl scripts/winui-wg7-c.tcl | tee -a /tmp/wg7_gate.txt
+    sleep 8
+    ./target/debug/macvm rusttcl scripts/winui-wg7-d.tcl | tee -a /tmp/wg7_gate.txt
+    cat /tmp/wg7_app.txt
+
+    grep -q 'WG7 open true' /tmp/wg7_gate.txt
+
+    # THE WORLD IS REALLY REPLACED. A class defined at RUNTIME in the primary —
+    # no file, no image, nothing a fresh boot could find — is present before the
+    # restart and gone after it. Asserted as a RELATIONSHIP (WG2 Δ 14): the
+    # world grows, so what matters is +1 then back, never today's total.
+    BASE=$(grep -E '^WG7 classes-baseline '     /tmp/wg7_gate.txt | awk '{print $NF}')
+    GHOST=$(grep -E '^WG7 classes-with-ghost '  /tmp/wg7_gate.txt | awk '{print $NF}')
+    AFTER=$(grep -E '^WG7 classes-after-restart ' /tmp/wg7_gate.txt | awk '{print $NF}')
+    echo "primary: $BASE classes, $GHOST with the ghost, $AFTER after the restart"
+    test "$BASE" -ge 100
+    test "$GHOST" -eq "$((BASE + 1))"
+    test "$AFTER" -eq "$BASE"
+
+    # AND THE WINDOW NEVER NOTICED. Same window, same views, same active view —
+    # a restart is not a rebuild, and `viewBuildCount` is the one number that
+    # cannot be fooled by the window merely still being there.
+    grep -q 'WG7 window-alive true' /tmp/wg7_gate.txt
+    BUILT_BEFORE=$(grep -E '^WG7 views-built-at-start ' /tmp/wg7_gate.txt | awk '{print $NF}')
+    BUILT_AFTER=$(grep -E '^WG7 views-built-after '     /tmp/wg7_gate.txt | awk '{print $NF}')
+    test "$BUILT_AFTER" -eq "$BUILT_BEFORE"
+    # The old primary really STOPPED — it says so on its way out, and a restart
+    # that left it running would be two primaries racing over one UI worker's
+    # registry entry.
+    grep -q 'primary stopping' /tmp/wg7_app.txt
+
+    test -s target/winui-wg7.png
+    for i in $(seq 1 60); do [ -f /tmp/wg7_exit ] && break || sleep 0.5; done
+    test "$(cat /tmp/wg7_exit)" = "0"
+    echo "gate-wg7: PASS"
+
+# docs/sprints/upstream_review_2026-08-12.md — WG8 / SM0: the pixel plane.
+#
+# WHY THIS GATE LEADS WITH A VIEW rather than with pixels. The first cut of this
+# demo drew plasma into the EDITOR's pane, because the Editor's pane already had
+# a renderer attached and it was the shortest path to a coloured rectangle. That
+# was the wrong place, and being told so is what produced the Canvas. So the
+# first three assertions here are about a VIEW existing — registered, switchable,
+# built — and only then about what is drawn in it. A pixel plane that happens to
+# work inside somebody else's pane proves nothing about whether this shell can
+# host a canvas.
+#
+# THREE CLAIMS, and each has a failure mode a screenshot would not catch:
+#
+#  1. THE PLANE REACHES THE SCREEN. `stride` comes from the renderer and is the
+#     one number the guest is forbidden to assume — 160 BGRA pixels is 640 bytes
+#     only if D3D chose not to pad the row. Asserting it is non-zero asserts the
+#     Map succeeded; asserting the guest ASKED is the standing caution of the
+#     WG8 review, which is the whole discipline a pixel plane has left.
+#
+#  2. IT MOVES. Frames and phase both advance. A still image that was right once
+#     and then froze looks identical to a working one in any single snapshot,
+#     and that is exactly the bug a live buffer has.
+#
+#  3. THE TWO PLANES COMPOSE. The HUD's cells carry `transparentBackground`, so
+#     the renderer skips their background fill and the pixels show through. The
+#     constant is duplicated across an FFI boundary that carries no types; if it
+#     drifts, the HUD paints a solid bar over the plane. The world suite pins the
+#     value, this pins that the pane still presented with it in place.
+gate-wg8:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    taskkill //F //IM macvm-winui.exe > /dev/null 2>&1 || true
+    # BUILD FIRST — WG6d-2 lost an afternoon to a gate that passed against a
+    # binary predating the change it was gating.
+    cargo build --quiet -p win_gui -p winui_host -p winui_render
+    rm -f /tmp/wg8_exit /tmp/wg8_app.txt /tmp/wg8_gate.txt \
+        target/winui-wg8.png target/winui-wg8-palette.png
+    ( MACVM_WINUI_CTL=7716 ./target/debug/macvm-winui.exe > /tmp/wg8_app.txt 2>&1; \
+        echo $? > /tmp/wg8_exit ) &
+    for i in $(seq 1 90); do
+        (exec 3<>/dev/tcp/127.0.0.1/7716) 2>/dev/null && break || sleep 0.5
+    done
+    sleep 3
+    ./target/debug/macvm rusttcl scripts/winui-wg8.tcl | tee /tmp/wg8_gate.txt
+    cat /tmp/wg8_app.txt
+
+    # 1. The VIEW exists, in its own right.
+    grep -q 'WG8 open true'    /tmp/wg8_gate.txt
+    grep -q 'WG8 switched true' /tmp/wg8_gate.txt
+    grep -q 'WG8 active #canvas' /tmp/wg8_gate.txt
+    grep -q 'WG8 built true'   /tmp/wg8_gate.txt
+    HWND=$(grep -E '^WG8 pane-hwnd ' /tmp/wg8_gate.txt | awk '{print $NF}')
+    test "$HWND" -gt 0
+
+    # 2. The PLANE is real and its shape came from the renderer.
+    STRIDE=$(grep -E '^WG8 stride ' /tmp/wg8_gate.txt | awk '{print $NF}')
+    echo "canvas: pane $HWND, stride $STRIDE bytes"
+    test "$STRIDE" -ge 640
+    grep -q 'WG8 plane true' /tmp/wg8_gate.txt
+    grep -q "WG8 last-error ''" /tmp/wg8_gate.txt
+
+    # 3. It MOVES — asserted as a relationship (WG2 Δ 14), never as a total:
+    #    two explicit renders must advance the counter by exactly two, whatever
+    #    number of paints the window happened to do first.
+    F1=$(grep -E '^WG8 frames-1 ' /tmp/wg8_gate.txt | awk '{print $NF}')
+    F2=$(grep -E '^WG8 frames-2 ' /tmp/wg8_gate.txt | awk '{print $NF}')
+    echo "canvas: $F1 frames, then $F2"
+    test "$F2" -eq "$((F1 + 2))"
+    PHASE=$(grep -E '^WG8 phase ' /tmp/wg8_gate.txt | awk '{print $NF}')
+    test "$PHASE" -gt 0
+    grep -q 'WG8 render-a true' /tmp/wg8_gate.txt
+    grep -q 'WG8 render-b true' /tmp/wg8_gate.txt
+
+    # 4. And the two planes composed — the sentinel still matches Rust's, and
+    #    the pane presented at least as many frames as we asked it to.
+    grep -q 'WG8 transparent 16777216' /tmp/wg8_gate.txt
+    PF=$(grep -E '^WG8 present-frames ' /tmp/wg8_gate.txt | awk '{print $NF}')
+    test "$PF" -ge "$F2"
+
+    # 5. SM4 — THE PALETTE AS MEMORY. Two shapes, and they must differ: the
+    #    index buffer is ONE byte per pixel (stride 160), the BGRA plane is four
+    #    (stride 640). A guest that confused them would draw a quarter-width
+    #    smear, which looks like a stride bug and is not one.
+    grep -q 'WG8 mode #palette'    /tmp/wg8_gate.txt
+    grep -q 'WG8 pal-render true'  /tmp/wg8_gate.txt
+    grep -q 'WG8 pal-addr true'    /tmp/wg8_gate.txt
+    grep -q "WG8 pal-error ''"     /tmp/wg8_gate.txt
+    IXS=$(grep -E '^WG8 ix-stride ' /tmp/wg8_gate.txt | awk '{print $NF}')
+    PLEN=$(grep -E '^WG8 pal-len '  /tmp/wg8_gate.txt | awk '{print $NF}')
+    echo "palette: index stride $IXS, $PLEN slots"
+    #    The RELATIONSHIP, not a constant (WG2 Δ 14): the index plane is one
+    #    byte per pixel where BGRA is four, whatever the plane's width is —
+    #    a hard-coded 160 broke the day the canvas went to 320x240.
+    test "$IXS" -eq "$((STRIDE / 4))"
+    test "$IXS" -ge 160
+    test "$PLEN" -eq 256
+
+    # 6. AND THE FIELD IS WRITTEN ONCE. Three palette frames, one field. This is
+    #    the assertion no screenshot can make: a demo that rewrote every index
+    #    every frame would look exactly the same and would be the design SM4
+    #    exists to replace.
+    grep -q 'WG8 pal-render-2 true' /tmp/wg8_gate.txt
+    grep -q 'WG8 pal-render-3 true' /tmp/wg8_gate.txt
+    grep -q 'WG8 field-once true'   /tmp/wg8_gate.txt
+    PF2=$(grep -E '^WG8 pal-frames ' /tmp/wg8_gate.txt | awk '{print $NF}')
+    #    AT LEAST three, not exactly three: a `gui snap` forces a WM_PAINT of
+    #    its own, so the window contributes frames the driver did not ask for.
+    #    The claim is that our three happened, and `-eq` would be asserting
+    #    that nothing else ever repaints — which is not true and not the point.
+    test "$PF2" -ge "$((F2 + 3))"
+
+    test -s target/winui-wg8.png
+    test -s target/winui-wg8-palette.png
+    for i in $(seq 1 60); do [ -f /tmp/wg8_exit ] && break || sleep 0.5; done
+    test "$(cat /tmp/wg8_exit)" = "0"
+    echo "gate-wg8: PASS"
+
+# docs/winui-cookbook.md — WG8's "runnable doc examples", meant literally.
+#
+# Every fenced smalltalk block in the cookbook is extracted, wrapped in a
+# handler, and EVALUATED against a live window. Not parsed, not linted — run.
+#
+# WHY THIS EXISTS. Documentation examples rot silently: the API moves, the prose
+# does not, and the first person to discover it is someone typing a snippet that
+# no longer works. This port has already renamed `hwnd` to `hwndValue` at a call
+# site, changed a plane's stride from assumed to asked-for, and moved the
+# Monitor from an EDIT control to a cell grid. Any prose written before those
+# would still read plausibly today. These cannot.
+#
+# WHY EACH BLOCK IS WRAPPED rather than left to raise. An unhandled error in
+# block three aborts the run and says nothing about blocks four onward — so one
+# broken snippet hides four others, and the gate gets fixed once per snippet
+# over five runs. Recording and continuing means one run names them all, which
+# is why `WinShell exampleFailureReport` is printed rather than just counted.
+gate-cookbook:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    taskkill //F //IM macvm-winui.exe > /dev/null 2>&1 || true
+    cargo build --quiet -p win_gui -p winui_host -p winui_render
+    rm -f /tmp/cook_exit /tmp/cook_app.txt /tmp/cook_gate.txt target/winui-cookbook.png
+    python scripts/cookbook-to-tcl.py docs/winui-cookbook.md target/cookbook.tcl
+    ( MACVM_WINUI_CTL=7717 ./target/debug/macvm-winui.exe > /tmp/cook_app.txt 2>&1; \
+        echo $? > /tmp/cook_exit ) &
+    for i in $(seq 1 90); do
+        (exec 3<>/dev/tcp/127.0.0.1/7717) 2>/dev/null && break || sleep 0.5
+    done
+    sleep 3
+    ./target/debug/macvm rusttcl target/cookbook.tcl | tee /tmp/cook_gate.txt
+    cat /tmp/cook_app.txt
+
+    # The cookbook must actually HAVE examples. A regex that quietly matched
+    # nothing would make an empty gate pass forever, which is the failure mode
+    # every extract-and-run harness has.
+    N=$(grep -E '^COOK blocks ' /tmp/cook_gate.txt | awk '{print $NF}')
+    echo "cookbook: $N runnable blocks"
+    test "$N" -ge 6
+
+    # And every one of them ran clean. The REPORT is printed on failure, not
+    # just the count — `1 != 0` would be true and useless.
+    F=$(grep -E '^COOK failures ' /tmp/cook_gate.txt | awk '{print $NF}')
+    if [ "$F" != "0" ]; then
+        echo "cookbook: $F example(s) failed —"
+        grep -E '^COOK report ' /tmp/cook_gate.txt
+        exit 1
+    fi
+
+    test -s target/winui-cookbook.png
+    for i in $(seq 1 60); do [ -f /tmp/cook_exit ] && break || sleep 0.5; done
+    test "$(cat /tmp/cook_exit)" = "0"
+    echo "gate-cookbook: PASS"
+
+# docs/SPRINTS.md WG9 (upstream `6536294`) — SUnit and the Tests tab.
+#
+# THE LOOP, END TO END, and it is the only way to gate a view whose whole job is
+# to report on OTHER code: start with an image that has no test classes, put two
+# in it through the path a user actually has (File In, which restarts the
+# primary from clean boot with the file on top), run them, and check the view
+# agrees with what they did.
+#
+# ONE PASSES AND ONE FAILS. A suite that can only report success is
+# indistinguishable from a suite that always reports success, and this gate
+# would pass against both if the fixture were all green.
+#
+# THE EMPTY IMAGE IS GATED FIRST, deliberately. `world.list` has TestCase in it
+# now but no subclasses, so a fresh primary genuinely has nothing to run — and
+# "no test classes in the image" must be distinguishable from "the runner is
+# broken", because they are the same blank pane otherwise.
+#
+# FOUR PARTS WITH BASH SLEEPS BETWEEN, for the reason winui-wg5b.tcl recorded:
+# `gui sleep` blocks the APP, and what is being waited on IS the app — a primary
+# restart, then a worker reply. Sleeping inside it would starve the work.
+gate-wg9:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    taskkill //F //IM macvm-winui.exe > /dev/null 2>&1 || true
+    cargo build --quiet -p win_gui -p winui_host -p winui_render
+    rm -f /tmp/wg9_exit /tmp/wg9_app.txt /tmp/wg9_gate.txt \
+        target/winui-wg9.png target/winui-wg9-empty.png target/winui-wg9-one.png
+    # The fixture goes to the file-in path both sides derive independently —
+    # Python's gettempdir and the host's std::env::temp_dir both read TMP/TEMP.
+    python scripts/wg9-fixture.py
+    ( MACVM_WINUI_CTL=7720 ./target/debug/macvm-winui.exe > /tmp/wg9_app.txt 2>&1; \
+        echo $? > /tmp/wg9_exit ) &
+    for i in $(seq 1 90); do
+        (exec 3<>/dev/tcp/127.0.0.1/7720) 2>/dev/null && break || sleep 0.5
+    done
+    sleep 4
+    ./target/debug/macvm rusttcl scripts/winui-wg9-a.tcl | tee    /tmp/wg9_gate.txt
+    sleep 12
+    ./target/debug/macvm rusttcl scripts/winui-wg9-b.tcl | tee -a /tmp/wg9_gate.txt
+    sleep 12
+    ./target/debug/macvm rusttcl scripts/winui-wg9-c.tcl | tee -a /tmp/wg9_gate.txt
+    sleep 8
+    ./target/debug/macvm rusttcl scripts/winui-wg9-d.tcl | tee -a /tmp/wg9_gate.txt
+    cat /tmp/wg9_app.txt
+
+    # 1. The view exists and RUNS ITSELF on first open. A Tests tab that showed
+    #    nothing until you found the verb would be a tab that mostly shows
+    #    nothing.
+    grep -q 'WG9 open true'     /tmp/wg9_gate.txt
+    grep -q 'WG9 switched true' /tmp/wg9_gate.txt
+    grep -q 'WG9 built true'    /tmp/wg9_gate.txt
+    grep -q 'WG9 run-issued true' /tmp/wg9_gate.txt
+
+    # 2. An image with no test classes SAYS SO, in words, rather than showing
+    #    the same blank pane a broken runner would.
+    grep -q 'WG9 rows-empty-image 0' /tmp/wg9_gate.txt
+    grep -q "WG9 empty-first-line 'No test classes in the image.'" /tmp/wg9_gate.txt
+
+    # 3. File In put them in the PRIMARY, and the run found them. Asserted on
+    #    the numbers rather than the picture: 1 + 2 assertions across two
+    #    classes, exactly one of them wrong.
+    grep -q 'WG9 requested true' /tmp/wg9_gate.txt
+    grep -q 'WG9 run-again true' /tmp/wg9_gate.txt
+    grep -q 'WG9 pending false'  /tmp/wg9_gate.txt
+    grep -q "WG9 error ''"       /tmp/wg9_gate.txt
+    ROWS=$(grep -E '^WG9 rows '           /tmp/wg9_gate.txt | awk '{print $NF}')
+    ASSERTS=$(grep -E '^WG9 assertions '  /tmp/wg9_gate.txt | awk '{print $NF}')
+    FAILED=$(grep -E '^WG9 failed '       /tmp/wg9_gate.txt | awk '{print $NF}')
+    echo "tests: $ROWS classes, $ASSERTS assertions, $FAILED failed"
+    test "$ROWS" -eq 2
+    test "$ASSERTS" -eq 3
+    test "$FAILED" -eq 1
+    grep -q 'WG9 failing-classes 1' /tmp/wg9_gate.txt
+
+    # 4. And the FAILURE reached the screen with its message intact. A test view
+    #    that reports a count and loses the reason sends you to read the test.
+    grep -q "WG9 first-failure 'testWrong: one is not two'" /tmp/wg9_gate.txt
+    grep -q "WG9 verdict 'FAIL  1 of 3 assertions, 1 of 2 classes'" /tmp/wg9_gate.txt
+
+    # 5. One class on its own REPLACES the report rather than appending to it.
+    #    A single-class re-run that appended would leave the old failing row in
+    #    place and show a fixed class beside a stale red one — which is exactly
+    #    the moment you would trust it least and need it most.
+    grep -q 'WG9 rerun-one true'          /tmp/wg9_gate.txt
+    grep -q 'WG9 one-rows 1'              /tmp/wg9_gate.txt
+    grep -q "WG9 one-name 'WgNineOkTests'" /tmp/wg9_gate.txt
+    grep -q 'WG9 one-failed 0'            /tmp/wg9_gate.txt
+    grep -q "WG9 one-verdict 'PASS  1 assertion, 1 class'" /tmp/wg9_gate.txt
+
+    test -s target/winui-wg9-empty.png
+    test -s target/winui-wg9-one.png
+    for i in $(seq 1 60); do [ -f /tmp/wg9_exit ] && break || sleep 0.5; done
+    test "$(cat /tmp/wg9_exit)" = "0"
+    echo "gate-wg9: PASS"

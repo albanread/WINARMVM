@@ -1,7 +1,10 @@
 # SUnit-lite + in-language test suite load order (sprint_s06_detail.md
 # 'SUnit-lite'). Appended after world/world.list by tests/it_world.rs only
 # — macvm run/repl never load this directory.
-00_sunit.mst
+# 00_sunit.mst MOVED to world/85_sunit.mst (WG9). It is part of the world
+# now rather than part of the harness; world.list loads it for everyone, and
+# a second copy here would shadow it with an identical class and hide any
+# drift between them.
 01_object_tests.mst
 02_boolean_tests.mst
 03_integer_tests.mst
@@ -110,4 +113,114 @@ tier1.mst
 62_winui_door_tests.mst
 # WINARM (WG3): the flag-and-drain pass and the layout object, in-language.
 63_winui_controls_tests.mst
+# WINARM (WG4): the shell's layout grammar and view registry, in-language.
+../93_winui_shell.mst
+# WG4 D3/D4/D5 add the drawing, focus and splitter layers, and 64's pure
+# tests reach into all three (the glyph table, the signed-word split, the
+# dock clamp) — so they load here for the same reason ../90..93 do.
+../94_winui_drawing.mst
+../95_winui_focus.mst
+../96_winui_splitter.mst
+../97_winui_workspace.mst
+# WINARM (WG6a): the Outliner. 64 reaches its two PURE parts — the group
+# label and the composed TVINSERTSTRUCTW size — so it loads with the rest of
+# the layer 64 needs. It compiles against 91's classes only; everything it
+# takes from 98 (the cached tree) it reaches by message send.
+../104_winui_outliner.mst
+64_winui_shell_tests.mst
+# WINARM (WG5b): the Browser and the host service. 98 is loaded here for the
+# same compile-time reason the rest are - 65 names WinShell methods it
+# defines - and 99 must follow it, since its `acceptSource` reaches the
+# browser's own selection accessors.
+../98_winui_browser.mst
+../99_winui_host.mst
+# WINARM (WG6b): Find. 65 reaches its two PURE parts - the US-separated wire
+# format parser and the row label - which are a contract shared with the
+# Mac's own find view and so want checking without a window.
+../105_winui_find.mst
+# WG7: WinFile — writing a file from the shell, which File In and Add to World
+# both need. Loaded BEFORE 65, which tests it: it compiles against 91's classes
+# only, so it can sit this early, and an unresolved capitalised name in a method
+# body is a COMPILE error in this dialect.
+../113_winui_file.mst
+65_winui_host_tests.mst
+# WINARM (WG5c D1/D2): the syntax tokenizer and colour table, both PURE - so
+# unlike every other winui test file this one needs nothing from the machine
+# at all. 100 is where the Windows layer continues now that 90-99 is full.
+../100_winui_syntax.mst
+66_winui_syntax_tests.mst
+# WINARM (WG6c-1/WG6c-2): the editor pane and its keys. Both load here for the
+# same compile-time reason the rest do - 67 names WinShell methods they define
+# - and in winui.list's own order, 106 before 107. 106 must follow ../100
+# above: it names `WinSyntax` in a method body, and an unresolved capitalised
+# name is a COMPILE error in this dialect.
+#
+# What 67 checks is the ARITHMETIC, which is pure over the text and so wants
+# no window: offset <-> (line, col), pixel <-> offset, the caret's clamp, and
+# typing-then-undo. That last one reaches `editorApply:`, which calls
+# `refreshEditorPane` and `syncEditorCaret` - both of which return early on a
+# zero `editorPaneHwnd`, so the edit path runs headless without touching FFI.
+# What needs a real window (a WM_PAINT arriving, a real keystroke, a caret
+# blinking) is `just gate-wg5b`.
+../106_winui_editorpane.mst
+../107_winui_editorkeys.mst
+# WG6c-2b: the clipboard. 67 reaches its two PURE parts - the verbs' refusal
+# to act on an empty selection - and the Win32 half is inert until called.
+../108_winui_editorclip.mst
+# WG6c-3: the Editor view. 67 reaches its PURE part - the pane rects, which
+# are arithmetic over the content rect like every other layout here.
+../109_winui_editorview.mst
+# WG6d-2: the cell grid. Loads here so 67 sees the renderer-backed metrics
+# accessors; the DLL half is inert until something attaches.
+../110_winui_render.mst
+# WG6e: WinCodePane. Its navigation and selection arithmetic is pure over the
+# pane's OWN text, so 67 checks it with no window and no renderer.
+../111_winui_codepane.mst
+# WG7-2: the Monitor. Its column-shedding rule and its table formatting are
+# PURE over (rows, width), so 67 checks both with no window and no host.
+../112_winui_monitor.mst
+# WG7-1: the Debugger. Its report parsing is PURE, so 67 checks it with no
+# primary and nothing halted.
+../114_winui_debugger.mst
+# WG6c-3 finished: File In / Add to World. 67 checks the PURE part — finding
+# the class name a buffer defines, which decides what Add to World writes.
+../115_winui_filein.mst
+# WG8/SM0: the pixel plane. 67 checks its PURE part — the BGRA packing, which
+# is one byte order along from COLORREF and easy to get backwards.
+../116_winui_pixels.mst
+
+# WG9: the Tests view. Its display is built by PURE methods over a parsed
+# report, so what the pane would show is checkable here with no window, no
+# primary and no real test.
+../118_winui_tests.mst
+
+# WG10: the gallery. Life's rules and Julia's escape test are PURE over
+# integers, so both are checkable here with no window, no plane and no GPU.
+../119_winui_demos.mst
+
+# WG14a: the declarative UI's pure half. Build, normalize, validate, diff —
+# all functions, so all checkable here with no window at all. This is the
+# stage that exists precisely to be tested before a realizer can hide a bug.
+../122_winui_spec.mst
+69_winui_spec_tests.mst
+
+# WG14b's layout, pure for the same reason and tested the same way.
+../123_winui_layout.mst
+70_winui_layout_tests.mst
+
+# The realizer itself. Its Win32 half needs a window and belongs to a
+# scripted gate; what loads here is the registry and the dispatch
+# discipline, both of which are checkable with no window at all.
+../124_winui_toolwin.mst
+../125_winui_demotool.mst
+../126_winui_spriteed.mst
+72_winui_spriteed_tests.mst
+75_winui_spritesheet_tests.mst
+../127_winui_soundtool.mst
+73_winui_soundtool_tests.mst
+../128_winui_help.mst
+74_winui_help_tests.mst
+71_winui_toolwin_tests.mst
+76_winui_choice_tests.mst
+67_winui_editor_tests.mst
 99_run_all.mst

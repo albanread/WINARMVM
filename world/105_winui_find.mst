@@ -1,0 +1,294 @@
+"── 105_winui_find.mst — WG6b: Find ──────────────────────────────────────
+ docs/sprints/sprint_wg6_detail.md WG6b, and docs/win_gui_design.md's WG6
+ row: *Find sweeps landing selections in the Browser*.
+
+ IMPLEMENTORS AND SENDERS, over the image's own queries — `implementors_of`
+ and `senders_of`, reached through two `winui_host` exports added for this
+ slice. Senders come from the persisted `method_sends` index rather than
+ from a text search, and that is the whole reason the feature is worth
+ having: a textual grep for `at:put:` also finds it in comments, in string
+ literals, and inside `at:put:with:`, and misses nothing only by finding far
+ too much. The index records what the COMPILER saw.
+
+ THE PAYOFF IS THE JUMP. A result you can only read is a report; a result
+ that takes you to the method is a tool. Selecting a hit switches to the
+ Browser, selects the class, flips the side and selects the selector — all
+ through WG5b-1's own selection helpers, so the Browser lands exactly as it
+ would if you had clicked your way there, with its source showing.
+
+ WIRE FORMAT, shared with the Mac deliberately (`67_cocoafind.mst` documents
+ the same): one line per hit, fields separated by the unit separator (0x1F),
+ which cannot occur in a selector or a class name — so nothing needs
+ escaping and the parser never has to guess.
+   implementors:  Class US side
+   senders:       Class US sendingSelector US side"
+
+Object subclass: WinHost [
+
+    WinHost class >> rawImplementorsOf: sel <Integer> ^ <Integer> [
+        <primitive: FFI function: #MacvmHostImplementorsOf library: #'winui_host.dll' ret: #g args: #(g)>
+        ^self primitiveFailed: 'MacvmHostImplementorsOf'
+    ]
+
+    WinHost class >> rawSendersOf: sel <Integer> ^ <Integer> [
+        <primitive: FFI function: #MacvmHostSendersOf library: #'winui_host.dll' ret: #g args: #(g)>
+        ^self primitiveFailed: 'MacvmHostSendersOf'
+    ]
+
+    WinHost class >> implementorsOf: selector <String> ^ <Array> [
+        | rc |
+        self available ifFalse: [ ^self unavailable ].
+        rc := self rawImplementorsOf: (WinArena nativeUtf16: selector).
+        ^Array with: rc = 0 with: self lastMessage
+    ]
+
+    WinHost class >> sendersOf: selector <String> ^ <Array> [
+        | rc |
+        self available ifFalse: [ ^self unavailable ].
+        rc := self rawSendersOf: (WinArena nativeUtf16: selector).
+        ^Array with: rc = 0 with: self lastMessage
+    ]
+]
+
+Object subclass: WinShell [
+    <classVars: FindHits FindKind FindSelector FindCount>
+
+    "── Parsing, and it is PURE ──────────────────────────────────────────"
+
+    WinShell class >> unitSeparator ^ <Character> [ ^Character value: 16r1F ]
+
+    WinShell class >> splitFindReply: reply <String> ^ <OrderedCollection> [
+        "One line per hit, each an Array of its US-separated fields. Pure —
+         a String in, plain Arrays out — so the wire format is checkable with
+         no image, no host and no window, which is exactly what a format
+         shared with another GUI needs.
+
+         An empty reply answers an empty collection rather than one empty
+         row: `no hits` is a real and ordinary result of a search, and a view
+         showing one blank line would be reporting a hit it did not find."
+        | out |
+        out := OrderedCollection new.
+        (reply isNil or: [ reply isEmpty ]) ifTrue: [ ^out ].
+        (reply subStrings: (String with: Character nl)) do: [ :line |
+            line isEmpty ifFalse: [
+                out add: (line subStrings: (String with: self unitSeparator)) asArray ] ].
+        ^out
+    ]
+
+    WinShell class >> findRowLabel: fields <Array> kind: kind <Symbol> ^ <String> [
+        "What a hit READS as. An implementor is `Class >> selector`, which is
+         how anyone writing about Smalltalk names a method; a sender is
+         `Class >> theMethodThatSends`, because the interesting thing about a
+         sender is which of ITS methods does the sending — not the selector
+         you searched for, which is the same on every row.
+
+         Pure, and separate from the search, so the two can be tested apart."
+        | cls side |
+        fields isEmpty ifTrue: [ ^'' ].
+        cls := fields at: 1.
+        kind == #senders ifTrue: [
+            fields size < 3 ifTrue: [ ^cls ].
+            side := fields at: 3.
+            ^side = 'class'
+                ifTrue: [ cls , ' class >> ' , (fields at: 2) ]
+                ifFalse: [ cls , ' >> ' , (fields at: 2) ] ].
+        fields size < 2 ifTrue: [ ^cls ].
+        ^(fields at: 2) = 'class'
+            ifTrue: [ cls , ' class >> ' , (FindSelector isNil ifTrue: [ '' ] ifFalse: [ FindSelector ]) ]
+            ifFalse: [ cls , ' >> ' , (FindSelector isNil ifTrue: [ '' ] ifFalse: [ FindSelector ]) ]
+    ]
+
+    "── The search ───────────────────────────────────────────────────────"
+
+    WinShell class >> findSelectorText ^ <String> [
+        ^(self controlNamed: #findField) ifNil: [ '' ] ifNotNil: [ :c | c text withBlanksTrimmed ]
+    ]
+
+    WinShell class >> find: kind <Symbol> ^ <Integer> [
+        "Answers the hit count. `kind` is #implementors or #senders; anything
+         else is declined rather than guessed at."
+        | sel r |
+        sel := self findSelectorText.
+        sel isEmpty ifTrue: [
+            self appendTranscript: 'Find: type a selector first.'.
+            ^0 ].
+        FindSelector := sel.
+        FindKind := kind.
+        r := kind == #senders
+            ifTrue: [ WinHost sendersOf: sel ]
+            ifFalse: [ WinHost implementorsOf: sel ].
+        (r at: 1) ifFalse: [
+            self appendTranscript: 'Find failed: ' , (r at: 2).
+            ^0 ].
+        FindHits := self splitFindReply: (r at: 2).
+        FindCount := FindHits size.
+        self fillFindResults.
+        self appendTranscript: kind printString , ' of ' , sel , ': '
+            , FindCount printString , ' hit(s)'.
+        ^FindCount
+    ]
+
+    WinShell class >> fillFindResults [
+        "`listSet:items:` takes a NAME, not a control — passing the control
+         object made `controlNamed:` answer nil and the method return in
+         silence, so the search found its hits, reported them in the
+         transcript, and showed an empty list. A helper that declines an
+         argument of the wrong kind by doing nothing is a quiet one; noted
+         here rather than changed, because 98 relies on that tolerance for
+         panes that do not exist yet."
+        self listSet: #findResults
+            items: ((FindHits isNil ifTrue: [ OrderedCollection new ] ifFalse: [ FindHits ])
+                collect: [ :f | self findRowLabel: f kind: FindKind ]) asArray.
+        FindHits isNil ifTrue: [ self listSet: #findResults items: self findEmptyState ].
+        (FindHits notNil and: [ FindHits isEmpty ]) ifTrue: [
+            self listSet: #findResults items: self findNoHitsState ].
+        ^self
+    ]
+
+    WinShell class >> findEmptyState ^ <Array> [
+        "BEFORE ANY SEARCH. A blank list beside two buttons says nothing about
+         what the buttons do, what belongs in the box, or that a result is
+         clickable — and Find is the view most likely to be someone's first,
+         because it is how you get from a name you half-remember to the code.
+
+         Rows in a list rather than prose in a pane, because that is what this
+         view already has: the teaching arrives through the widget that will
+         later hold the answer, so its shape is familiar by the time it does."
+        ^Array
+            with: 'Type a selector above, then Implementors or Senders.'
+            with: ''
+            with: '  Implementors  every method whose name IS that selector'
+            with: '  Senders       every method that CALLS it'
+            with: '  Double-click  opens the hit in the Browser'
+    ]
+
+    WinShell class >> findNoHitsState ^ <Array> [
+        "A SEARCH THAT FOUND NOTHING is not the same screen as one never run,
+         and showing the same blank list for both is how `it is broken` and `it
+         is empty` become indistinguishable. This one names what was asked."
+        ^Array
+            with: 'No ' , (FindKind isNil ifTrue: [ 'hits' ] ifFalse: [ FindKind printString ])
+                , ' of ' , (FindSelector isNil ifTrue: [ '' ] ifFalse: [ FindSelector ]) , '.'
+            with: ''
+            with: 'Selectors are matched exactly, keyword colons included -'
+            with: 'at:put: will not be found by typing at:.'
+    ]
+
+    WinShell class >> findHits ^ <OrderedCollection> [
+        ^FindHits isNil ifTrue: [ OrderedCollection new ] ifFalse: [ FindHits ] ]
+    WinShell class >> findCount ^ <Integer> [
+        ^FindCount isNil ifTrue: [ 0 ] ifFalse: [ FindCount ] ]
+
+    "── The jump: a result you can only read is a report ─────────────────"
+
+    WinShell class >> jumpToHit: i <Integer> ^ <Boolean> [
+        "Land in the Browser on the method this hit names — switch view,
+         select the class, flip the side, select the selector. Every step is
+         WG5b-1's own selection helper, so the Browser ends up in exactly the
+         state a user clicking their way there would have produced, with the
+         source pane showing the method.
+
+         For a SENDER the selector to land on is the sending method's, not
+         the one that was searched for: you asked who sends `at:put:` and the
+         answer is `Dictionary >> add:`, so `add:` is the method you want to
+         read."
+        | fields cls side sel |
+        (i < 1 or: [ i > self findHits size ]) ifTrue: [ ^false ].
+        fields := self findHits at: i.
+        fields isEmpty ifTrue: [ ^false ].
+        cls := fields at: 1.
+        FindKind == #senders
+            ifTrue: [
+                fields size < 3 ifTrue: [ ^false ].
+                sel := fields at: 2.
+                side := fields at: 3 ]
+            ifFalse: [
+                fields size < 2 ifTrue: [ ^false ].
+                sel := FindSelector.
+                side := fields at: 2 ].
+        self switchToView: #browser.
+        self selectBrowserClass: cls.
+        self selectBrowserSide: (side = 'class' ifTrue: [ #class ] ifFalse: [ #instance ]).
+        self selectBrowserSelector: sel.
+        self appendTranscript: 'jumped to ' , cls , ' >> ' , sel.
+        ^true
+    ]
+
+    WinShell class >> onFindResultChosen [
+        | c i |
+        c := self controlNamed: #findResults.
+        c isNil ifTrue: [ ^self ].
+        i := c send: (WinApi constant: 'LB_GETCURSEL') wParam: 0 lParam: 0.
+        i < 0 ifTrue: [ ^self ].
+        self jumpToHit: i + 1.
+        ^self
+    ]
+
+    "── The view ─────────────────────────────────────────────────────────"
+
+    WinShell class >> buildFindPanes [
+        (self controlNamed: #findField) ifNotNil: [ :c | ^self ].
+        self addControl: #findField class: 'EDIT' text: ''
+            style: (((WinApi constant: 'WS_CHILD')
+                bitOr: (WinApi constant: 'WS_BORDER'))
+                bitOr: (WinApi constant: 'WS_TABSTOP'))
+            exStyle: 0.
+        #(#findImpl 'Implementors' #findSend 'Senders') pairsDo: [ :sym :label |
+            self addControl: sym class: 'BUTTON' text: label
+                style: (((WinApi constant: 'WS_CHILD')
+                    bitOr: (WinApi constant: 'WS_VISIBLE'))
+                    bitOr: (WinApi constant: 'WS_TABSTOP'))
+                exStyle: 0 ].
+        self addControl: #findResults class: 'LISTBOX' text: ''
+            style: (((WinApi constant: 'WS_CHILD')
+                bitOr: ((WinApi constant: 'WS_BORDER') bitOr: (WinApi constant: 'WS_VSCROLL')))
+                bitOr: (WinApi constant: 'LBS_NOTIFY'))
+            exStyle: 0.
+        #(#findField #findImpl #findSend #findResults) do: [ :n |
+            (self controlNamed: n) ifNotNil: [ :c | c setFont: self guiFont ] ].
+        "FILL IT AT BUILD, or the teaching never shows: `fillFindResults` was
+         only ever reached from `find:`, so the one screen it exists for — the
+         view before any search — was the one screen it could not reach."
+        self fillFindResults.
+        ^self
+    ]
+
+    WinShell class >> findPaneNames ^ <Array> [
+        ^#(#findField #findImpl #findSend #findResults)
+    ]
+
+    WinShell class >> findPaneRects: content <Array> ^ <Dictionary> [
+        "A search row across the top, results filling the rest. Pure
+         arithmetic over the content rect, like every other layout here, so
+         it is exact rather than approximate and needs no window to check."
+        | out x y w h top btn |
+        out := Dictionary new.
+        x := content at: 1. y := content at: 2. w := content at: 3. h := content at: 4.
+        top := 28.
+        btn := 110.
+        out at: #findField put: (Array with: x with: y
+            with: ((w - (btn * 2) - 12) max: 40) with: 24).
+        out at: #findImpl put: (Array with: x + w - (btn * 2) - 6 with: y with: btn with: 24).
+        out at: #findSend put: (Array with: x + w - btn with: y with: btn with: 24).
+        out at: #findResults put: (Array with: x with: y + top with: w with: (h - top max: 0)).
+        ^out
+    ]
+
+    WinShell class >> layoutFindPanes: content <Array> [
+        | rects |
+        rects := self findPaneRects: content.
+        self findPaneNames do: [ :n |
+            (self controlNamed: n) ifNotNil: [ :c | c moveTo: (rects at: n) ] ].
+        ^self
+    ]
+
+    WinShell class >> showFindPanes: aBool <Boolean> [
+        self findPaneNames do: [ :n |
+            (self controlNamed: n) ifNotNil: [ :c | c show: aBool ] ].
+        ^self
+    ]
+
+    WinShell class >> isFindPane: aName <Symbol> ^ <Boolean> [
+        ^(self findPaneNames indexOf: aName) > 0
+    ]
+]

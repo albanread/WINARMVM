@@ -1,0 +1,290 @@
+"── 111_winui_codepane.mst — WG6e: a code pane is an OBJECT ──────────────
+ The shell has EIGHT views and three of
+ them want an editable code surface at the same time — the Workspace, the
+ Browser's source pane, and the Editor. WG6c built one and stored its entire
+ state in class variables, which is a design error and not a shortcut: there
+ is no arrangement of `EditorCaret`, `EditorAnchor` and `EditorPaneHwnd` in
+ which two panes can both be right.
+
+ THE SINGLETONS THAT HAD TO GO, named so the removal is checkable:
+
+   * `WinShell` class vars `EditorPaneHwnd`, `EditorCaret`, `EditorAnchor`,
+     `EditorKeys`, `EditorDragging` — one pane, one caret, one selection.
+   * `EditorSession current` — a class-side `Current` in the BASE world, so
+     two panes could not each hold a document at all. Note the model never
+     needed changing: `EditorSession new setString:` has always produced an
+     INSTANCE, and every verb the view uses (`handleKey:at:`,
+     `handleCommand:`, `replaceFrom:length:with:`, `documentString`,
+     `cursorOffset`) is instance-side already. `Current` stays exactly as it
+     is for the Mac and web paths that use it; this file simply stops asking
+     for it.
+   * 91's door routing, which asked `hwnd = self editorPaneHwnd`. It now asks
+     the REGISTRY, so a message finds its own pane.
+
+ WHAT A PANE OWNS: its window, its document, its caret, its selection anchor,
+ whether a drag is in progress, and its renderer attachment. Nothing else in
+ the shell holds any of that, which is the property that makes a second pane
+ free rather than a refactor.
+
+ WHAT IT DOES NOT OWN: pixels. The cell size comes from the renderer, keyed by
+ the pane's own hwnd (WG6d-3), so two panes may differ in size, font or DPI
+ without anything here having to agree with anything there."
+
+Object subclass: WinCodePane [
+    | name hwnd session anchor caret dragging keys attached |
+
+    WinCodePane class >> named: aSymbol <Symbol> on: hwnd <Integer> ^ <WinCodePane> [
+        ^self new setName: aSymbol hwnd: hwnd
+    ]
+
+    setName: aSymbol <Symbol> hwnd: h <Integer> [
+        name := aSymbol.
+        hwnd := h.
+        session := EditorSession new setString: ''.
+        caret := 1.
+        anchor := 1.
+        dragging := false.
+        keys := 0.
+        attached := false.
+        ^self
+    ]
+
+    name ^ <Symbol> [ ^name ]
+    hwnd ^ <Integer> [ ^hwnd ]
+    session ^ <EditorSession> [ ^session ]
+    keys ^ <Integer> [ ^keys ]
+
+    "── the document ─────────────────────────────────────────────────────"
+
+    text ^ <String> [ ^session documentString ]
+
+    openOn: aString <String> [
+        "A NEW DOCUMENT gets a new caret and no selection. The view's caret is
+         the view's to reset, and forgetting it was a shipped defect: a shorter
+         document inherited the previous one's caret and selection, which ran
+         off its end and raised inside a paint."
+        session := EditorSession new setString: aString.
+        caret := 1.
+        anchor := 1.
+        ^self
+    ]
+
+    "── caret and selection, per pane ────────────────────────────────────"
+
+    caret ^ <Integer> [
+        "Clamped on the way OUT as well as in: the document changes underneath
+         a caret (an undo, a reopen), and one left past the end is an `at:`
+         away from a raise inside a paint."
+        ^(caret max: 1) min: self text size + 1
+    ]
+
+    caret: n <Integer> [
+        "DELIBERATELY DOES NOT TOUCH THE ANCHOR — shift-extend and dragging
+         both work by moving the caret while the anchor stays put. Callers
+         wanting a caret and no selection want `caretAt:`."
+        caret := (n max: 1) min: self text size + 1.
+        ^self
+    ]
+
+    caretAt: n <Integer> [ self caret: n. anchor := self caret. ^self ]
+
+    anchor ^ <Integer> [ ^(anchor max: 1) min: self text size + 1 ]
+
+    selection ^ <Array> [
+        "#(start length), 1-based, length 0 when empty. The ORDER is computed
+         here and nowhere else: anchor and caret fall either way round, and a
+         backwards drag is the ordinary case."
+        | a c |
+        a := self anchor.
+        c := self caret.
+        ^Array with: (a min: c) with: (a max: c) - (a min: c)
+    ]
+
+    hasSelection ^ <Boolean> [ ^(self selection at: 2) > 0 ]
+
+    selectedText ^ <String> [
+        | s |
+        s := self selection.
+        (s at: 2) = 0 ifTrue: [ ^'' ].
+        ^self text copyFrom: (s at: 1) to: (s at: 1) + (s at: 2) - 1
+    ]
+
+    selectAll [ anchor := 1. self caret: self text size + 1. ^self ]
+
+    collapse [ anchor := self caret. ^self ]
+
+    dragging ^ <Boolean> [ ^dragging == true ]
+    dragging: aBool <Boolean> [ dragging := aBool. ^self ]
+
+    "── editing ──────────────────────────────────────────────────────────"
+
+    applyKey: key <String> [
+        "One edit. The pane hands over its caret — or its SELECTION — the
+         session applies the edit and moves the caret, and the pane adopts the
+         answer. A selection makes every editing key mean the same thing:
+         replace what is highlighted."
+        | sel |
+        keys := keys + 1.
+        sel := self selection.
+        (sel at: 2) > 0
+            ifTrue: [ session replaceFrom: (sel at: 1) - 1 length: (sel at: 2)
+                        with: (self replacementFor: key) ]
+            ifFalse: [ session handleKey: key at: self caret ].
+        ^self adoptSessionCaret
+    ]
+
+    replacementFor: key <String> ^ <String> [
+        key = 'Enter' ifTrue: [ ^String with: Character nl ].
+        key = 'Backspace' ifTrue: [ ^'' ].
+        key = 'Delete' ifTrue: [ ^'' ].
+        ^key
+    ]
+
+    insertText: s <String> [
+        "LITERAL TEXT, never a key name. The key vocabulary has three words in
+         it, so pasting a snippet that happened to BE one would perform the key
+         instead of inserting the word — silent, and impossible to diagnose
+         from the symptom."
+        keys := keys + 1.
+        session replaceFrom: (self selection at: 1) - 1
+                length: (self selection at: 2)
+                with: s.
+        ^self adoptSessionCaret
+    ]
+
+    command: aName <String> [
+        keys := keys + 1.
+        session handleCommand: aName.
+        ^self adoptSessionCaret
+    ]
+
+    adoptSessionCaret [
+        "After an EDIT the session is the authority. AND THE SELECTION IS GONE:
+         the characters it referred to no longer exist, so a selection that
+         survived its own replacement would name a range in a document that has
+         moved under it."
+        self caret: session cursorOffset.
+        anchor := self caret.
+        ^self
+    ]
+
+    "── navigation, pure arithmetic over this pane's own text ────────────"
+
+    lineColOf: offset <Integer> ^ <Array> [
+        | t i line col |
+        t := self text.
+        i := 1. line := 0. col := 0.
+        [ i < offset and: [ i <= t size ] ] whileTrue: [
+            (t at: i) = Character nl
+                ifTrue: [ line := line + 1. col := 0 ]
+                ifFalse: [ col := col + 1 ].
+            i := i + 1 ].
+        ^Array with: line with: col
+    ]
+
+    offsetOfLine: targetLine <Integer> col: targetCol <Integer> ^ <Integer> [
+        | t i line col |
+        t := self text.
+        i := 1. line := 0. col := 0.
+        [ i <= t size ] whileTrue: [
+            (line = targetLine and: [ col = targetCol ]) ifTrue: [ ^i ].
+            (t at: i) = Character nl
+                ifTrue: [
+                    line = targetLine ifTrue: [ ^i ].
+                    line := line + 1. col := 0 ]
+                ifFalse: [ col := col + 1 ].
+            i := i + 1 ].
+        ^t size + 1
+    ]
+
+    offsetAtX: px <Integer> y: py <Integer> cellW: cw <Integer> cellH: ch <Integer> ^ <Integer> [
+        "Pixel to 1-based offset, and the cell size is PASSED IN rather than
+         asked for — this pane's renderer knows it, and a pane that used
+         another's metrics is precisely the confusion having one set of globals
+         invited. Clicking past the end of a line lands at its END."
+        | t targetLine targetCol i line col |
+        (cw = 0 or: [ ch = 0 ]) ifTrue: [ ^1 ].
+        t := self text.
+        targetLine := py // ch.
+        targetCol := (px + (cw // 2)) // cw.
+        i := 1. line := 0. col := 0.
+        [ i <= t size ] whileTrue: [
+            (line = targetLine and: [ col = targetCol ]) ifTrue: [ ^i ].
+            (t at: i) = Character nl
+                ifTrue: [
+                    line = targetLine ifTrue: [ ^i ].
+                    line := line + 1. col := 0 ]
+                ifFalse: [ col := col + 1 ].
+            i := i + 1 ].
+        ^t size + 1
+    ]
+
+    "── the renderer, keyed by THIS pane's window ────────────────────────"
+
+    attached ^ <Boolean> [ ^attached == true ]
+
+    attachAt: dpi <Integer> ^ <Boolean> [
+        attached := WinRender attach: hwnd points: 9 dpi: dpi.
+        ^attached
+    ]
+
+    detach [ WinRender detach: hwnd. attached := false. ^self ]
+
+    cellWidth ^ <Integer> [
+        | w | w := WinRender cellWidthFor: hwnd.
+        ^w > 0 ifTrue: [ w ] ifFalse: [ 8 ] ]
+
+    cellHeight ^ <Integer> [
+        | h | h := WinRender cellHeightFor: hwnd.
+        ^h > 0 ifTrue: [ h ] ifFalse: [ 16 ] ]
+
+    gridSize: rect <Array> ^ <Array> [
+        "#(cols rows) for a client rect, in this pane's own cells."
+        | cw ch |
+        cw := self cellWidth.
+        ch := self cellHeight.
+        (cw = 0 or: [ ch = 0 ]) ifTrue: [ ^Array with: 1 with: 1 ].
+        ^Array
+            with: ((((rect at: 3) - (rect at: 1)) // cw) max: 1)
+            with: ((((rect at: 4) - (rect at: 2)) // ch) max: 1)
+    ]
+
+    fillInto: cols <Integer> rows: rows <Integer> at: base <Integer> [
+        "Walk the tokenizer's runs once and write a cell per character. The
+         only thing this side does: no pixel, no font, no device."
+        | t runs lineIndex col sel lo hi cc |
+        WinRender clear: hwnd to: 16r000000 on: 16rFFFFFF.
+        t := self text.
+        sel := self selection.
+        lo := sel at: 1.
+        hi := lo + (sel at: 2).
+        lineIndex := 0.
+        col := 0.
+        runs := t isEmpty ifTrue: [ #() ] ifFalse: [ WinSyntax runsFor: t ].
+        runs do: [ :r |
+            | s e i colour |
+            s := r at: 1.
+            e := s + (r at: 2) - 1.
+            colour := WinSyntax colorFor: (r at: 3).
+            i := s.
+            [ i <= e ] whileTrue: [
+                (t at: i) = Character nl
+                    ifTrue: [ lineIndex := lineIndex + 1. col := 0 ]
+                    ifFalse: [
+                        (lineIndex < rows and: [ col < cols ]) ifTrue: [
+                            WinRender at: base col: col row: lineIndex cols: cols
+                                put: (t at: i) asInteger
+                                fg: colour
+                                bg: ((i >= lo and: [ i < hi ])
+                                    ifTrue: [ 16rF0D8A8 ] ifFalse: [ 16rFFFFFF ]) ].
+                        col := col + 1 ].
+                i := i + 1 ] ].
+        "The caret, swapped to (col, row) — `lineColOf:` answers (line, col)
+         and the seam takes them the other way round."
+        cc := self lineColOf: self caret.
+        WinRender caretFor: hwnd
+            col: (cc at: 2) row: (cc at: 1)
+            visible: ((cc at: 1) < rows and: [ (cc at: 2) < cols ]).
+        ^self
+    ]
+]

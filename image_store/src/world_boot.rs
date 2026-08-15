@@ -361,11 +361,17 @@ mod tests {
         // the blank-editors bug.
         let (image, path) = seed_image();
         let mut vm = VmHandle::boot_without_world(opts());
-        let doits = ["Transcript := TranscriptStream new.", "Character initTable."];
+        let doits = [
+            "Transcript := TranscriptStream new.",
+            "Character initTable.",
+        ];
         let result = load_world_from_image(&mut vm, &image, &["world"], &doits);
         std::fs::remove_file(&path).ok();
         match result {
-            Ok(stats) => assert!(stats.classes >= 40, "expected the whole world, got {stats:?}"),
+            Ok(stats) => assert!(
+                stats.classes >= 40,
+                "expected the whole world, got {stats:?}"
+            ),
             Err(e) => panic!("world image failed to install: {e}"),
         }
     }
