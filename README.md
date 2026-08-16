@@ -16,14 +16,15 @@ each divergence marked and explained in place.
 
 **Status: the port is complete — P0 through P5 — and Phase WG's native
 environment is built on top of it.** The in-language world suite runs
-**17,795 assertions, 0 failed**. The Rust suite runs **1,091 passed / 4
-failed / 13 ignored** in release, and the four are named rather than
-rounded off: three `it_tier1` fixtures compile an nmethod for a selector
-they never installed in the synthetic test universe's method dictionary,
-which the super-send rule below now correctly declines to key — the
-fixtures predate it and were missed when their siblings were updated; the
-fourth is order-dependent in `it_world`, which passes 11/11 when that
-binary runs on its own. Neither is a VM defect, and both are open.
+**17,795 assertions, 0 failed**. The Rust suite runs **1,094 passed / 3
+failed / 14 ignored** in release, and the three are named rather than
+rounded off: they are `it_tier1` fixtures that compile an nmethod for a
+selector they never installed in the synthetic test universe's method
+dictionary, which the super-send rule below now correctly declines to key —
+the fixtures predate it and were missed when their siblings were updated.
+Not a VM defect, and open. One further case in `it_world` fails
+intermittently under full-sweep load only; it passes 11/11 whenever that
+binary runs on its own, and it predates the fixes below.
 
 JIT, uncommon traps, deopt, guest-fatal recovery, moving GC under compiled
 frames, the FFI resolver, and the live-HTML programming environment all
@@ -41,13 +42,16 @@ dispatched `^self basicNew` and never ran `initLayout`. An nmethod now
 declares whether it `owns_dynamic_key`; a non-owning one stays reachable
 through its call site's direct id link and simply never answers lookup.
 
-The 13 ignored gates are not port debt. Ten are two scoped slices of new
+The 14 ignored gates are not port debt. Ten are two scoped slices of new
 work — `kqueue`-shaped readiness (`IoWorker` needs an IOCP or WSAPoll
 backend) and the winsock lifecycle, both named in
 [`docs/sprints/sprint_p05_detail.md`](docs/sprints/sprint_p05_detail.md).
-The other three are `subfloor_probe`, deliberately out of contract: below
-the JIT's supported threshold the suite is asked to **survive**, not to be
-correct, so those probes assert the former and ignore the latter.
+Three are `subfloor_probe`, deliberately out of contract: below the JIT's
+supported threshold the suite is asked to **survive**, not to be correct,
+so those probes assert the former and ignore the latter. The last is
+`boot_profile`, a measurement rather than an assertion — run it explicitly
+alongside `MACVM_BOOT_TIMING=1`, which reports boot as parse 33.7%, methods
+27.8% over 2,836 compiles, and 332 class shapes.
 
 **[Phase WG](docs/win_gui_design.md) — WG0 through WG14 have landed:** a
 Windows-native environment *written in Smalltalk*, the way the Mac one is.
