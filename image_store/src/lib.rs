@@ -704,9 +704,7 @@ impl Image {
                                     AND mv.version_number = l.v \
              WHERE mv.deleted = 0 ORDER BY m.method_id",
         )?;
-        let rows = stmt.query_map([], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
-        })?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
         for row in rows {
             let (class_id, source) = row?;
             if let Some(name) = wanted.get(&class_id) {

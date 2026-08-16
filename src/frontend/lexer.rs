@@ -506,7 +506,7 @@ impl<'a> Lexer<'a> {
                 let mut text = String::new();
                 loop {
                     let part = self.consume_while(Self::is_ident_cont);
-                    text.push_str(&part);
+                    text.push_str(part);
                     if self.peek_char() == Some(':') {
                         self.bump();
                         text.push(':');

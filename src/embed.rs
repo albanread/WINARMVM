@@ -618,7 +618,6 @@ pub(crate) fn screen_memory() -> Option<(*mut u8, usize, usize)> {
     ))
 }
 
-
 // ── WG11-W8: the text plane (upstream SM1) ──────────────────────────────────
 //
 // A cell grid the guest writes STORES into, not commands: `cols * rows` cells
@@ -661,7 +660,6 @@ pub(crate) fn text_memory() -> Option<(*mut u8, usize, usize)> {
         TEXT_ROWS.load(Ordering::Relaxed),
     ))
 }
-
 
 // ── WG11-W9: the palette as memory (upstream SM4) ───────────────────────────
 //
@@ -1265,7 +1263,8 @@ impl VmHandle {
         self.snapshot_idle_baseline();
         let items = frontend::parser::parse_file(source).map_err(GuestError::Compile)?;
         for item in items {
-            frontend::classdef::execute_top_item(&mut self.vm, item).map_err(GuestError::Compile)?;
+            frontend::classdef::execute_top_item(&mut self.vm, item)
+                .map_err(GuestError::Compile)?;
             if self.vm.exit_requested {
                 break;
             }
@@ -2747,7 +2746,8 @@ mod tests {
         );
         // And a perform: must behave identically — this is the bug.
         assert_eq!(
-            vm.eval("NlrProbe trace: [ NlrProbe new perform: #boom ].").unwrap(),
+            vm.eval("NlrProbe trace: [ NlrProbe new perform: #boom ].")
+                .unwrap(),
             "'OrderedCollection (#handler )'",
             "an unwind must cross a perform: frame, not stop at it"
         );
@@ -2763,7 +2763,8 @@ mod tests {
         // A perform: that does NOT unwind must still answer normally — the
         // relay must not intercept ordinary returns.
         assert_eq!(
-            vm.eval("3 perform: #+ withArguments: (Array with: 4).").unwrap(),
+            vm.eval("3 perform: #+ withArguments: (Array with: 4).")
+                .unwrap(),
             "7",
             "an ordinary perform: must still answer its value"
         );

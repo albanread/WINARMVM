@@ -4521,12 +4521,8 @@ fn relay_reentrant_nlr(vm: &mut VmState, result: Oop) -> PrimResult {
         // certainly wrong, so say so rather than propagate a bogus oop.
         panic!("relay_reentrant_nlr: NLR sentinel with no parked nlr_state");
     };
-    let step = crate::interpreter::unwind::continue_unwind(
-        vm,
-        state.home,
-        state.value,
-        state.closure,
-    );
+    let step =
+        crate::interpreter::unwind::continue_unwind(vm, state.home, state.value, state.closure);
     PrimResult::Nlr(step)
 }
 

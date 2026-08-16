@@ -227,22 +227,16 @@ impl Assembler for JasmAssembler {
 
     fn tbz(&mut self, r: Reg, bit: u8, l: Label) {
         let word = tbz_base(r, bit, false);
-        self.queue_branch(
-            word,
-            l,
-            BranchKind::B14,
-            || format!("tbz {r:?} #{bit} L{}", l.0),
-        );
+        self.queue_branch(word, l, BranchKind::B14, || {
+            format!("tbz {r:?} #{bit} L{}", l.0)
+        });
     }
 
     fn tbnz(&mut self, r: Reg, bit: u8, l: Label) {
         let word = tbz_base(r, bit, true);
-        self.queue_branch(
-            word,
-            l,
-            BranchKind::B14,
-            || format!("tbnz {r:?} #{bit} L{}", l.0),
-        );
+        self.queue_branch(word, l, BranchKind::B14, || {
+            format!("tbnz {r:?} #{bit} L{}", l.0)
+        });
     }
 
     fn literal_u64(&mut self, v: u64, kind: Option<RelocKind>) -> LiteralId {

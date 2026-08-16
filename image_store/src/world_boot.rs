@@ -149,7 +149,10 @@ pub fn load_world_from_image(
     let mut mark = std::time::Instant::now();
     let mut step = |label: &str, mark: &mut std::time::Instant| {
         if dbg {
-            eprintln!("[db-step] {label}: {:.1} ms", mark.elapsed().as_nanos() as f64 / 1e6);
+            eprintln!(
+                "[db-step] {label}: {:.1} ms",
+                mark.elapsed().as_nanos() as f64 / 1e6
+            );
         }
         *mark = std::time::Instant::now();
     };
@@ -176,7 +179,11 @@ pub fn load_world_from_image(
     }
     impl Blob {
         fn new() -> Blob {
-            Blob { src: String::new(), index: Vec::new(), line: 1 }
+            Blob {
+                src: String::new(),
+                index: Vec::new(),
+                line: 1,
+            }
         }
         fn push(&mut self, name: &str, chunk: &str) {
             self.index.push((self.line, name.to_string()));
