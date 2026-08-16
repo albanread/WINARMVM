@@ -153,6 +153,23 @@ comparison (the M4 leads six rows at 1.4–1.8×; Oryon takes alloc, and the
 GUI's NEON Mandelbrot tile), and every measurement caveat live in
 [`docs/PERF.md`](docs/PERF.md).
 
+Those rows are the **JIT's**. The bytecode interpreter is a separate axis and
+moved on 2026-08-16, by porting upstream's accessor-inlining and boot work
+(`6622bc3`, `8771484`, `add5c86`, `e6b42b3`) — the accessors on the hot path
+had never actually been inlined. Under `MACVM_JIT=off`, median of three on
+this machine:
+
+| bench | before | after | |
+|---|---:|---:|---|
+| dispatch (send-heavy) | 1,953 ms | 1,588 ms | **18.7 %** |
+| fib | 215 ms | 188 ms | 12.6 % |
+| sieve | 243 ms | 214 ms | 11.9 % |
+
+The interpreter commit alone accounts for 13.8 % of the dispatch figure,
+measured on its own before the rest went in. `MACVM_BOOT_TIMING=1` reports
+the boot those changes were designed against: 45.1 ms total — parse 33.7 %,
+methods 27.8 % over 2,836 compiles, 332 class shapes.
+
 ### Building & running on Windows
 
 Requirements: Windows 11 ARM64; Visual Studio ARM64 C++ build tools +
@@ -177,7 +194,8 @@ them explicitly with `-p`. `winui_host` drops `winui_host.dll` beside
 
 Env flags are unchanged from MACVM (`MACVM_JIT=off|threshold=N` — the
 threshold never goes below 20, rule 1; `MACVM_TRACE=…`, `MACVM_GC_STRESS=…`),
-plus `MACVM_WINUI_CTL` to arm the window's scripting channel.
+plus `MACVM_WINUI_CTL` to arm the window's scripting channel and
+`MACVM_BOOT_TIMING=1` for the boot phase breakdown.
 Gates: `just gate-p00` … `gate-p05` are the port ladder and `just gate-wg0`
 … `gate-wg9` the environment's, each driving the real window and checking
 captured pixels; `just diff-p03` is the JIT-vs-interpreter differential
@@ -186,6 +204,12 @@ captured pixels; `just diff-p03` is the JIT-vs-interpreter differential
 [`docs/winui-cookbook.md`](docs/winui-cookbook.md) against a live window,
 so the prose cannot rot silently.
 
+One caveat on `just lint`: its `cargo fmt --check` half currently fails, and
+not on the VM. The GUI crates and `tests/knob_matrix.rs` have drifted out of
+rustfmt — 56 diffs across 14 files, none of them under `src/`. Clippy and
+the VM's own formatting are clean; that reformat is its own commit and has
+not been taken hostage by a functional change.
+
 ### The three repos
 
 | repo | platform | role |
@@ -193,6 +217,26 @@ so the prose cannot rot silently.
 | [MACVM](https://github.com/albanread/MACVM) | macOS / Apple Silicon | the original; `upstream` remote — portable fixes cherry-pick both ways. Two compiler fixes found here are upstream by name (`545cde4`, `0ca505e`), and MACVM has since adopted **this repo's declarative UI** as its own app portability layer, citing the measurement that WG14's sprite editor carries zero Win32 — its `AppSpec` sprints run the Windows sprite and sound editors on Cocoa, unedited |
 | [WINVM](https://github.com/albanread/WINVM) | Windows / x86-64 | the first Windows port; its `MIGRATION.md` playbook seeded this one's OS layer |
 | **WINARMVM** (this repo) | **Windows / ARM64** | the Windows compiler grown from the MACVM seed |
+
+Traffic runs the other way too. Ported **in** on 2026-08-16: upstream's
+whole-method **GC-map rule** — every nil-filled oop slot claimed at *every*
+safepoint, which retires a whole class of path-shaped staleness bugs instead
+of patching one more path (upstream had patched four, the last one aborting
+its canvas benchmark) — plus an unwind that must cross a `perform:` and a
+doit frame, a dissolved local that a nested block captures, the zero-arg
+`whileTrue`/`whileFalse` loop forms, and the interpreter/boot set measured
+above. Two of those were silent wrong answers, and both are worse here than
+upstream reported them: the doit one sits behind the Workspace's Do It
+button, and the capture one ends in a **fatal guest error** on this port
+where MACVM saw only a `nil` DNU.
+
+Not everything upstream lands is taken, and the `super`-send bug is the
+example worth keeping. Both repos found it; the fixes differ. MACVM declines
+to compile a method reached only through `super`, leaving it interpreted.
+This port compiles it and marks the nmethod as not owning its dynamic key,
+so it stays reachable through its call site's direct id link and only ever
+skips `CodeTable::lookup` — same bug closed, JIT benefit kept. That
+divergence is deliberate and is not scheduled to converge.
 
 ### Not ported (yet), by design
 
